@@ -10,8 +10,10 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
 if (-not ("WordPageCaptureNative" -as [type])) {
-    Add-Type @"
+    Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @"
 using System;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
 public static class WordPageCaptureNative
@@ -43,6 +45,65 @@ public static class WordPageCaptureNative
         int height,
         bool repaint
     );
+
+    public static int FindLastBrightPageTop(Bitmap bitmap, int minimumRunHeight)
+    {
+        Rectangle rectangle = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
+        BitmapData data = bitmap.LockBits(
+            rectangle,
+            ImageLockMode.ReadOnly,
+            PixelFormat.Format32bppArgb
+        );
+        try
+        {
+            int bytes = Math.Abs(data.Stride) * data.Height;
+            byte[] buffer = new byte[bytes];
+            Marshal.Copy(data.Scan0, buffer, 0, bytes);
+            bool[] candidate = new bool[data.Height];
+            for (int y = 110; y < data.Height; y++)
+            {
+                int brightPixels = 0;
+                int row = y * data.Stride;
+                for (int x = 0; x < data.Width; x += 2)
+                {
+                    int offset = row + x * 4;
+                    if (
+                        buffer[offset] > 235 &&
+                        buffer[offset + 1] > 235 &&
+                        buffer[offset + 2] > 235
+                    )
+                    {
+                        brightPixels++;
+                    }
+                }
+                candidate[y] = brightPixels > 25;
+            }
+
+            int lastTop = -1;
+            int runStart = -1;
+            for (int y = 110; y <= data.Height; y++)
+            {
+                bool value = y < data.Height && candidate[y];
+                if (value && runStart < 0)
+                {
+                    runStart = y;
+                }
+                else if (!value && runStart >= 0)
+                {
+                    if (y - runStart >= minimumRunHeight)
+                    {
+                        lastTop = runStart;
+                    }
+                    runStart = -1;
+                }
+            }
+            return lastTop;
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
+        }
+    }
 }
 "@
 }
@@ -90,7 +151,34 @@ try {
         }
         $window.View.Zoom.PageFit = 0
         $window.View.Zoom.Percentage = 48
+        $window.ScrollIntoView($pageRange, $true)
         Start-Sleep -Milliseconds 350
+
+        $probeRect = New-Object WordPageCaptureNative+RECT
+        if (-not [WordPageCaptureNative]::GetWindowRect($handle, [ref]$probeRect)) {
+            throw "Could not read the Word window rectangle for page $page."
+        }
+        $probeWidth = $probeRect.Right - $probeRect.Left
+        $probeHeight = $probeRect.Bottom - $probeRect.Top
+        $probeBitmap = New-Object System.Drawing.Bitmap($probeWidth, $probeHeight)
+        $probeGraphics = [System.Drawing.Graphics]::FromImage($probeBitmap)
+        $probeDeviceContext = $probeGraphics.GetHdc()
+        try {
+            if (-not [WordPageCaptureNative]::PrintWindow($handle, $probeDeviceContext, 2)) {
+                throw "PrintWindow probe failed for page $page."
+            }
+        }
+        finally {
+            $probeGraphics.ReleaseHdc($probeDeviceContext)
+            $probeGraphics.Dispose()
+        }
+        $pageTop = [WordPageCaptureNative]::FindLastBrightPageTop($probeBitmap, 120)
+        $probeBitmap.Dispose()
+        if ($pageTop -gt 150) {
+            $scrollLines = [Math]::Max(1, [Math]::Ceiling(($pageTop - 140) / 9.0))
+            $window.SmallScroll([int]$scrollLines, 0, 0, 0)
+            Start-Sleep -Milliseconds 250
+        }
 
         $rect = New-Object WordPageCaptureNative+RECT
         if (-not [WordPageCaptureNative]::GetWindowRect($handle, [ref]$rect)) {
