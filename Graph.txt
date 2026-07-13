@@ -1,0 +1,88 @@
+1. Hướng tiếp cận theo Cấu trúc & Liên kết Văn bản Pháp luật (Document Hierarchy)
+Hướng này tập trung vào việc mô hình hóa cấu trúc hình học của văn bản luật. Rất mạnh trong việc tra cứu chính xác căn cứ pháp lý gốc và giải quyết các câu hỏi dạng "Theo quy định nào...".
+Entities / Nodes:
+VănBản: Bộ luật Lao động 2019, Luật BHXH 2024, Nghị định 145/2020/NĐ-CP...
+Chương / Mục: Chương VII (Kỷ luật lao động, trách nhiệm vật chất).
+Điều: Điều 36 (Quyền đơn phương chấm dứt hợp đồng lao động của người sử dụng lao động).
+Khoản / Điểm: Khoản 1, Điểm a.
+CơQuanBanHành: Quốc hội, Chính phủ, Bộ LĐ-TB&XH.
+Edges (Quan hệ):
+THUỘC_VỀ: [Khoản 1] $\rightarrow$ [Điều 36] $\rightarrow$ [Chương III] $\rightarrow$ [Bộ luật Lao động 2019].
+HƯỚNG_DẪN: [Nghị định 145/2020/NĐ-CP] $\rightarrow$ [Bộ luật Lao động 2019].
+DẪN_CHIẾU_ĐẾN: [Khoản 2 Điều 36] $\rightarrow$ [Điều 116] (Giúp GraphRAG không bị đứt gãy ngữ cảnh khi một điều luật yêu cầu "xem thêm tại Điều X").
+THAY_THẾ / SỬA_ĐỔI: [Luật BHXH 2024] $\rightarrow$ [Luật BHXH 2014].
+2. Hướng tiếp cận theo Tình huống thực tế & Thực thể Quan hệ Lao động (Domain Ontology)
+Hướng này mô hình hóa thế giới thực của doanh nghiệp. Nó đóng vai trò làm "cầu nối" (mapping) từ ngôn ngữ đời sống của người lao động sang ngôn ngữ pháp lý của hệ thống.
+Entities / Nodes:
+ChủThể: Người lao động (NLĐ), Người sử dụng lao động (NSDLĐ), Công đoàn cơ sở, Thanh tra lao động.
+HợpĐồngLaoĐộng: Không xác định thời hạn, Xác định thời hạn, Thử việc.
+HànhVi_SựKiện: Đi muộn, Tự ý nghỉ việc, Thai sản, Tai nạn lao động, Khấu trừ lương, Sa thải.
+ChếĐộ_QuyềnLợi: Lương tăng ca, Trợ cấp thôi việc, Bồi thường tai nạn.
+Edges (Quan hệ):
+KÝ_KẾT: [NLĐ] $\rightarrow$ [HợpĐồngLaoĐộng] $\leftarrow$ [NSDLĐ].
+THỰC_HIỆN: [NSDLĐ] $\rightarrow$ [HànhVi_SựKiện: Khấu trừ lương].
+CÓ_QUYỀN_HƯỞNG: [NLĐ] $\rightarrow$ [ChếĐộ_QuyềnLợi: Trợ cấp thôi việc].
+BỊ_NẰM_TRONG_DANH_MỤC_CẤM: [HànhVi: Sa thải lao động mang thai] $\rightarrow$ [Điều 137].
+3. Hướng tiếp cận theo Quy trình & Thủ tục Hành chính (Process-Oriented)
+Mảng Bảo hiểm xã hội và Công đoàn cực kỳ nặng về thủ tục (nhận BHXH 1 lần, rút chế độ thai sản, thất nghiệp). Hướng này tối ưu cho câu hỏi dạng "Làm thế nào để..." hoặc "Hồ sơ gồm những gì...".
+Entities / Nodes:
+ThủTục_ChếĐộ: Rút BHXH một lần, Nhận trợ cấp thất nghiệp, Giải quyết tranh chấp lao động.
+HồSơ_GiấyTờ: Sổ BHXH, Căn cước công dân, Quyết định thôi việc, Bản chính Mẫu số 14-HSB.
+ĐiềuKiện: Đóng đủ 12 tháng, Nghỉ việc đủ 1 năm và không tiếp tục đóng.
+CơQuanGiảiQuyết: Cơ quan BHXH Quận/Huyện, Trung tâm Dịch vụ Việc làm.
+ThờiHạn_ThờiGian: Trong vòng 3 tháng, 5 ngày làm việc.
+Edges (Quan hệ):
+YÊU_CẦU_ĐIỀU_KIỆN: [ThủTục] $\rightarrow$ [ĐiềuKiện].
+BAO_GỒM_HỒ_SƠ: [ThủTục] $\rightarrow$ [HồSơ_GiấyTờ].
+NỘP_TẠI: [ThủTục] $\rightarrow$ [CơQuanGiảiQuyết].
+CÓ_THỜI_HẠN_LÀ: [Bước xử lý] $\rightarrow$ [ThờiHạn_ThờiGian].
+4. Hướng tiếp cận theo Thuật ngữ & Định nghĩa Pháp lý (Legal Semantic Spectrum)
+Để giải quyết các bài toán suy luận phức tạp, LLM cần hiểu sâu sắc các khái niệm định lượng và định tính mang tính đặc thù ngành luật để tránh nhầm lẫn giữa "ngôn ngữ dân gian" và "ngôn ngữ pháp lý".
+Entities / Nodes:
+ThuậtNgữ: Lương tối thiểu vùng, Lương cơ sở, Thời giờ làm thêm, Tiền lương làm căn cứ đóng BHXH.
+CáchTính_CôngThức: Công thức tính trợ cấp thôi việc, Công thức tính lương làm thêm giờ vào ngày lễ.
+ThamSố_ConSố: 150%, 200%, 300%, 20 năm, mức lương tối thiểu vùng I, II, III, IV.
+Edges (Quan hệ):
+ĐƯỢC_ĐỊNH_NGHĨA_LÀ: [ThuậtNgữ] $\rightarrow$ [Mô tả/Văn bản định nghĩa].
+ÁP_DỤNG_CHO: [CáchTính] $\rightarrow$ [HànhVi/ChủThể tương ứng].
+CÓ_THAM_SỐ: [CáchTính lương lễ tết] $\rightarrow$ [ThamSố: 300%].
+
+5. Hướng tiếp cận theo Án lệ & Thực tế xét xử (Precedent & Case-Based Reasoning)
+Luật viết một đường, nhưng thực tế áp dụng tại Tòa án đôi khi rất linh hoạt. Hướng này cực kỳ giá trị cho các luật sư hoặc bộ phận HR khi cần đánh giá tỷ lệ thắng/thua nếu xảy ra tranh chấp lao động công ty.
+Entities / Nodes:
+ÁnLệ: Án lệ số 09/2016/AL (về tranh chấp học nghề), Án lệ số 50/2021/AL...
+BảnÁnMẫu: Các bản án thực tế của Tòa án tối cao hoặc Tòa địa phương về sa thải, nợ lương.
+TìnhTiếtCốtLõi: NLĐ tự ý bỏ việc, NSDLĐ không thông báo trước đủ số ngày, lý do bất khả kháng.
+PhánQuyết: Chấp nhận yêu cầu khởi kiện, Bồi thường X tháng lương, Nhận trở lại làm việc.
+Edges (Quan hệ):
+ÁP_DỤNG_ĐIỀU_LUẬT: [ÁnLệ] $\rightarrow$ [Điều 36 BLLĐ].
+CÓ_TÌNH_TIẾT_TƯƠNG_TỰ: [Tình huống của User] $\rightarrow$ [TìnhTiếtCốtLõi trong Án lệ 50].
+DẪN_ĐẾN_PHÁN_QUYẾT: [TìnhTiết: Sa thải không họp công đoàn] $\rightarrow$ [PhánQuyết: Thua kiện/Bồi thường].
+6. Hướng tiếp cận theo Vòng đời Người lao động & Doanh nghiệp (Lifecycle-Based)
+Thay vì bắt người dùng phải tự nghĩ ra tình huống, đồ thị này mô hình hóa toàn bộ "hành trình" từ lúc vào đến lúc ra của một cá nhân/tổ chức. Hướng này giúp chatbot tự động "gợi ý" các câu hỏi tiếp theo mà người dùng chưa kịp nghĩ tới.
+Entities / Nodes:
+GiaiĐoạn_NLĐ: Tuyển dụng $\rightarrow$ Thử việc $\rightarrow$ Ký HĐLĐ lần 1 $\rightarrow$ Thai sản/Ốm đau $\rightarrow$ Nghỉ hưu.
+GiaiĐoạn_DoanhNghiệp: Thành lập $\rightarrow$ Khai báo sử dụng lao động $\rightarrow$ Thang bảng lương $\rightarrow$ Thanh tra $\rightarrow$ Giải thể/Phá sản.
+NghĩaVụ_ThờiĐiểm: Đóng BHXH trước ngày 30 hàng tháng, Báo cáo tình hình sử dụng lao động định kỳ.
+Edges (Quan hệ):
+GIAI_ĐOẠN_TIẾP_THEO: [Thử việc] $\rightarrow$ [Ký HĐLĐ chính thức].
+KÍCH_HOẠT_NGHĨA_VỤ: Khi chuyển sang [Ký HĐLĐ chính thức] $\rightarrow$ [Phải đóng BHXH bắt buộc].
+7. Hướng tiếp cận theo Tuân thủ & Quản trị Rủi ro (Compliance & Risk Matrix)
+Nếu bạn định thương mại hóa VlegalAI LaborCare bán cho các phòng HR của Doanh nghiệp (B2B), đây là hướng "hái ra tiền". Nó chuyển hóa luật thành các thang đo rủi ro để doanh nghiệp tự audit (kiểm toán) chính mình.
+Entities / Nodes:
+HànhViDoanhNghiệp: Không tổ chức đối thoại định kỳ, Ký hợp đồng thử việc 3 lần.
+MứcĐộRủiRo: Thấp (Nhắc nhở), Vừa (Phạt hành chính), Nghiêm trọng (Đình chỉ/Kiện tụng).
+BiệnPhápKhắcPhục: Ban hành quy chế đối thoại, Ký phụ lục hợp đồng.
+Edges (Quan hệ):
+GÂY_RA_RỦI_RO: [Ký thử việc 3 lần] $\rightarrow$ [MứcĐộRủiRo: Nghiêm trọng].
+KHẮC_PHỤC_BẰNG: [MứcĐộRủiRo] $\rightarrow$ [BiệnPhápKhắcPhục].
+8. Hướng tiếp cận theo Logic Thời gian & Thời hiệu (Temporal & State Transition)
+Pháp luật lao động và BHXH bị chi phối cực nặng bởi các con số thời gian (thời hiệu khởi kiện, thời hạn báo trước, thời gian hưởng chế độ). Hướng này biến đồ thị thành một máy tính logic để tính toán chính xác "hạn chót" (Deadline).
+Entities / Nodes:
+SựKiệnKíchHoạt: Ngày nhận quyết định thôi việc, Ngày sinh con, Ngày bị tai nạn.
+MốcThờiGian_LuậtĐịnh: 30 ngày, 45 ngày, 1 năm.
+TrạngTháiPhápLý: Còn thời hiệu khởi kiện, Quá hạn nộp hồ sơ.
+Edges (Quan hệ):
+BẮT_ĐẦU_TÍNH_THỜI_HIỆU: [Ngày nhận quyết định thôi việc] $\rightarrow$ [MốcThờiGian: 1 năm để khởi kiện].
+CHUYỂN_TRẠNG_THÁI: Nếu [Thời gian thực tế] > [MốcThờiGian] $\rightarrow$ [TrạngThái: Quá hạn].
+

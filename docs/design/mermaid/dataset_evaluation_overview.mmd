@@ -1,0 +1,29 @@
+erDiagram
+    direction LR
+    DATASET_VERSION {
+        uuid dataset_version_id PK
+        string dataset_status
+    }
+    DATA_SPLIT {
+        uuid split_id PK
+        string split_name
+        bool is_frozen
+    }
+    EVAL_CASE { uuid eval_case_id PK }
+    GROUND_TRUTH_EVIDENCE { uuid ground_truth_id PK }
+    ANNOTATION_REVIEW { uuid annotation_review_id PK }
+    EXPERIMENT_RUN {
+        uuid run_id PK
+        string retrieval_mode
+    }
+    CASE_RESULT { uuid case_result_id PK }
+    CASE_RETRIEVAL { uuid case_retrieval_id PK }
+
+    DATASET_VERSION ||--|{ DATA_SPLIT : partitions
+    DATA_SPLIT ||--o{ EVAL_CASE : contains
+    EVAL_CASE ||--o{ GROUND_TRUTH_EVIDENCE : expects
+    EVAL_CASE ||--o{ ANNOTATION_REVIEW : verified_by
+    DATASET_VERSION ||--o{ EXPERIMENT_RUN : evaluates_on
+    EXPERIMENT_RUN ||--o{ CASE_RESULT : produces
+    EVAL_CASE ||--o{ CASE_RESULT : evaluated_as
+    CASE_RESULT ||--o{ CASE_RETRIEVAL : retrieves

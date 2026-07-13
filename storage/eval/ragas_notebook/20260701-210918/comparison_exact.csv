@@ -1,0 +1,3 @@
+﻿backend,canonical_backend,response_mode,top_k,prepare_error_count,sample_count,exact_hit_rate,exact_precision,exact_recall,exact_mrr,avg_latency_seconds
+rag,qdrant,generate,10,0,1000,0.57,0.0643,0.515,0.4042853174603175,7.8148501999999995
+graphrag,neo4j,generate,10,0,1000,0.246,0.0256,0.2325,0.17226785714285714,5.7641552

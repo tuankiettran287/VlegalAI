@@ -1,0 +1,38 @@
+erDiagram
+    ISSUING_AUTHORITY { uuid authority_id PK }
+    LEGAL_DOCUMENT { uuid document_id PK }
+    DOCUMENT_VERSION { uuid document_version_id PK }
+    VERSION_EFFECT { uuid version_effect_id PK }
+    KNOWLEDGE_LAYER { int layer_id PK }
+    INDEX_VERSION { uuid index_version_id PK }
+    INDEX_DOCUMENT { uuid index_document_id PK }
+    KNOWLEDGE_NODE { uuid node_id PK }
+    KNOWLEDGE_RELATION { uuid relation_id PK }
+    TEXT_CHUNK { uuid chunk_id PK }
+    RELATION_EVIDENCE { uuid relation_evidence_id PK }
+    MODEL_VERSION { uuid model_version_id PK }
+    CHUNK_EMBEDDING { uuid embedding_id PK }
+    INDEX_MATERIALIZATION { uuid materialization_id PK }
+
+    ISSUING_AUTHORITY ||--o{ LEGAL_DOCUMENT : issues
+    LEGAL_DOCUMENT ||--|{ DOCUMENT_VERSION : versions
+    DOCUMENT_VERSION ||--o{ VERSION_EFFECT : source
+    DOCUMENT_VERSION ||--o{ VERSION_EFFECT : target
+    INDEX_VERSION ||--|{ INDEX_DOCUMENT : includes
+    DOCUMENT_VERSION ||--o{ INDEX_DOCUMENT : indexed_as
+    KNOWLEDGE_LAYER ||--o{ KNOWLEDGE_NODE : classifies
+    INDEX_VERSION ||--o{ KNOWLEDGE_NODE : derives
+    DOCUMENT_VERSION o|--o{ KNOWLEDGE_NODE : grounds
+    KNOWLEDGE_NODE o|--o{ KNOWLEDGE_NODE : parent_of
+    INDEX_VERSION ||--o{ KNOWLEDGE_RELATION : contains
+    KNOWLEDGE_NODE ||--o{ KNOWLEDGE_RELATION : source
+    KNOWLEDGE_NODE ||--o{ KNOWLEDGE_RELATION : target
+    INDEX_VERSION ||--o{ TEXT_CHUNK : contains
+    DOCUMENT_VERSION ||--o{ TEXT_CHUNK : supplies
+    KNOWLEDGE_NODE ||--o{ TEXT_CHUNK : chunked_into
+    KNOWLEDGE_RELATION ||--o{ RELATION_EVIDENCE : supported_by
+    TEXT_CHUNK ||--o{ RELATION_EVIDENCE : provides
+    TEXT_CHUNK ||--o{ CHUNK_EMBEDDING : embedded_as
+    MODEL_VERSION ||--o{ CHUNK_EMBEDDING : produces
+    INDEX_VERSION ||--o{ CHUNK_EMBEDDING : snapshots
+    INDEX_VERSION ||--|{ INDEX_MATERIALIZATION : deployed_as

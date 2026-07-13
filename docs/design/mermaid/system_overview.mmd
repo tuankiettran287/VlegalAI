@@ -1,0 +1,55 @@
+%%{init: {"themeVariables": {"fontSize": "26px"}}}%%
+flowchart TB
+    USER["Người dùng"] --> WEB["React + TypeScript"] -->|"REST /api/*"| API["FastAPI"]
+    API --> POLICY["Mode policy: RAG | GRAPHRAG | HYBRID_RAG"]
+
+    subgraph MODES["Ba mode"]
+        direction LR
+        RAG_ONLY["RAG"]
+        GRAPH_ONLY["GraphRAG"]
+        HYBRID["HybridRAG coordinator"]
+    end
+    POLICY --> RAG_ONLY
+    POLICY --> GRAPH_ONLY
+    POLICY --> HYBRID
+
+    subgraph BRANCHES["Hai nhánh"]
+        direction LR
+        RAG_BRANCH["RAG branch\nvector retrieval"]
+        GRAPH_BRANCH["GraphRAG branch\ngraph retrieval + expansion"]
+    end
+    RAG_ONLY --> RAG_BRANCH
+    GRAPH_ONLY --> GRAPH_BRANCH
+    HYBRID -->|"branch 1"| RAG_BRANCH
+    HYBRID -->|"branch 2"| GRAPH_BRANCH
+
+    subgraph STORES["Cùng index version"]
+        direction LR
+        QDRANT[("Qdrant\nchunk vectors")]
+        NEO4J[("Neo4j\n8-layer legal graph")]
+    end
+    RAG_BRANCH --> QDRANT
+    GRAPH_BRANCH --> NEO4J
+
+    subgraph RESULTS["Xếp hạng"]
+        direction LR
+        SINGLE["Single-mode final ranking"]
+        FUSION["Hybrid fusion\nRAG + GraphRAG only"]
+    end
+    QDRANT --> SINGLE
+    NEO4J --> SINGLE
+    QDRANT --> FUSION
+    NEO4J --> FUSION
+
+    SINGLE --> CONTEXT["Grounded context + citations"]
+    FUSION --> CONTEXT
+    CONTEXT --> DEEPSEEK["DeepSeek-R1-Distill-Qwen-7B"] --> ANSWER["Answer / draft / review"]
+
+    NOTE["SQLite chỉ là staging/build artifact; không phải runtime mode"]
+
+    classDef primary fill:#E8F1FB,stroke:#2E74B5,color:#172033,stroke-width:2px;
+    classDef data fill:#F8FAFC,stroke:#64748B,color:#172033;
+    classDef accent fill:#EEF2FF,stroke:#4F46E5,color:#172033,stroke-width:2px;
+    class HYBRID,FUSION,DEEPSEEK accent;
+    class POLICY,RAG_BRANCH,GRAPH_BRANCH,CONTEXT primary;
+    class QDRANT,NEO4J,NOTE data;

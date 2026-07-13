@@ -1,0 +1,38 @@
+erDiagram
+    EXPERIMENT { uuid experiment_id PK }
+    DATASET_VERSION { uuid dataset_version_id PK }
+    INDEX_VERSION { uuid index_version_id PK }
+    PROMPT_VERSION { uuid prompt_version_id PK }
+    MODEL_VERSION {
+        uuid model_version_id PK
+        string model_name
+        string parameter_scale
+    }
+    EXPERIMENT_RUN {
+        uuid run_id PK
+        string retrieval_mode
+        string git_sha
+    }
+    RUN_MODEL_BINDING { uuid run_model_binding_id PK }
+    CASE_RESULT { uuid case_result_id PK }
+    METRIC_DEFINITION { uuid metric_id PK }
+    METRIC_OBSERVATION { uuid observation_id PK }
+    ERROR_CASE { uuid error_case_id PK }
+    RUN_COMPARISON { uuid comparison_id PK }
+    RUN_ARTIFACT { uuid artifact_id PK }
+
+    EXPERIMENT ||--|{ EXPERIMENT_RUN : executes
+    DATASET_VERSION ||--o{ EXPERIMENT_RUN : evaluates_on
+    INDEX_VERSION ||--o{ EXPERIMENT_RUN : pins
+    PROMPT_VERSION o|--o{ EXPERIMENT_RUN : uses
+    EXPERIMENT_RUN ||--o{ RUN_MODEL_BINDING : binds
+    MODEL_VERSION ||--o{ RUN_MODEL_BINDING : selected_as
+    EXPERIMENT_RUN ||--o{ CASE_RESULT : produces
+    METRIC_DEFINITION ||--o{ METRIC_OBSERVATION : defines
+    EXPERIMENT_RUN ||--o{ METRIC_OBSERVATION : aggregates
+    CASE_RESULT o|--o{ METRIC_OBSERVATION : details
+    CASE_RESULT ||--o{ ERROR_CASE : analyzed_as
+    EXPERIMENT_RUN ||--o{ RUN_ARTIFACT : emits
+    EXPERIMENT_RUN ||--o{ RUN_COMPARISON : baseline
+    EXPERIMENT_RUN ||--o{ RUN_COMPARISON : candidate
+    METRIC_DEFINITION ||--o{ RUN_COMPARISON : compares_by

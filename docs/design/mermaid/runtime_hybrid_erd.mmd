@@ -1,0 +1,302 @@
+erDiagram
+    APP_USER {
+        uuid user_id PK
+        char64 email_hash UK
+        char64 display_name_hash
+        char64 phone_hash
+        varchar255 password_hash
+        char64 profile_hash
+        char64 conversation_hash
+        string account_status
+        string hash_algorithm
+        int hash_key_version
+        datetime created_at
+        datetime updated_at
+    }
+
+    RAG_SESSION {
+        uuid session_id PK
+        uuid user_id FK
+        char64 title_hash
+        char64 conversation_hash
+        string session_status
+        datetime created_at
+        datetime last_activity_at
+    }
+
+    CHAT_MESSAGE {
+        uuid message_id PK
+        uuid session_id FK
+        uuid parent_message_id FK
+        string message_role
+        char64 message_content_hash
+        string message_status
+        int token_count
+        datetime created_at
+    }
+
+    RETRIEVAL_RUN {
+        uuid retrieval_run_id PK
+        uuid request_message_id FK
+        uuid index_version_id FK
+        string retrieval_mode
+        char64 normalized_query_hash
+        int requested_top_k
+        int final_top_k
+        string run_status
+        datetime started_at
+        datetime finished_at
+    }
+
+    RETRIEVAL_BRANCH {
+        uuid branch_id PK
+        uuid retrieval_run_id FK
+        string branch_type
+        string storage_backend
+        text branch_query
+        int branch_top_k
+        string branch_status
+        int latency_ms
+        datetime started_at
+        datetime finished_at
+    }
+
+    BRANCH_HIT {
+        uuid branch_hit_id PK
+        uuid branch_id FK
+        uuid chunk_id FK
+        uuid node_id FK
+        int branch_rank
+        decimal raw_score
+        int graph_hops
+        string retrieval_reason
+    }
+
+    FUSION_RUN {
+        uuid fusion_run_id PK
+        uuid retrieval_run_id FK
+        string fusion_method
+        decimal rag_weight
+        decimal graphrag_weight
+        int rrf_k
+        string fusion_status
+        datetime created_at
+    }
+
+    RETRIEVAL_HIT {
+        uuid retrieval_hit_id PK
+        uuid retrieval_run_id FK
+        uuid fusion_run_id FK
+        uuid chunk_id FK
+        int final_rank
+        decimal final_score
+        string selection_reason
+    }
+
+    HIT_CONTRIBUTION {
+        uuid contribution_id PK
+        uuid retrieval_hit_id FK
+        uuid branch_hit_id FK
+        decimal normalized_score
+        decimal contribution_weight
+        decimal weighted_score
+    }
+
+    MODEL_VERSION {
+        uuid model_version_id PK
+        string model_family
+        string model_name
+        string parameter_scale
+        string revision
+        string model_role
+        string deployment_endpoint
+        string model_checksum
+        string model_status
+    }
+
+    PROMPT_VERSION {
+        uuid prompt_version_id PK
+        string prompt_name
+        string version_name
+        string template_hash
+        string template_uri
+        datetime created_at
+    }
+
+    GENERATION_RUN {
+        uuid generation_run_id PK
+        uuid retrieval_run_id FK
+        uuid model_version_id FK
+        uuid prompt_version_id FK
+        uuid output_message_id FK
+        string generation_type
+        int attempt_no
+        decimal temperature
+        int input_tokens
+        int output_tokens
+        int latency_ms
+        string run_status
+        datetime created_at
+    }
+
+    ANSWER_CITATION {
+        uuid answer_citation_id PK
+        uuid answer_message_id FK
+        uuid retrieval_hit_id FK
+        string citation_label
+        text cited_span
+        int answer_start
+        int answer_end
+        string validation_status
+    }
+
+    USER_FEEDBACK {
+        uuid feedback_id PK
+        uuid user_id FK
+        uuid session_id FK
+        uuid message_id FK
+        int rating
+        string category
+        char64 comment_hash
+        char64 page_hash
+        datetime created_at
+    }
+
+    CONTRACT {
+        uuid contract_id PK
+        uuid owner_user_id FK
+        string template_code
+        string title
+        string contract_status
+        datetime created_at
+        datetime updated_at
+    }
+
+    CONTRACT_VERSION {
+        uuid contract_version_id PK
+        uuid contract_id FK
+        uuid previous_version_id FK
+        uuid created_by_user_id FK
+        uuid source_generation_id FK
+        int version_no
+        text document_content
+        string content_hash
+        string version_status
+        datetime created_at
+    }
+
+    CONTRACT_REVIEW {
+        uuid review_id PK
+        uuid contract_version_id FK
+        uuid compared_version_id FK
+        uuid retrieval_run_id FK
+        uuid generation_run_id FK
+        string review_type
+        string review_status
+        text summary
+        datetime created_at
+    }
+
+    REVIEW_FINDING {
+        uuid finding_id PK
+        uuid review_id FK
+        string finding_category
+        string severity
+        string clause_reference
+        text description
+        text recommendation
+        string resolution_status
+    }
+
+    CONTRACT_EVIDENCE {
+        uuid contract_evidence_id PK
+        uuid contract_version_id FK
+        uuid review_id FK
+        uuid retrieval_hit_id FK
+        string citation_label
+        string evidence_purpose
+        string validation_status
+    }
+
+    SIGNATURE_PACKET {
+        uuid signature_packet_id PK
+        uuid contract_version_id FK
+        uuid created_by_user_id FK
+        string packet_status
+        string document_hash
+        datetime created_at
+        datetime expires_at
+        datetime completed_at
+    }
+
+    PACKET_SIGNER {
+        uuid signer_id PK
+        uuid signature_packet_id FK
+        char64 signer_name_hash
+        char64 signer_email_hash
+        int signing_order
+        string identity_method
+        string signer_status
+        datetime signed_at
+    }
+
+    SIGNATURE_EVENT {
+        uuid signature_event_id PK
+        uuid signature_packet_id FK
+        uuid signer_id FK
+        string event_type
+        string actor_reference
+        text event_detail
+        string previous_event_hash
+        string event_hash
+        datetime occurred_at
+    }
+
+    APP_USER o|--o{ RAG_SESSION : owns
+    RAG_SESSION ||--o{ CHAT_MESSAGE : contains
+    CHAT_MESSAGE o|--o{ CHAT_MESSAGE : parent_of
+
+    CHAT_MESSAGE ||--o{ RETRIEVAL_RUN : triggers
+    RETRIEVAL_RUN ||--|{ RETRIEVAL_BRANCH : dispatches
+    RETRIEVAL_BRANCH ||--o{ BRANCH_HIT : returns
+
+    RETRIEVAL_RUN ||--o| FUSION_RUN : optionally_fuses
+    RETRIEVAL_RUN ||--o{ RETRIEVAL_HIT : produces
+    FUSION_RUN o|--o{ RETRIEVAL_HIT : ranks
+
+    RETRIEVAL_HIT ||--|{ HIT_CONTRIBUTION : composed_from
+    BRANCH_HIT ||--o| HIT_CONTRIBUTION : contributes
+
+    MODEL_VERSION ||--o{ GENERATION_RUN : executes
+    PROMPT_VERSION ||--o{ GENERATION_RUN : configures
+    RETRIEVAL_RUN ||--o{ GENERATION_RUN : grounds
+    CHAT_MESSAGE o|--o| GENERATION_RUN : output_of
+
+    CHAT_MESSAGE ||--o{ ANSWER_CITATION : contains
+    RETRIEVAL_HIT ||--o{ ANSWER_CITATION : substantiates
+
+    APP_USER o|--o{ USER_FEEDBACK : submits
+    RAG_SESSION o|--o{ USER_FEEDBACK : contextualizes
+    CHAT_MESSAGE o|--o{ USER_FEEDBACK : rates
+
+    APP_USER ||--o{ CONTRACT : owns
+    CONTRACT ||--|{ CONTRACT_VERSION : versions
+    APP_USER ||--o{ CONTRACT_VERSION : creates
+    CONTRACT_VERSION o|--o{ CONTRACT_VERSION : previous_of
+    GENERATION_RUN o|--o| CONTRACT_VERSION : drafts
+
+    CONTRACT_VERSION ||--o{ CONTRACT_REVIEW : reviewed_version
+    CONTRACT_VERSION o|--o{ CONTRACT_REVIEW : compared_version
+    RETRIEVAL_RUN o|--o| CONTRACT_REVIEW : retrieves_for
+    GENERATION_RUN o|--o| CONTRACT_REVIEW : summarizes
+    CONTRACT_REVIEW ||--o{ REVIEW_FINDING : identifies
+
+    CONTRACT_VERSION ||--o{ CONTRACT_EVIDENCE : cites
+    CONTRACT_REVIEW o|--o{ CONTRACT_EVIDENCE : uses
+    RETRIEVAL_HIT ||--o{ CONTRACT_EVIDENCE : substantiates
+
+    CONTRACT_VERSION ||--o{ SIGNATURE_PACKET : prepared_as
+    APP_USER ||--o{ SIGNATURE_PACKET : prepares
+    SIGNATURE_PACKET ||--|{ PACKET_SIGNER : contains
+    SIGNATURE_PACKET ||--o{ SIGNATURE_EVENT : audits
+    PACKET_SIGNER o|--o{ SIGNATURE_EVENT : participates

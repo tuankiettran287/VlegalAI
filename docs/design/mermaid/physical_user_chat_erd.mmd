@@ -1,0 +1,71 @@
+erDiagram
+    app_user {
+        uuid user_id PK
+        char64 email_hash UK
+        char64 display_name_hash
+        char64 phone_hash
+        char64 organization_hash
+        varchar255 password_hash
+        char64 profile_hash
+        char64 conversation_hash
+        varchar32 role_code
+        varchar16 account_status
+        varchar32 hash_algorithm
+        smallint hash_key_version
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    rag_session {
+        uuid session_id PK
+        uuid user_id FK
+        char64 title_hash
+        char64 conversation_hash
+        varchar16 session_status
+        timestamptz created_at
+        timestamptz last_activity_at
+    }
+
+    chat_message {
+        uuid message_id PK
+        uuid session_id FK
+        uuid parent_message_id FK
+        varchar16 message_role
+        char64 message_content_hash
+        varchar16 message_status
+        int token_count
+        timestamptz created_at
+    }
+
+    retrieval_run {
+        uuid retrieval_run_id PK
+        uuid request_message_id FK
+        uuid index_version_id
+        varchar16 retrieval_mode
+        char64 normalized_query_hash
+        smallint requested_top_k
+        smallint final_top_k
+        varchar16 run_status
+        timestamptz started_at
+        timestamptz finished_at
+    }
+
+    user_feedback {
+        uuid feedback_id PK
+        uuid user_id FK
+        uuid session_id FK
+        uuid message_id FK
+        smallint rating
+        varchar32 category
+        char64 comment_hash
+        char64 page_hash
+        timestamptz created_at
+    }
+
+    app_user ||--o{ rag_session : owns
+    rag_session ||--o{ chat_message : contains
+    chat_message o|--o{ chat_message : parent_of
+    chat_message ||--o{ retrieval_run : triggers
+    app_user ||--o{ user_feedback : submits
+    rag_session o|--o{ user_feedback : contextualizes
+    chat_message o|--o{ user_feedback : rates

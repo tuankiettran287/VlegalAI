@@ -1,0 +1,1 @@
+"""LaborCare GraphRAG application."""

@@ -1,0 +1,95 @@
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+env.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+
+# Node.js / frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+.npm/
+.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime database files are generated locally. Evaluation JSON/CSV artifacts
+# under storage may still be versioned when needed, but binary databases must not.
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Generated reports, renders, screenshots and browser artifacts
+output/
+.playwright-cli/
+playwright-report/
+test-results/
+blob-report/
+
+# Logs and process files
+*.log
+*.out.log
+*.err.log
+*.pid
+*.pid.lock
+
+# Local model/checkpoint artifacts
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.gguf
+*.ckpt
+
+# Word/Office temporary lock files
+~$*.docx
+~$*.xlsx
+~$*.pptx
+
+# IDE/editor settings
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/

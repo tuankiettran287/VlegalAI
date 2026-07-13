@@ -1,0 +1,179 @@
+erDiagram
+    ISSUING_AUTHORITY {
+        uuid authority_id PK
+        string name
+        string authority_type
+        string country_code
+    }
+
+    LEGAL_DOCUMENT {
+        uuid document_id PK
+        uuid authority_id FK
+        string canonical_code UK
+        string title
+        string document_type
+        string jurisdiction
+        datetime created_at
+    }
+
+    DOCUMENT_VERSION {
+        uuid document_version_id PK
+        uuid document_id FK
+        string version_no
+        date published_on
+        date effective_from
+        date effective_to
+        string legal_status
+        string source_uri
+        string content_checksum
+        datetime ingested_at
+    }
+
+    VERSION_EFFECT {
+        uuid version_effect_id PK
+        uuid source_version_id FK
+        uuid target_version_id FK
+        string effect_type
+        date effective_on
+        text affected_scope
+    }
+
+    KNOWLEDGE_LAYER {
+        int layer_id PK
+        string layer_code UK
+        string layer_name
+        int ordinal UK
+        text description
+    }
+
+    INDEX_VERSION {
+        uuid index_version_id PK
+        string version_name UK
+        string builder_version
+        string source_manifest_hash
+        string config_hash
+        string status
+        datetime built_at
+        datetime activated_at
+    }
+
+    INDEX_DOCUMENT {
+        uuid index_document_id PK
+        uuid index_version_id FK
+        uuid document_version_id FK
+        string parse_status
+        string parsed_checksum
+    }
+
+    KNOWLEDGE_NODE {
+        uuid node_id PK
+        uuid index_version_id FK
+        int layer_id FK
+        uuid document_version_id FK
+        uuid parent_node_id FK
+        string node_type
+        string canonical_key
+        string label
+        text node_text
+        int ordinal
+        decimal extraction_confidence
+    }
+
+    KNOWLEDGE_RELATION {
+        uuid relation_id PK
+        uuid index_version_id FK
+        uuid source_node_id FK
+        uuid target_node_id FK
+        string relation_type
+        decimal relation_weight
+        string extractor_version
+        decimal extraction_confidence
+    }
+
+    TEXT_CHUNK {
+        uuid chunk_id PK
+        uuid index_version_id FK
+        uuid document_version_id FK
+        uuid node_id FK
+        string chunk_type
+        int ordinal
+        text chunk_text
+        int token_count
+        int start_offset
+        int end_offset
+        string content_checksum
+    }
+
+    RELATION_EVIDENCE {
+        uuid relation_evidence_id PK
+        uuid relation_id FK
+        uuid chunk_id FK
+        int span_start
+        int span_end
+        text evidence_text
+        decimal confidence
+    }
+
+    MODEL_VERSION {
+        uuid model_version_id PK
+        string provider
+        string model_name
+        string revision
+        string model_role
+        int vector_dimensions
+        string artifact_uri
+        string model_checksum
+    }
+
+    CHUNK_EMBEDDING {
+        uuid embedding_id PK
+        uuid index_version_id FK
+        uuid chunk_id FK
+        uuid model_version_id FK
+        int dimensions
+        string vector_ref
+        string input_checksum
+        datetime created_at
+    }
+
+    INDEX_MATERIALIZATION {
+        uuid materialization_id PK
+        uuid index_version_id FK
+        string backend_type
+        string physical_locator
+        string schema_version
+        string sync_status
+        int record_count
+        string materialization_checksum
+        datetime synced_at
+    }
+
+    ISSUING_AUTHORITY ||--o{ LEGAL_DOCUMENT : issues
+    LEGAL_DOCUMENT ||--|{ DOCUMENT_VERSION : has
+    DOCUMENT_VERSION ||--o{ VERSION_EFFECT : source_version
+    DOCUMENT_VERSION ||--o{ VERSION_EFFECT : target_version
+
+    INDEX_VERSION ||--|{ INDEX_DOCUMENT : includes
+    DOCUMENT_VERSION ||--o{ INDEX_DOCUMENT : indexed_as
+
+    KNOWLEDGE_LAYER ||--o{ KNOWLEDGE_NODE : classifies
+    INDEX_VERSION ||--o{ KNOWLEDGE_NODE : derives
+    DOCUMENT_VERSION o|--o{ KNOWLEDGE_NODE : grounds
+    KNOWLEDGE_NODE o|--o{ KNOWLEDGE_NODE : parent_of
+
+    INDEX_VERSION ||--o{ KNOWLEDGE_RELATION : contains
+    KNOWLEDGE_NODE ||--o{ KNOWLEDGE_RELATION : source
+    KNOWLEDGE_NODE ||--o{ KNOWLEDGE_RELATION : target
+
+    INDEX_VERSION ||--o{ TEXT_CHUNK : contains
+    DOCUMENT_VERSION ||--o{ TEXT_CHUNK : supplies
+    KNOWLEDGE_NODE ||--o{ TEXT_CHUNK : chunked_into
+
+    KNOWLEDGE_RELATION ||--o{ RELATION_EVIDENCE : supported_by
+    TEXT_CHUNK ||--o{ RELATION_EVIDENCE : provides
+
+    TEXT_CHUNK ||--o{ CHUNK_EMBEDDING : embedded_as
+    MODEL_VERSION ||--o{ CHUNK_EMBEDDING : produces
+    INDEX_VERSION ||--o{ CHUNK_EMBEDDING : snapshots
+
+    INDEX_VERSION ||--|{ INDEX_MATERIALIZATION : deployed_as

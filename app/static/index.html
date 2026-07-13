@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VLegal AI LaborCare - Trợ lý pháp luật lao động</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">
+            <i data-lucide="scale"></i>
+          </div>
+          <div>
+            <div class="brand-name">VLegal AI</div>
+            <div class="brand-subtitle">LaborCare</div>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <button class="icon-btn" id="toggle-sidebar" type="button" title="Xem cấu trúc đồ thị">
+            <i data-lucide="layout-dashboard"></i>
+            <span>Đồ thị đa tầng</span>
+          </button>
+          <button class="new-chat-btn" id="clear-chat" type="button">
+            <i data-lucide="plus"></i>
+            <span>Hội thoại mới</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="main-container">
+        <main class="workspace">
+          <section class="messages" id="messages" aria-live="polite">
+            <div class="welcome-container">
+              <div class="welcome-icon-box" aria-hidden="true">
+                <i data-lucide="landmark"></i>
+              </div>
+              <p class="eyebrow">Luật lao động Việt Nam</p>
+              <h1 class="welcome-title">Bạn cần làm rõ vấn đề lao động nào?</h1>
+              <p class="welcome-subtitle">
+                Đặt câu hỏi cụ thể về hợp đồng, lương, bảo hiểm, kỷ luật lao động hoặc chấm dứt hợp đồng.
+              </p>
+  
+              <div class="suggestions-grid">
+                <button type="button" class="suggestion-card" data-question="Quyền lợi bảo hiểm xã hội của tôi gồm những gì?">
+                  <i data-lucide="shield-check"></i>
+                  <span>Quyền lợi bảo hiểm xã hội của tôi gồm những gì?</span>
+                </button>
+                <button type="button" class="suggestion-card" data-question="Cách tính lương làm thêm giờ theo luật hiện hành?">
+                  <i data-lucide="timer"></i>
+                  <span>Cách tính lương làm thêm giờ theo luật hiện hành?</span>
+                </button>
+                <button type="button" class="suggestion-card" data-question="Chế độ thai sản được nghỉ bao lâu và hưởng thế nào?">
+                  <i data-lucide="heart-handshake"></i>
+                  <span>Chế độ thai sản được nghỉ bao lâu và hưởng thế nào?</span>
+                </button>
+                <button type="button" class="suggestion-card" data-question="Thủ tục chấm dứt hợp đồng lao động hợp pháp?">
+                  <i data-lucide="file-signature"></i>
+                  <span>Thủ tục chấm dứt hợp đồng lao động hợp pháp?</span>
+                </button>
+              </div>
+            </div>
+          </section>
+  
+          <form class="composer" id="chat-form">
+            <div class="mode-row">
+              <span class="mode-label" id="retrieval-mode-label">Chế độ search</span>
+              <div class="mode-switcher" role="radiogroup" aria-labelledby="retrieval-mode-label">
+                <label class="mode-option">
+                  <input type="radio" name="retrieval-mode" value="rag" data-label="RAG" />
+                  <span>RAG</span>
+                </label>
+                <label class="mode-option">
+                  <input type="radio" name="retrieval-mode" value="graphrag" data-label="GraphRAG" />
+                  <span>GraphRAG</span>
+                </label>
+                <label class="mode-option">
+                  <input type="radio" name="retrieval-mode" value="hybrid_rag" data-label="Hybrid RAG" checked />
+                  <span>Hybrid RAG</span>
+                </label>
+                <label class="mode-option">
+                  <input type="radio" name="retrieval-mode" value="local_graphrag" data-label="Local GraphRAG" />
+                  <span>Local GraphRAG</span>
+                </label>
+              </div>
+            </div>
+  
+            <div class="input-container">
+              <textarea
+                id="message-input"
+                rows="1"
+                placeholder="Nhập câu hỏi về luật lao động..."
+                aria-label="Câu hỏi pháp lý"
+              ></textarea>
+              <button type="submit" title="Gửi câu hỏi" aria-label="Gửi câu hỏi">
+                <i data-lucide="send-horizontal"></i>
+                <span>Gửi</span>
+              </button>
+            </div>
+            <div class="footnote">Thông tin do AI hỗ trợ, hãy kiểm tra lại các nội dung quan trọng với luật sư.</div>
+          </form>
+        </main>
+        
+        <aside class="sidebar-panel collapsed" id="graph-sidebar">
+          <div class="sidebar-header">
+            <i data-lucide="network"></i>
+            <h2>Cơ cấu Đồ thị đa tầng</h2>
+          </div>
+          <div class="sidebar-content">
+            <div class="stats-section">
+              <h3>Phân bổ 8 lớp tri thức</h3>
+              <div class="layers-list" id="layers-stats-list">
+                <!-- Will be dynamically populated -->
+              </div>
+            </div>
+            
+            <div class="layer-details-box" id="layer-details-box">
+              <div class="empty-state">
+                <i data-lucide="info"></i>
+                <p>Click vào một lớp ở trên để xem chi tiết thực thể và quan hệ liên kết.</p>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <div class="compatibility-hidden" aria-hidden="true">
+        <select id="backend-select">
+          <option value="rag">RAG</option>
+          <option value="graphrag">GraphRAG</option>
+          <option value="hybrid_rag" selected>Hybrid RAG</option>
+          <option value="local_graphrag">Local GraphRAG</option>
+        </select>
+        <div id="source-count"></div>
+        <div id="sources-list"></div>
+      </div>
+    </div>
+  </body>
+</html>

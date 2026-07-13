@@ -1,0 +1,60 @@
+erDiagram
+    APP_USER {
+        uuid user_id PK
+        char64 email_hash UK
+        char64 conversation_hash
+    }
+    RAG_SESSION {
+        uuid session_id PK
+        char64 conversation_hash
+    }
+    CHAT_MESSAGE {
+        uuid message_id PK
+        char64 message_content_hash
+    }
+    RETRIEVAL_RUN {
+        uuid retrieval_run_id PK
+        string retrieval_mode
+    }
+    RETRIEVAL_BRANCH {
+        uuid branch_id PK
+        string branch_type
+        string storage_backend
+    }
+    BRANCH_HIT { uuid branch_hit_id PK }
+    FUSION_RUN {
+        uuid fusion_run_id PK
+        string fusion_method
+    }
+    RETRIEVAL_HIT { uuid retrieval_hit_id PK }
+    HIT_CONTRIBUTION { uuid contribution_id PK }
+    MODEL_VERSION {
+        uuid model_version_id PK
+        string model_name
+        string parameter_scale
+    }
+    PROMPT_VERSION { uuid prompt_version_id PK }
+    GENERATION_RUN { uuid generation_run_id PK }
+    ANSWER_CITATION { uuid answer_citation_id PK }
+    USER_FEEDBACK { uuid feedback_id PK }
+
+    APP_USER o|--o{ RAG_SESSION : owns
+    RAG_SESSION ||--o{ CHAT_MESSAGE : contains
+    CHAT_MESSAGE o|--o{ CHAT_MESSAGE : parent_of
+    CHAT_MESSAGE ||--o{ RETRIEVAL_RUN : triggers
+    RETRIEVAL_RUN ||--|{ RETRIEVAL_BRANCH : dispatches
+    RETRIEVAL_BRANCH ||--o{ BRANCH_HIT : returns
+    RETRIEVAL_RUN ||--o| FUSION_RUN : optionally_fuses
+    RETRIEVAL_RUN ||--o{ RETRIEVAL_HIT : produces
+    FUSION_RUN o|--o{ RETRIEVAL_HIT : ranks
+    RETRIEVAL_HIT ||--|{ HIT_CONTRIBUTION : composed_from
+    BRANCH_HIT ||--o| HIT_CONTRIBUTION : contributes
+    MODEL_VERSION ||--o{ GENERATION_RUN : executes
+    PROMPT_VERSION ||--o{ GENERATION_RUN : configures
+    RETRIEVAL_RUN ||--o{ GENERATION_RUN : grounds
+    CHAT_MESSAGE o|--o| GENERATION_RUN : output_of
+    CHAT_MESSAGE ||--o{ ANSWER_CITATION : contains
+    RETRIEVAL_HIT ||--o{ ANSWER_CITATION : substantiates
+    APP_USER o|--o{ USER_FEEDBACK : submits
+    RAG_SESSION o|--o{ USER_FEEDBACK : contextualizes
+    CHAT_MESSAGE o|--o{ USER_FEEDBACK : rates

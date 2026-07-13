@@ -1,0 +1,27 @@
+%%{init: {"themeVariables": {"fontSize": "25px"}}}%%
+flowchart LR
+    U["app_user\nPK user_id: UUID\nUK email_hash: CHAR(64)\npassword_hash: VARCHAR(255)\nprofile_hash: CHAR(64)\nconversation_hash: CHAR(64)"]
+    S["rag_session\nPK session_id: UUID\nFK user_id: UUID\ntitle_hash: CHAR(64)\nconversation_hash: CHAR(64)"]
+    M["chat_message\nPK message_id: UUID\nFK session_id: UUID\nmessage_content_hash: CHAR(64)\nstatus default COMPLETED"]
+    R["retrieval_run\nPK retrieval_run_id: UUID\nFK request_message_id: UUID\nnormalized_query_hash: CHAR(64)\ntop_k default 10"]
+    F["user_feedback\nPK feedback_id: UUID\nFK user/session/message\nrating: SMALLINT 1..5\ncomment_hash: CHAR(64)"]
+
+    U -->|"1 : N owns"| S
+    S -->|"1 : N contains"| M
+    M -->|"1 : N triggers"| R
+    U -->|"1 : N submits"| F
+    S -.->|"0..1 context"| F
+    M -.->|"0..1 rated message"| F
+
+    POLICY["HASH-ONLY POLICY\nArgon2id + per-password salt\nHMAC-SHA-256 keyed digest\nNo raw PII or conversation in DB"]
+    POLICY -.-> U
+    POLICY -.-> M
+    POLICY -.-> R
+    POLICY -.-> F
+
+    classDef identity fill:#E8F1FB,stroke:#2E74B5,color:#172033,stroke-width:2px;
+    classDef runtime fill:#F8FAFC,stroke:#64748B,color:#172033;
+    classDef policy fill:#EEF2FF,stroke:#4F46E5,color:#172033,stroke-width:2px;
+    class U identity;
+    class S,M,R,F runtime;
+    class POLICY policy;
