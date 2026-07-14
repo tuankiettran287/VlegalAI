@@ -1,0 +1,16 @@
+.git
+.agents
+.playwright-cli
+.vscode
+venv
+**/__pycache__
+**/*.pyc
+frontend/node_modules
+frontend/dist
+storage
+Data (1)
+*.ipynb
+*.docx
+*.png
+.env
+

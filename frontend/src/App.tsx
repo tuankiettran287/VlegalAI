@@ -1,66 +1,127 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import {
+  FormEvent,
+  ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import {
   AlignLeft,
+  Archive,
   ArrowLeft,
   BookOpen,
   Bot,
   Check,
+  CheckCircle2,
   ChevronDown,
   ClipboardCheck,
-  Clock,
+  Clock3,
   Copy,
-  FileCheck2,
+  ExternalLink,
   FileDiff,
   FilePenLine,
   FileText,
+  FolderClock,
   History,
-  LayoutDashboard,
+  Library,
   LogIn,
+  LogOut,
   Menu,
   MessageSquareText,
   Moon,
   PenTool,
   Plus,
+  RefreshCw,
   Scale,
   Search,
   SendHorizontal,
   ShieldCheck,
   Sparkles,
   Sun,
+  Trash2,
   Upload,
+  UserRound,
+  Wifi,
   X,
 } from "lucide-react";
 import {
+  ApiError,
+  articleApi,
+  artifactApi,
   askLegalQuestion,
+  authApi,
   compareContracts,
+  conversationApi,
   draftContract,
   getStats,
+  getTemplates,
   prepareSignature,
   reviewContract,
-  searchLaws,
   sendFeedback,
-  type ChatResponse,
   type CompareResponse,
   type DraftResponse,
   type ReviewResponse,
   type SignatureResponse,
   type StatsResponse,
 } from "./api";
-import { articles, retrievalModes, sampleQuestions, templates } from "./data";
-import type { Article, ChatMessage, Law, RetrievalMode, Risk, Source, Template } from "./types";
+import { sampleQuestions, templateFallback } from "./data";
+import type {
+  Article,
+  Artifact,
+  ChatMessage,
+  Conversation,
+  Risk,
+  Source,
+  Template,
+  User,
+  VerificationReport,
+  WebSource,
+} from "./types";
 
 const routes = [
-  { path: "/", label: "Hỏi đáp", icon: MessageSquareText },
+  { path: "/", label: "Hỏi đáp pháp luật", icon: MessageSquareText },
   { path: "/tao-hop-dong", label: "Tạo hợp đồng", icon: FilePenLine },
-  { path: "/phan-tich-hop-dong", label: "Review hợp đồng", icon: ClipboardCheck },
+  { path: "/review-hop-dong", label: "Review hợp đồng", icon: ClipboardCheck },
   { path: "/so-sanh-hop-dong", label: "So sánh hợp đồng", icon: FileDiff },
   { path: "/ky-van-ban", label: "Ký văn bản", icon: PenTool },
   { path: "/bai-viet", label: "Bài viết", icon: BookOpen },
-  { path: "/gioi-thieu", label: "Giới thiệu", icon: ShieldCheck },
+  { path: "/thu-vien", label: "Lịch sử & tài liệu", icon: Library },
 ];
 
 function uid() {
   return globalThis.crypto?.randomUUID?.() || String(Date.now() + Math.random());
+}
+
+const GUEST_CHAT_STORAGE_KEY = "vlegal-guest-chat-v1";
+
+function readGuestMessages(): ChatMessage[] {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(GUEST_CHAT_STORAGE_KEY) || "[]") as ChatMessage[];
+    return parsed
+      .filter((item) => item && typeof item.id === "string" && typeof item.content === "string" && ["user", "assistant"].includes(item.role))
+      .slice(-24);
+  } catch {
+    return [];
+  }
+}
+
+function writeGuestMessages(messages: ChatMessage[]) {
+  const completed = messages.filter((item) => !item.pending).slice(-24);
+  try {
+    if (!completed.length) {
+      sessionStorage.removeItem(GUEST_CHAT_STORAGE_KEY);
+      return;
+    }
+    sessionStorage.setItem(GUEST_CHAT_STORAGE_KEY, JSON.stringify(completed));
+  } catch {
+    const compact = completed.map(({ id, role, content, created_at }) => ({ id, role, content, created_at }));
+    try {
+      sessionStorage.setItem(GUEST_CHAT_STORAGE_KEY, JSON.stringify(compact));
+    } catch {
+      // Storage can be disabled by browser privacy settings; the in-memory chat still works.
+    }
+  }
 }
 
 function escapeHtml(value: string) {
@@ -73,14 +134,19 @@ function escapeHtml(value: string) {
 }
 
 function markdown(value: string) {
-  const safe = escapeHtml(value || "");
-  return safe
+  return escapeHtml(value || "")
     .replace(/^### (.*)$/gm, "<h3>$1</h3>")
     .replace(/^## (.*)$/gm, "<h2>$1</h2>")
     .replace(/^# (.*)$/gm, "<h1>$1</h1>")
+    .replace(/^[-•] (.*)$/gm, "<div class='md-list-item'>• $1</div>")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\n/g, "<br />");
+}
+
+function formatDate(value?: string | null) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
 }
 
 function usePath() {
@@ -90,38 +156,69 @@ function usePath() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
-  const navigate = (nextPath: string) => {
+  const navigate = useCallback((nextPath: string) => {
     window.history.pushState({}, "", nextPath);
     setPath(nextPath);
-  };
+  }, []);
   return [path, navigate] as const;
 }
 
 async function readTextFile(file: File) {
   const text = await file.text();
-  return text.slice(0, 50000);
+  return text.slice(0, 120000);
 }
 
-function ModePicker({
-  value,
-  onChange,
-}: {
-  value: RetrievalMode;
-  onChange: (value: RetrievalMode) => void;
-}) {
+function ErrorNotice({ error, onClose }: { error: string; onClose?: () => void }) {
   return (
-    <div className="mode-picker" role="radiogroup" aria-label="Chế độ tra cứu">
-      {retrievalModes.map((mode) => (
-        <button
-          key={mode.value}
-          type="button"
-          className={value === mode.value ? "active" : ""}
-          onClick={() => onChange(mode.value)}
-        >
-          {mode.label}
+    <div className="error-notice" role="alert">
+      <ShieldCheck size={18} />
+      <span>{error}</span>
+      {onClose && (
+        <button type="button" onClick={onClose} aria-label="Đóng thông báo">
+          <X size={15} />
         </button>
-      ))}
+      )}
     </div>
+  );
+}
+
+function VerificationBadge({ report }: { report?: VerificationReport }) {
+  if (!report) return null;
+  const current = report.checked && report.all_current;
+  return (
+    <details className={`verification ${current ? "verified" : "attention"}`}>
+      <summary>
+        {current ? <CheckCircle2 size={15} /> : <RefreshCw size={15} />}
+        <span>{current ? "Đã kiểm tra hiệu lực" : "Có văn bản cần lưu ý"}</span>
+        {report.checked_at && <time>{formatDate(report.checked_at)}</time>}
+        <ChevronDown size={14} />
+      </summary>
+      <div className="verification-body">
+        <p>{report.note}</p>
+        {report.items.map((item) => (
+          <div className="law-status-row" key={`${item.code}-${item.checked_at}`}>
+            <div>
+              <strong>{item.code}</strong>
+              <span>{item.title}</span>
+            </div>
+            <span className={`status-chip ${item.status.toLowerCase()}`}>{{
+              IN_FORCE: "Còn hiệu lực",
+              PARTIALLY_IN_FORCE: "Hiệu lực một phần",
+              AMENDED: "Đã sửa đổi",
+              EXPIRED: "Hết hiệu lực",
+              REPLACED: "Đã thay thế",
+              UNKNOWN: "Chưa rõ",
+            }[item.status]}</span>
+            {item.index_updated && <small>Đã cập nhật chỉ mục</small>}
+            {item.source_url && (
+              <a href={item.source_url} target="_blank" rel="noreferrer" aria-label={`Mở nguồn ${item.code}`}>
+                <ExternalLink size={14} />
+              </a>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
 
@@ -131,15 +228,20 @@ function SourcePanel({ sources }: { sources?: Source[] }) {
     <details className="source-panel">
       <summary>
         <FileText size={16} />
-        <span>{sources.length} căn cứ pháp lý</span>
+        <span>{sources.length} căn cứ được sử dụng</span>
         <ChevronDown size={16} />
       </summary>
       <div className="source-list">
         {sources.map((source) => (
           <article className="source-item" key={`${source.source_id}-${source.citation}`}>
-            <div>
+            <div className="source-title">
               <span className="source-id">{source.source_id}</span>
               <strong>{source.citation || source.title}</strong>
+              {source.source_url && (
+                <a href={source.source_url} target="_blank" rel="noreferrer" aria-label="Mở nguồn chính thức">
+                  <ExternalLink size={14} />
+                </a>
+              )}
             </div>
             <p>{source.text}</p>
           </article>
@@ -149,785 +251,34 @@ function SourcePanel({ sources }: { sources?: Source[] }) {
   );
 }
 
-function RiskList({ risks }: { risks?: Risk[] }) {
-  if (!risks?.length) return <p className="muted">Chưa phát hiện rủi ro nổi bật theo bộ kiểm tra nhanh.</p>;
-  return (
-    <div className="risk-list">
-      {risks.map((risk, index) => (
-        <article className={`risk-card ${risk.level}`} key={`${risk.title}-${index}`}>
-          <span>{risk.level === "high" ? "Cao" : risk.level === "medium" ? "Vừa" : "Thấp"}</span>
-          <h3>{risk.title}</h3>
-          <p>{risk.detail}</p>
-          <strong>{risk.recommendation}</strong>
-        </article>
-      ))}
-    </div>
-  );
-}
-
-function LawPicker({
-  open,
-  selected,
-  onApply,
-  onClose,
+function ResultPanel({
+  title,
+  text,
+  sources,
+  verification,
+  children,
 }: {
-  open: boolean;
-  selected: Law[];
-  onApply: (laws: Law[]) => void;
-  onClose: () => void;
+  title: string;
+  text: string;
+  sources?: Source[];
+  verification?: VerificationReport;
+  children?: ReactNode;
 }) {
-  const [query, setQuery] = useState("");
-  const [items, setItems] = useState<Law[]>([]);
-  const [draftSelected, setDraftSelected] = useState<Law[]>(selected);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    setDraftSelected(selected);
-  }, [open, selected]);
-
-  useEffect(() => {
-    if (!open) return;
-    const timer = window.setTimeout(async () => {
-      setLoading(true);
-      try {
-        setItems(await searchLaws(query));
-      } finally {
-        setLoading(false);
-      }
-    }, 220);
-    return () => window.clearTimeout(timer);
-  }, [open, query]);
-
-  if (!open) return null;
-  const selectedIds = new Set(draftSelected.map((law) => law.id));
-  const toggleLaw = (law: Law) => {
-    if (selectedIds.has(law.id)) {
-      setDraftSelected((current) => current.filter((item) => item.id !== law.id));
-      return;
-    }
-    if (draftSelected.length >= 10) return;
-    setDraftSelected((current) => [...current, law]);
-  };
-
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="modal law-modal" role="dialog" aria-modal="true" aria-label="Chọn luật áp dụng">
-        <div className="modal-header">
-          <div>
-            <h2>Chọn luật áp dụng</h2>
-            <p>Tìm và chọn tối đa 10 văn bản để tập trung trả lời. ({draftSelected.length}/10)</p>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Đóng">
-            <X size={18} />
-          </button>
+    <section className="result-panel">
+      <header className="result-header">
+        <div>
+          <span className="eyebrow">Kết quả AI</span>
+          <h2>{title}</h2>
         </div>
-        <label className="search-box">
-          <Search size={18} />
-          <input
-            autoFocus
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Tìm theo số hiệu hoặc tiêu đề..."
-          />
-        </label>
-        {draftSelected.length > 0 && (
-          <div className="selected-laws">
-            {draftSelected.map((law) => (
-              <button key={law.id} type="button" onClick={() => toggleLaw(law)}>
-                {law.code}
-                <X size={13} />
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="law-results">
-          {loading && <p className="muted">Đang tìm...</p>}
-          {!loading && items.length === 0 && <p className="muted">Nhập từ khóa để tìm kiếm.</p>}
-          {items.map((law) => (
-            <button
-              key={law.id}
-              type="button"
-              className={selectedIds.has(law.id) ? "law-row selected" : "law-row"}
-              onClick={() => toggleLaw(law)}
-            >
-              <span>{law.code}</span>
-              <strong>{law.title}</strong>
-              {selectedIds.has(law.id) && <Check size={16} />}
-            </button>
-          ))}
-        </div>
-        <div className="modal-actions">
-          <button type="button" className="ghost-button" onClick={onClose}>
-            Hủy
-          </button>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={() => {
-              onApply(draftSelected);
-              onClose();
-            }}
-          >
-            Áp dụng
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function TemplateModal({
-  open,
-  selected,
-  onSelect,
-  onClose,
-}: {
-  open: boolean;
-  selected?: Template;
-  onSelect: (template: Template) => void;
-  onClose: () => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [category, setCategory] = useState("Tất cả");
-  const categories = ["Tất cả", ...Array.from(new Set(templates.map((item) => item.category)))];
-  const filtered = templates.filter((template) => {
-    const inCategory = category === "Tất cả" || template.category === category;
-    const inQuery = !query || template.name.toLowerCase().includes(query.toLowerCase());
-    return inCategory && inQuery;
-  });
-  if (!open) return null;
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="modal template-modal" role="dialog" aria-modal="true" aria-label="Mẫu hợp đồng">
-        <div className="modal-header">
-          <div>
-            <h2>Mẫu hợp đồng</h2>
-            <p>Chọn mẫu để hệ thống định hướng cấu trúc bản nháp.</p>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Đóng">
-            <X size={18} />
-          </button>
-        </div>
-        <label className="search-box">
-          <Search size={18} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm kiếm mẫu..." />
-        </label>
-        <div className="template-layout">
-          <div className="category-list">
-            {categories.map((item) => (
-              <button key={item} className={category === item ? "active" : ""} type="button" onClick={() => setCategory(item)}>
-                {item}
-              </button>
-            ))}
-          </div>
-          <div className="template-grid">
-            {filtered.map((template) => (
-              <button
-                key={template.id}
-                className={selected?.id === template.id ? "template-card selected" : "template-card"}
-                type="button"
-                onClick={() => {
-                  onSelect(template);
-                  onClose();
-                }}
-              >
-                <FileText size={20} />
-                <span>{template.name}</span>
-                <small>{template.category}</small>
-              </button>
-            ))}
-          </div>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function FeedbackModal({ open, page, onClose }: { open: boolean; page: string; onClose: () => void }) {
-  const [message, setMessage] = useState("");
-  const [email, setEmail] = useState("");
-  const [sent, setSent] = useState(false);
-  if (!open) return null;
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <form
-        className="modal narrow-modal"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          await sendFeedback({ message, email: email || undefined, page });
-          setSent(true);
-          setMessage("");
-        }}
-      >
-        <div className="modal-header">
-          <div>
-            <h2>Gửi góp ý</h2>
-            <p>Ghi nhận để hoàn thiện luồng pháp lý và dữ liệu.</p>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Đóng">
-            <X size={18} />
-          </button>
-        </div>
-        {sent && <div className="notice success">Đã lưu góp ý.</div>}
-        <textarea value={message} onChange={(event) => setMessage(event.target.value)} required placeholder="Nội dung góp ý..." />
-        <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email nếu muốn nhận phản hồi" />
-        <div className="modal-actions">
-          <button type="button" className="ghost-button" onClick={onClose}>
-            Đóng
-          </button>
-          <button type="submit" className="primary-button" disabled={message.trim().length < 3}>
-            Gửi
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function ChatPage() {
-  const [mode, setMode] = useState<RetrievalMode>("hybrid_rag");
-  const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [selectedLaws, setSelectedLaws] = useState<Law[]>([]);
-  const [lawOpen, setLawOpen] = useState(false);
-
-  const submit = async (question = input) => {
-    const trimmed = question.trim();
-    if (!trimmed) return;
-    const userMessage: ChatMessage = { id: uid(), role: "user", content: trimmed };
-    const assistantId = uid();
-    setMessages((current) => [
-      ...current,
-      userMessage,
-      { id: assistantId, role: "assistant", content: "Đang tra cứu căn cứ pháp lý...", pending: true },
-    ]);
-    setInput("");
-    try {
-      const data: ChatResponse = await askLegalQuestion({
-        message: trimmed,
-        backend: mode,
-        law_ids: selectedLaws.map((law) => law.id),
-      });
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantId
-            ? { ...message, content: data.answer, sources: data.sources, pending: false }
-            : message,
-        ),
-      );
-    } catch (error) {
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantId
-            ? { ...message, content: `Lỗi: ${(error as Error).message}`, pending: false }
-            : message,
-        ),
-      );
-    }
-  };
-
-  return (
-    <section className="chat-page">
-      <div className="chat-scroll">
-        {messages.length === 0 ? (
-          <div className="welcome">
-            <button className="help-button" type="button" aria-label="Xem hướng dẫn">
-              <Sparkles size={18} />
-            </button>
-            <div className="welcome-mark">
-              <Scale size={30} />
-            </div>
-            <h1>Đừng ngần ngại, đặt câu hỏi cho VLegal AI ngay.</h1>
-            <div className="suggestion-grid">
-              {sampleQuestions.map((question) => (
-                <button key={question} type="button" onClick={() => submit(question)}>
-                  <MessageSquareText size={18} />
-                  <span>{question}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="messages">
-            {messages.map((message) => (
-              <article className={`message ${message.role}`} key={message.id}>
-                {message.role === "assistant" && <div className="avatar">AI</div>}
-                <div className="bubble">
-                  <div dangerouslySetInnerHTML={{ __html: markdown(message.content) }} />
-                  {message.pending && <div className="loading-line" />}
-                  <SourcePanel sources={message.sources} />
-                </div>
-              </article>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <form
-        className="composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          submit();
-        }}
-      >
-        <div className="composer-toolbar">
-          <ModePicker value={mode} onChange={setMode} />
-          <button className="law-button" type="button" onClick={() => setLawOpen(true)}>
-            <BookOpen size={16} />
-            <span>Luật áp dụng</span>
-            {selectedLaws.length > 0 && <strong>{selectedLaws.length}</strong>}
-          </button>
-        </div>
-        <div className="input-wrap">
-          <textarea
-            value={input}
-            maxLength={5000}
-            rows={1}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder="Nhập câu hỏi..."
-          />
-          <span className="counter">{input.length} / 5000</span>
-          <button className="primary-icon" type="submit" disabled={!input.trim()}>
-            <SendHorizontal size={18} />
-          </button>
-        </div>
-      </form>
-      <LawPicker open={lawOpen} selected={selectedLaws} onApply={setSelectedLaws} onClose={() => setLawOpen(false)} />
-    </section>
-  );
-}
-
-function ContractPage() {
-  const [mode, setMode] = useState<RetrievalMode>("hybrid_rag");
-  const [step, setStep] = useState<"start" | "create" | "edit">("start");
-  const [prompt, setPrompt] = useState("");
-  const [selectedTemplate, setSelectedTemplate] = useState<Template | undefined>(templates[0]);
-  const [templateOpen, setTemplateOpen] = useState(false);
-  const [lawOpen, setLawOpen] = useState(false);
-  const [selectedLaws, setSelectedLaws] = useState<Law[]>([]);
-  const [result, setResult] = useState<DraftResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [history, setHistory] = useState<DraftResponse[]>([]);
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!prompt.trim()) return;
-    setLoading(true);
-    try {
-      const data = await draftContract({
-        prompt: step === "edit" ? `Chỉnh sửa văn bản theo yêu cầu sau: ${prompt}` : prompt,
-        template_id: selectedTemplate?.id,
-        template_name: selectedTemplate?.name,
-        backend: mode,
-        law_ids: selectedLaws.map((law) => law.id),
-      });
-      setResult(data);
-      setHistory((current) => [data, ...current].slice(0, 6));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  if (step === "start") {
-    return (
-      <section className="tool-page">
-        <PageHeader
-          title="Tạo hợp đồng"
-          subtitle="Soạn hoặc chỉnh sửa văn bản bằng mô tả tự do, mẫu hợp đồng và căn cứ GraphRAG."
-          action={<button className="ghost-button"><History size={16} />Lịch sử</button>}
-        />
-        <div className="choice-grid">
-          <button className="choice-card" type="button" onClick={() => setStep("create")}>
-            <Plus size={30} />
-            <h3>Tạo mới</h3>
-            <p>Tạo hợp đồng, văn bản bằng cách mô tả yêu cầu hoặc chọn từ kho mẫu.</p>
-            <span>Kho hợp đồng, văn bản mẫu</span>
-          </button>
-          <button className="choice-card" type="button" onClick={() => setStep("edit")}>
-            <FilePenLine size={30} />
-            <h3>Chỉnh sửa</h3>
-            <p>Dán nội dung hiện có và mô tả yêu cầu chỉnh sửa trực tiếp.</p>
-          </button>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="tool-page split-page">
-      <div>
-        <div className="inline-actions">
-          <button className="ghost-button" type="button" onClick={() => setStep("start")}>
-            <ArrowLeft size={16} /> Quay lại
-          </button>
-          <ModePicker value={mode} onChange={setMode} />
-        </div>
-        <form className="tool-form" onSubmit={submit}>
-          <p>
-            {step === "create" ? "Hãy mô tả văn bản cần tạo. Hoặc chọn " : "Dán văn bản và mô tả điểm cần chỉnh sửa. Có thể chọn "}
-            <button type="button" className="link-button" onClick={() => setTemplateOpen(true)}>
-              hợp đồng, văn bản mẫu
-            </button>
-          </p>
-          <div className="template-pill">
-            <FileText size={16} />
-            {selectedTemplate?.name || "Chưa chọn mẫu"}
-          </div>
-          <textarea
-            value={prompt}
-            maxLength={5000}
-            onChange={(event) => setPrompt(event.target.value)}
-            placeholder={step === "create" ? "Mô tả hợp đồng hoặc văn bản bạn muốn tạo..." : "Dán nội dung và yêu cầu chỉnh sửa..."}
-          />
-          <div className="form-footer">
-            <label className="ghost-button file-button">
-              <Upload size={16} />
-              Tải file .txt
-              <input
-                type="file"
-                accept=".txt,.md"
-                onChange={async (event) => {
-                  const file = event.target.files?.[0];
-                  if (file) setPrompt(await readTextFile(file));
-                }}
-              />
-            </label>
-            <button className="law-button" type="button" onClick={() => setLawOpen(true)}>
-              <BookOpen size={16} /> Luật áp dụng {selectedLaws.length ? `(${selectedLaws.length})` : ""}
-            </button>
-            <span className="counter">{prompt.length} / 5000</span>
-            <button className="primary-button" type="submit" disabled={loading || !prompt.trim()}>
-              {loading ? "Đang tạo..." : "Tạo bản nháp"}
-            </button>
-          </div>
-        </form>
-        {history.length > 0 && (
-          <div className="history-strip">
-            {history.map((item, index) => (
-              <button key={`${item.title}-${index}`} type="button" onClick={() => setResult(item)}>
-                <Clock size={14} /> {item.title}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-      <ResultPanel
-        title={result?.title || "Bản nháp sẽ hiển thị tại đây"}
-        text={result?.draft || "Sau khi gửi yêu cầu, hệ thống sẽ tạo bản nháp có cấu trúc, checklist và căn cứ pháp lý liên quan."}
-        sources={result?.sources}
-        checklist={result?.checklist}
-      />
-      <TemplateModal open={templateOpen} selected={selectedTemplate} onSelect={setSelectedTemplate} onClose={() => setTemplateOpen(false)} />
-      <LawPicker open={lawOpen} selected={selectedLaws} onApply={setSelectedLaws} onClose={() => setLawOpen(false)} />
-    </section>
-  );
-}
-
-function ReviewPage() {
-  const [mode, setMode] = useState<RetrievalMode>("hybrid_rag");
-  const [title, setTitle] = useState("");
-  const [text, setText] = useState("");
-  const [result, setResult] = useState<ReviewResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  return (
-    <section className="tool-page split-page">
-      <div>
-        <PageHeader title="Review hợp đồng" subtitle="Rà soát rủi ro, điều khoản thiếu và căn cứ cần đối chiếu." action={<ModePicker value={mode} onChange={setMode} />} />
-        <form
-          className="tool-form"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            setLoading(true);
-            try {
-              setResult(await reviewContract({ title, text, backend: mode }));
-            } finally {
-              setLoading(false);
-            }
-          }}
-        >
-          <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Tên hợp đồng" />
-          <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="Dán nội dung hợp đồng cần review..." />
-          <div className="form-footer">
-            <label className="ghost-button file-button">
-              <Upload size={16} /> Tải file .txt
-              <input
-                type="file"
-                accept=".txt,.md"
-                onChange={async (event) => {
-                  const file = event.target.files?.[0];
-                  if (file) setText(await readTextFile(file));
-                }}
-              />
-            </label>
-            <button className="primary-button" disabled={loading || text.trim().length < 20}>
-              {loading ? "Đang rà soát..." : "Review hợp đồng"}
-            </button>
-          </div>
-        </form>
-      </div>
-      <div className="result-panel">
-        <h2>Kết quả rà soát</h2>
-        <div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(result?.summary || "Kết quả review sẽ hiển thị sau khi bạn gửi văn bản.") }} />
-        <RiskList risks={result?.risks} />
-        {result?.recommendations && (
-          <ul className="checklist">
-            {result.recommendations.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        )}
-        <SourcePanel sources={result?.sources} />
-      </div>
-    </section>
-  );
-}
-
-function ComparePage() {
-  const [mode, setMode] = useState<RetrievalMode>("hybrid_rag");
-  const [original, setOriginal] = useState("");
-  const [revised, setRevised] = useState("");
-  const [result, setResult] = useState<CompareResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  return (
-    <section className="tool-page">
-      <PageHeader
-        title="So sánh hợp đồng"
-        subtitle="Tải lên hoặc dán hai phiên bản để tìm điểm khác biệt và rủi ro ở bản mới."
-        action={<ModePicker value={mode} onChange={setMode} />}
-      />
-      <form
-        className="compare-grid"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          setLoading(true);
-          try {
-            setResult(await compareContracts({ original_text: original, revised_text: revised, backend: mode }));
-          } finally {
-            setLoading(false);
-          }
-        }}
-      >
-        <DocumentInput title="Bản gốc" value={original} onChange={setOriginal} />
-        <DocumentInput title="Bản mới" value={revised} onChange={setRevised} />
-        <div className="compare-actions">
-          <button className="ghost-button" type="button" onClick={() => { setOriginal(""); setRevised(""); setResult(null); }}>
-            Làm mới
-          </button>
-          <button className="primary-button" disabled={loading || original.length < 20 || revised.length < 20}>
-            {loading ? "Đang so sánh..." : "So sánh"}
-          </button>
-        </div>
-      </form>
-      {result && (
-        <section className="compare-result">
-          <h2>{result.summary}</h2>
-          <div className="diff-list">
-            {result.differences.map((diff, index) => (
-              <article key={`${diff.type}-${index}`}>
-                <span>{diff.type}</span>
-                <div>
-                  <strong>Trước</strong>
-                  <p>{diff.before}</p>
-                </div>
-                <div>
-                  <strong>Sau</strong>
-                  <p>{diff.after}</p>
-                </div>
-              </article>
-            ))}
-          </div>
-          <RiskList risks={result.risks} />
-          <p className="notice">{result.recommendation}</p>
-          <SourcePanel sources={result.sources} />
-        </section>
-      )}
-    </section>
-  );
-}
-
-function SignPage() {
-  const [title, setTitle] = useState("");
-  const [documentText, setDocumentText] = useState("");
-  const [signers, setSigners] = useState("Nguyễn Văn A\nCông ty TNHH ABC");
-  const [result, setResult] = useState<SignatureResponse | null>(null);
-
-  return (
-    <section className="tool-page split-page">
-      <div>
-        <PageHeader title="Ký văn bản" subtitle="Chuẩn bị gói ký, danh sách người ký và hash tài liệu để lưu vết." />
-        <form
-          className="tool-form"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            setResult(
-              await prepareSignature({
-                title,
-                document_text: documentText,
-                signers: signers.split(/\n|,/).map((item) => item.trim()).filter(Boolean),
-              }),
-            );
-          }}
-        >
-          <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Tên văn bản" />
-          <textarea value={documentText} onChange={(event) => setDocumentText(event.target.value)} placeholder="Dán nội dung hoặc tải file cần ký..." />
-          <textarea className="short-textarea" value={signers} onChange={(event) => setSigners(event.target.value)} placeholder="Mỗi người ký một dòng" />
-          <div className="form-footer">
-            <label className="ghost-button file-button">
-              <Upload size={16} /> Tải file .txt
-              <input
-                type="file"
-                accept=".txt,.md"
-                onChange={async (event) => {
-                  const file = event.target.files?.[0];
-                  if (file) {
-                    setTitle(title || file.name);
-                    setDocumentText(await readTextFile(file));
-                  }
-                }}
-              />
-            </label>
-            <button className="primary-button" disabled={title.length < 2 || documentText.length < 5}>
-              Bắt đầu ký văn bản mới
-            </button>
-          </div>
-        </form>
-      </div>
-      <div className="result-panel">
-        <h2>{result ? `Gói ký ${result.signature_id}` : "Gói ký sẽ hiển thị tại đây"}</h2>
-        {result ? (
-          <>
-            <div className="hash-box">{result.document_hash}</div>
-            <div className="signer-list">
-              {result.signers.map((signer) => (
-                <span key={signer}>{signer}</span>
-              ))}
-            </div>
-            <ul className="timeline">
-              {result.audit_log.map((item) => (
-                <li key={`${item.time}-${item.event}`}>
-                  <strong>{item.actor}</strong>
-                  <span>{item.event}</span>
-                </li>
-              ))}
-            </ul>
-            <ul className="checklist">
-              {result.next_steps.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          </>
-        ) : (
-          <p className="muted">Tính năng này tạo gói ký nội bộ demo, chưa tích hợp nhà cung cấp chữ ký số/OAuth.</p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function ArticlesPage({ navigate }: { navigate: (path: string) => void }) {
-  const [query, setQuery] = useState("");
-  const [category, setCategory] = useState("Tất cả");
-  const [selected, setSelected] = useState<Article | null>(null);
-  const categories = ["Tất cả", ...Array.from(new Set(articles.map((article) => article.category)))];
-  const filtered = articles.filter((article) => {
-    const inCategory = category === "Tất cả" || article.category === category;
-    const inQuery = !query || `${article.title} ${article.excerpt}`.toLowerCase().includes(query.toLowerCase());
-    return inCategory && inQuery;
-  });
-
-  return (
-    <section className="articles-page">
-      <div className="article-main">
-        <PageHeader title="Bài viết mới nhất" subtitle="Chia sẻ kiến thức pháp luật, tin tức pháp lý và hướng dẫn hữu ích." />
-        {selected ? (
-          <article className="article-detail">
-            <button className="ghost-button" type="button" onClick={() => setSelected(null)}>
-              <ArrowLeft size={16} /> Quay lại
-            </button>
-            <span className="tag">{selected.category}</span>
-            <h1>{selected.title}</h1>
-            <p>{selected.excerpt}</p>
-            <div className="article-body">
-              <p>VLegal AI có thể dùng nội dung này làm điểm khởi đầu để tra cứu căn cứ pháp lý, tạo mẫu văn bản hoặc review hợp đồng liên quan.</p>
-              <p>Với vụ việc cụ thể, bạn nên đối chiếu thêm tài liệu gốc, thời điểm hiệu lực và dữ kiện thực tế trước khi áp dụng.</p>
-            </div>
-            <button className="primary-button" type="button" onClick={() => navigate("/")}>
-              Hỏi AI về chủ đề này
-            </button>
-          </article>
-        ) : (
-          <div className="article-list">
-            {filtered.map((article) => (
-              <button key={article.id} className="article-card" type="button" onClick={() => setSelected(article)}>
-                <div className="article-thumb">
-                  <FileText size={26} />
-                  <span>{article.category}</span>
-                </div>
-                <div>
-                  <h2>{article.title}</h2>
-                  <p>{article.excerpt}</p>
-                  <small>{article.date} • {article.views} lượt xem</small>
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-      <aside className="article-sidebar">
-        <label className="search-box">
-          <Search size={18} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm kiếm bài viết..." />
-        </label>
-        <div className="sidebar-box">
-          <h3>Chuyên mục</h3>
-          {categories.map((item) => (
-            <button key={item} className={category === item ? "active" : ""} type="button" onClick={() => setCategory(item)}>
-              {item}
-            </button>
-          ))}
-        </div>
-        <div className="sidebar-box">
-          <h3>Công cụ</h3>
-          <button type="button" onClick={() => navigate("/tao-hop-dong")}>Tạo hợp đồng</button>
-          <button type="button" onClick={() => navigate("/phan-tich-hop-dong")}>Phân tích hợp đồng</button>
-          <button type="button" onClick={() => navigate("/so-sanh-hop-dong")}>So sánh hợp đồng</button>
-        </div>
-      </aside>
-    </section>
-  );
-}
-
-function AboutPage() {
-  return (
-    <section className="about-page">
-      <h2>VLEGAL AI VÀ CAM KẾT</h2>
-      <article>
-        <h3>Giới thiệu VLegal AI</h3>
-        <p>
-          VLegal AI là ứng dụng hỗ trợ pháp lý thông minh, kết hợp GraphRAG trên văn bản pháp luật Việt Nam và các công cụ tạo, rà soát, so sánh văn bản.
-        </p>
-      </article>
-      <article>
-        <h3>Dịch vụ chính</h3>
-        <ul>
-          <li><strong>Hỏi đáp pháp luật:</strong> đặt câu hỏi và nhận trả lời có căn cứ nguồn.</li>
-          <li><strong>Tạo hợp đồng:</strong> soạn bản nháp theo mô tả, mẫu và văn bản ưu tiên.</li>
-          <li><strong>Rà soát hợp đồng:</strong> cảnh báo rủi ro, điều khoản thiếu và đề xuất sửa đổi.</li>
-          <li><strong>So sánh hợp đồng:</strong> tìm điểm khác biệt giữa hai phiên bản.</li>
-          <li><strong>Ký văn bản:</strong> chuẩn bị gói ký, người ký và hash tài liệu để lưu vết.</li>
-        </ul>
-      </article>
-      <article>
-        <h3>Cam kết bảo mật</h3>
-        <p>Dữ liệu người dùng cần được bảo vệ theo quy trình nội bộ. Không chia sẻ nội dung hợp đồng hoặc hồ sơ pháp lý cho bên thứ ba nếu chưa có căn cứ hợp pháp.</p>
-      </article>
-      <article>
-        <h3>Lưu ý quan trọng</h3>
-        <p>AI không thay thế luật sư. Với giao dịch có giá trị lớn hoặc tranh chấp phức tạp, hãy rà soát cùng chuyên gia pháp lý trước khi ký hoặc nộp hồ sơ.</p>
-      </article>
+        <button className="icon-button" type="button" onClick={() => navigator.clipboard?.writeText(text)} aria-label="Sao chép">
+          <Copy size={17} />
+        </button>
+      </header>
+      <VerificationBadge report={verification} />
+      <div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(text) }} />
+      {children}
+      <SourcePanel sources={sources} />
     </section>
   );
 }
@@ -936,6 +287,7 @@ function PageHeader({ title, subtitle, action }: { title: string; subtitle: stri
   return (
     <header className="page-header">
       <div>
+        <span className="eyebrow">VLegal workspace</span>
         <h1>{title}</h1>
         <p>{subtitle}</p>
       </div>
@@ -944,72 +296,479 @@ function PageHeader({ title, subtitle, action }: { title: string; subtitle: stri
   );
 }
 
-function DocumentInput({
-  title,
-  value,
-  onChange,
-}: {
-  title: string;
-  value: string;
-  onChange: (value: string) => void;
-}) {
+function DocumentInput({ title, value, onChange }: { title: string; value: string; onChange: (value: string) => void }) {
   return (
     <label className="document-input">
       <span>{title}</span>
       <textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={`Dán nội dung ${title.toLowerCase()}...`} />
-      <label className="ghost-button file-button">
-        <Upload size={16} /> Tải file .txt
-        <input
-          type="file"
-          accept=".txt,.md"
-          onChange={async (event) => {
-            const file = event.target.files?.[0];
-            if (file) onChange(await readTextFile(file));
-          }}
-        />
-      </label>
+      <div className="document-input-footer">
+        <label className="ghost-button file-button">
+          <Upload size={16} /> Tải .txt/.md
+          <input
+            type="file"
+            accept=".txt,.md"
+            onChange={async (event) => {
+              const file = event.target.files?.[0];
+              if (file) onChange(await readTextFile(file));
+            }}
+          />
+        </label>
+        <span>{value.length.toLocaleString("vi-VN")} ký tự</span>
+      </div>
     </label>
   );
 }
 
-function ResultPanel({
-  title,
-  text,
-  sources,
-  checklist,
-}: {
-  title: string;
-  text: string;
-  sources?: Source[];
-  checklist?: string[];
-}) {
+function ChatPage({ user }: { user: User | null }) {
+  const authenticated = Boolean(user);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => (authenticated ? [] : readGuestMessages()));
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const [error, setError] = useState("");
+
+  const reloadHistory = useCallback(() => {
+    if (!authenticated) {
+      setConversations([]);
+      return;
+    }
+    conversationApi.list().then(setConversations).catch((reason) => setError((reason as Error).message));
+  }, [authenticated]);
+
+  useEffect(() => reloadHistory(), [reloadHistory]);
+  useEffect(() => {
+    if (!authenticated) writeGuestMessages(messages);
+  }, [authenticated, messages]);
+
+  const openConversation = async (id: string) => {
+    if (!authenticated) return;
+    setError("");
+    const data = await conversationApi.get(id);
+    setConversationId(id);
+    setMessages(data.messages);
+  };
+
+  const newConversation = () => {
+    setConversationId(null);
+    setMessages([]);
+    setInput("");
+    if (!authenticated) sessionStorage.removeItem(GUEST_CHAT_STORAGE_KEY);
+  };
+
+  const submit = async (question = input) => {
+    const trimmed = question.trim();
+    if (!trimmed || loading) return;
+    setError("");
+    setLoading(true);
+    const userMessage: ChatMessage = { id: uid(), role: "user", content: trimmed };
+    const pendingId = uid();
+    setMessages((current) => [
+      ...current,
+      userMessage,
+      { id: pendingId, role: "assistant", content: "Đang đối chiếu hiệu lực văn bản và xây dựng câu trả lời…", pending: true },
+    ]);
+    setInput("");
+    try {
+      const history = messages
+        .filter((message) => !message.pending)
+        .slice(-12)
+        .map(({ role, content }) => ({ role, content: content.slice(0, 4000) }));
+      const data = await askLegalQuestion(trimmed, authenticated ? conversationId : null, history);
+      setConversationId(data.conversation_id || null);
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingId
+            ? {
+                id: data.message_id,
+                conversation_id: data.conversation_id || undefined,
+                role: "assistant",
+                content: data.answer,
+                sources: data.sources,
+                verification: data.verification,
+              }
+            : message,
+        ),
+      );
+      if (authenticated) reloadHistory();
+    } catch (reason) {
+      const message = (reason as Error).message;
+      setMessages((current) => current.filter((item) => item.id !== pendingId));
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className="result-panel">
-      <div className="result-header">
-        <h2>{title}</h2>
-        <button className="icon-button" type="button" onClick={() => navigator.clipboard?.writeText(text)} aria-label="Sao chép">
-          <Copy size={17} />
-        </button>
-      </div>
-      <div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(text) }} />
-      {checklist && (
-        <ul className="checklist">
-          {checklist.map((item) => (
-            <li key={item}>{item}</li>
+    <section className="chat-page">
+      <aside className={historyOpen ? "chat-history" : "chat-history hidden"}>
+        <div className="history-head">
+          <strong>{authenticated ? "Lịch sử hỏi đáp" : "Phiên trò chuyện tạm"}</strong>
+          <button className="icon-button compact" type="button" onClick={newConversation} aria-label="Tạo cuộc trò chuyện">
+            <Plus size={16} />
+          </button>
+        </div>
+        <div className="conversation-list">
+          {authenticated && conversations.map((item) => (
+            <div className={item.id === conversationId ? "conversation-row active" : "conversation-row"} key={item.id}>
+              <button type="button" onClick={() => openConversation(item.id)}>
+                <MessageSquareText size={15} />
+                <span>
+                  <strong>{item.title}</strong>
+                  <small>{item.message_count} tin · {formatDate(item.updated_at)}</small>
+                </span>
+              </button>
+              <button
+                className="row-action"
+                type="button"
+                onClick={async () => {
+                  await conversationApi.remove(item.id);
+                  if (conversationId === item.id) newConversation();
+                  reloadHistory();
+                }}
+                aria-label="Xóa cuộc trò chuyện"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
           ))}
-        </ul>
-      )}
-      <SourcePanel sources={sources} />
-    </div>
+          {authenticated && !conversations.length && <p className="empty-copy">Các cuộc trò chuyện đã lưu sẽ xuất hiện tại đây.</p>}
+          {!authenticated && (
+            <div className="guest-session-card">
+              <Clock3 size={18} />
+              <strong>Không lưu trên máy chủ</strong>
+              <p>Đoạn chat chỉ tồn tại trong tab này và sẽ mất khi kết thúc phiên trình duyệt.</p>
+              <a href={authApi.loginUrl("/")}><LogIn size={14} /> Đăng nhập Google để lưu</a>
+            </div>
+          )}
+        </div>
+      </aside>
+
+      <div className="chat-main">
+        <header className="chat-topbar">
+          <button className="icon-button compact" type="button" onClick={() => setHistoryOpen((value) => !value)} aria-label="Ẩn hiện lịch sử">
+            <History size={17} />
+          </button>
+          <div className="chat-title">
+            <strong>Trợ lý pháp lý</strong>
+            <span><Wifi size={12} /> {authenticated ? "Tự động dùng toàn bộ kho luật" : "Phiên tạm thời · không lưu trên máy chủ"}</span>
+          </div>
+          <div className="chat-topbar-actions">
+            {!authenticated && <a className="google-login-inline" href={authApi.loginUrl("/")}><LogIn size={15} /> Đăng nhập Google</a>}
+            <button className="ghost-button" type="button" onClick={newConversation}>
+              <Plus size={16} /> Cuộc trò chuyện mới
+            </button>
+          </div>
+        </header>
+
+        <div className="chat-scroll">
+          {messages.length === 0 ? (
+            <div className="welcome">
+              <div className="welcome-mark"><Scale size={30} /></div>
+              <span className="eyebrow">Kho luật Việt Nam hợp nhất</span>
+              <h1>Hỏi pháp luật, nhận câu trả lời có căn cứ đang còn hiệu lực.</h1>
+              <p>{authenticated ? "Mỗi kết quả được đối chiếu nguồn chính thức, tự cập nhật văn bản thay thế và lưu vào lịch sử của bạn." : "Bạn có thể hỏi ngay không cần đăng nhập. Đoạn chat hiện tại chỉ được giữ tạm trong tab trình duyệt này."}</p>
+              <div className="suggestion-grid">
+                {sampleQuestions.map((question) => (
+                  <button key={question} type="button" onClick={() => submit(question)}>
+                    <Sparkles size={17} />
+                    <span>{question}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="messages">
+              {messages.map((message) => (
+                <article className={`message ${message.role}`} key={message.id}>
+                  {message.role === "assistant" && <div className="avatar"><Scale size={16} /></div>}
+                  <div className="bubble">
+                    <div dangerouslySetInnerHTML={{ __html: markdown(message.content) }} />
+                    {message.pending && <div className="loading-line" />}
+                    <VerificationBadge report={message.verification} />
+                    <SourcePanel sources={message.sources} />
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+        {error && <div className="chat-error"><ErrorNotice error={error} onClose={() => setError("")} /></div>}
+        <form
+          className="composer"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit();
+          }}
+        >
+          <div className="policy-line"><CheckCircle2 size={14} /> Đối chiếu nguồn chính thức · AI Qwen3 · áp dụng toàn bộ kho luật{!authenticated && " · chat tạm thời"}</div>
+          <div className="input-wrap">
+            <textarea
+              value={input}
+              maxLength={5000}
+              rows={1}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder="Nhập tình huống hoặc câu hỏi pháp lý…"
+            />
+            <span className="counter">{input.length}/5000</span>
+            <button className="primary-icon" type="submit" disabled={!input.trim() || loading} aria-label="Gửi câu hỏi">
+              <SendHorizontal size={18} />
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
   );
+}
+
+function ContractPage() {
+  const [templates, setTemplates] = useState<Template[]>(templateFallback);
+  const [selected, setSelected] = useState<Template>(templateFallback[0]);
+  const [prompt, setPrompt] = useState("");
+  const [result, setResult] = useState<DraftResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    getTemplates().then((data) => {
+      if (data.items.length) {
+        setTemplates(data.items);
+        setSelected(data.items[0]);
+      }
+    }).catch(() => undefined);
+  }, []);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!prompt.trim()) return;
+    setLoading(true);
+    setError("");
+    try {
+      setResult(await draftContract({ prompt, template_id: selected.id, template_name: selected.name }));
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section className="tool-page">
+      <PageHeader title="Tạo hợp đồng bằng AI" subtitle="Qwen3 soạn bản nháp từ yêu cầu của bạn, tự áp dụng toàn bộ văn bản liên quan và kiểm tra hiệu lực trước khi tạo." />
+      {error && <ErrorNotice error={error} onClose={() => setError("")} />}
+      <div className="workspace-grid">
+        <form className="workspace-card tool-form" onSubmit={submit}>
+          <div className="section-title"><span>1</span><div><h2>Chọn loại hợp đồng</h2><p>Có thể đổi loại sau khi đã nhập yêu cầu.</p></div></div>
+          <div className="template-grid-inline">
+            {templates.map((item) => (
+              <button key={item.id} className={selected.id === item.id ? "template-option active" : "template-option"} type="button" onClick={() => setSelected(item)}>
+                <FileText size={17} /><span><strong>{item.name}</strong><small>{item.category}</small></span>
+                {selected.id === item.id && <Check size={15} />}
+              </button>
+            ))}
+          </div>
+          <div className="section-title"><span>2</span><div><h2>Mô tả yêu cầu</h2><p>Nêu các bên, mục đích, giá trị, thời hạn và điều kiện đặc biệt.</p></div></div>
+          <textarea className="large-textarea" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={30000} placeholder="Ví dụ: Soạn hợp đồng dịch vụ phát triển phần mềm giữa công ty A và công ty B, nghiệm thu theo 3 giai đoạn…" />
+          <div className="form-footer">
+            <span className="policy-line"><ShieldCheck size={14} /> Tự kiểm tra luật hiện hành</span>
+            <button className="primary-button" type="submit" disabled={loading || prompt.trim().length < 8}>
+              {loading ? <><RefreshCw className="spin" size={16} /> Đang soạn…</> : <><Sparkles size={16} /> Tạo bản nháp</>}
+            </button>
+          </div>
+        </form>
+        <ResultPanel
+          title={result?.title || "Bản nháp sẽ xuất hiện tại đây"}
+          text={result?.draft || "Mô tả yêu cầu càng cụ thể, bản nháp càng sát giao dịch. Kết quả được lưu tự động vào Thư viện tài liệu."}
+          sources={result?.sources}
+          verification={result?.verification}
+        >
+          {result?.checklist && (
+            <div className="checklist-box"><h3>Checklist trước khi ký</h3>{result.checklist.map((item) => <p key={item}><CheckCircle2 size={15} />{item}</p>)}</div>
+          )}
+        </ResultPanel>
+      </div>
+    </section>
+  );
+}
+
+function RiskList({ risks }: { risks?: Risk[] }) {
+  if (!risks?.length) return null;
+  return <div className="risk-list">{risks.map((risk, index) => (
+    <article className={`risk-card ${risk.level}`} key={`${risk.title}-${index}`}>
+      <span>{risk.level === "high" ? "Cao" : risk.level === "medium" ? "Trung bình" : "Thấp"}</span>
+      <h3>{risk.title}</h3><p>{risk.detail}</p><strong>{risk.recommendation}</strong>
+    </article>
+  ))}</div>;
+}
+
+function ReviewPage() {
+  const [title, setTitle] = useState("");
+  const [text, setText] = useState("");
+  const [result, setResult] = useState<ReviewResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <section className="tool-page">
+      <PageHeader title="Review hợp đồng" subtitle="Phát hiện điều khoản bất lợi, thiếu sót và đề xuất cách sửa dựa trên căn cứ đang có hiệu lực." />
+      {error && <ErrorNotice error={error} onClose={() => setError("")} />}
+      <div className="workspace-grid">
+        <form className="workspace-card tool-form" onSubmit={async (event) => {
+          event.preventDefault(); setLoading(true); setError("");
+          try { setResult(await reviewContract({ title: title || undefined, text })); }
+          catch (reason) { setError((reason as Error).message); }
+          finally { setLoading(false); }
+        }}>
+          <label className="field"><span>Tên tài liệu</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Hợp đồng dịch vụ 2026" /></label>
+          <DocumentInput title="Nội dung hợp đồng" value={text} onChange={setText} />
+          <button className="primary-button align-right" type="submit" disabled={loading || text.trim().length < 20}>
+            {loading ? "Đang review…" : "Review bằng Qwen3"}
+          </button>
+        </form>
+        <ResultPanel title="Kết quả review" text={result?.summary || "Kết quả tổng quan, danh sách rủi ro và khuyến nghị sẽ hiển thị tại đây."} sources={result?.sources} verification={result?.verification}>
+          <RiskList risks={result?.risks} />
+          {result?.recommendations?.length ? <div className="recommendations"><h3>Khuyến nghị</h3>{result.recommendations.map((item) => <p key={item}><Check size={15} />{item}</p>)}</div> : null}
+        </ResultPanel>
+      </div>
+    </section>
+  );
+}
+
+function ComparePage() {
+  const [original, setOriginal] = useState("");
+  const [revised, setRevised] = useState("");
+  const [result, setResult] = useState<CompareResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <section className="tool-page">
+      <PageHeader title="So sánh hợp đồng" subtitle="So sánh ngữ nghĩa, tác động pháp lý và rủi ro phát sinh giữa hai phiên bản." />
+      {error && <ErrorNotice error={error} onClose={() => setError("")} />}
+      <form className="compare-grid" onSubmit={async (event) => {
+        event.preventDefault(); setLoading(true); setError("");
+        try { setResult(await compareContracts({ original_text: original, revised_text: revised })); }
+        catch (reason) { setError((reason as Error).message); }
+        finally { setLoading(false); }
+      }}>
+        <DocumentInput title="Bản gốc" value={original} onChange={setOriginal} />
+        <DocumentInput title="Bản sửa đổi" value={revised} onChange={setRevised} />
+        <button className="primary-button compare-submit" type="submit" disabled={loading || original.length < 20 || revised.length < 20}>
+          <FileDiff size={16} /> {loading ? "Đang so sánh…" : "So sánh bằng Qwen3"}
+        </button>
+      </form>
+      {result && <ResultPanel title={`Mức tương đồng ${result.similarity}%`} text={result.summary} sources={result.sources} verification={result.verification}>
+        <div className="diff-list">{result.differences.map((item, index) => <article key={`${item.type}-${index}`}><span>{item.type}</span><div><small>Trước</small><p>{item.before}</p></div><div><small>Sau</small><p>{item.after}</p></div><strong>{item.legal_impact}</strong></article>)}</div>
+        <RiskList risks={result.risks} />
+      </ResultPanel>}
+    </section>
+  );
+}
+
+function SignaturePage() {
+  const [title, setTitle] = useState("");
+  const [text, setText] = useState("");
+  const [signers, setSigners] = useState("");
+  const [result, setResult] = useState<SignatureResponse | null>(null);
+  const [error, setError] = useState("");
+  return (
+    <section className="tool-page">
+      <PageHeader title="Ký văn bản" subtitle="Chuẩn bị gói ký, tạo dấu vân tay SHA-256 và lưu nhật ký nghiệp vụ trước khi chuyển sang nhà cung cấp chữ ký số." />
+      {error && <ErrorNotice error={error} onClose={() => setError("")} />}
+      <div className="workspace-grid">
+        <form className="workspace-card tool-form" onSubmit={async (event) => {
+          event.preventDefault(); setError("");
+          try { setResult(await prepareSignature({ title, document_text: text, signers: signers.split("\n").filter(Boolean) })); }
+          catch (reason) { setError((reason as Error).message); }
+        }}>
+          <label className="field"><span>Tên văn bản</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Biên bản thỏa thuận" /></label>
+          <DocumentInput title="Văn bản cần ký" value={text} onChange={setText} />
+          <label className="field"><span>Người ký — mỗi người một dòng</span><textarea value={signers} onChange={(event) => setSigners(event.target.value)} placeholder="Nguyễn Văn A&#10;Trần Thị B" /></label>
+          <button className="primary-button align-right" type="submit" disabled={title.length < 2 || text.length < 5}><PenTool size={16} /> Tạo gói ký</button>
+        </form>
+        <section className="result-panel signature-result">
+          <span className="eyebrow">Gói ký</span><h2>{result?.title || "Chưa tạo gói ký"}</h2>
+          {result ? <><div className="hash-box"><small>SHA-256</small>{result.document_hash}</div><div className="signer-list">{result.signers.map((name) => <span key={name}><UserRound size={14} />{name}</span>)}</div><div className="timeline">{result.audit_log.map((item) => <div key={`${item.time}-${item.event}`}><Clock3 size={15} /><span><strong>{item.event}</strong><small>{item.actor} · {formatDate(item.time)}</small></span></div>)}</div></> : <p className="empty-copy">Nhập văn bản và danh sách người ký để tạo mã hồ sơ có thể theo dõi.</p>}
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function ArticlesPage() {
+  const [query, setQuery] = useState("");
+  const [articles, setArticles] = useState<Article[]>([]);
+  const [webSummary, setWebSummary] = useState("");
+  const [webSources, setWebSources] = useState<WebSource[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const load = useCallback((value = "") => articleApi.list(value).then((data) => setArticles(data.items)).catch((reason) => setError((reason as Error).message)), []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  return (
+    <section className="tool-page articles-page">
+      <PageHeader title="Bài viết & nghiên cứu web" subtitle="Đọc bài đã biên tập hoặc dùng Tavily để nghiên cứu chủ đề pháp lý trên internet với nguồn dẫn rõ ràng." />
+      {error && <ErrorNotice error={error} onClose={() => setError("")} />}
+      <form className="web-search-card" onSubmit={async (event) => {
+        event.preventDefault(); if (!query.trim()) return; setLoading(true); setError("");
+        try { const data = await articleApi.webSearch(query); setWebSummary(data.summary); setWebSources(data.sources); load(query); }
+        catch (reason) { setError((reason as Error).message); }
+        finally { setLoading(false); }
+      }}>
+        <Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm chủ đề pháp lý trên web…" />
+        <button className="primary-button" type="submit" disabled={loading || query.length < 2}>{loading ? "Đang tìm…" : "Tìm trên web"}</button>
+      </form>
+      {webSummary && <section className="research-result"><span className="eyebrow">Tổng hợp từ internet</span><div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(webSummary) }} /><div className="web-source-grid">{webSources.map((source) => <a key={source.id} href={source.url} target="_blank" rel="noreferrer"><span>{source.id}</span><strong>{source.title}</strong><ExternalLink size={14} /></a>)}</div></section>}
+      <div className="article-list">{articles.map((article) => <article className="article-card" key={article.id}><div className="article-icon"><BookOpen size={23} /><span>{article.category}</span></div><div><small>{formatDate(article.published_at || article.created_at)} · {article.views} lượt xem</small><h2>{article.title}</h2><p>{article.excerpt}</p>{article.source_url && <a href={article.source_url} target="_blank" rel="noreferrer">Nguồn tham khảo <ExternalLink size={13} /></a>}</div></article>)}{!articles.length && <div className="empty-state"><BookOpen size={28} /><h3>Chưa có bài viết</h3><p>Hãy tìm một chủ đề trên web để bắt đầu nghiên cứu.</p></div>}</div>
+    </section>
+  );
+}
+
+function LibraryPage() {
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [tab, setTab] = useState<"documents" | "chats">("documents");
+  const reload = useCallback(() => Promise.all([artifactApi.list().then(setArtifacts), conversationApi.list().then(setConversations)]), []);
+  useEffect(() => { reload().catch(() => undefined); }, [reload]);
+  return (
+    <section className="tool-page library-page">
+      <PageHeader title="Lịch sử & tài liệu" subtitle="Quản lý toàn bộ cuộc trò chuyện, bản nháp, kết quả review và so sánh đã được lưu an toàn." />
+      <div className="tab-bar"><button className={tab === "documents" ? "active" : ""} onClick={() => setTab("documents")}><FileText size={16} />Tài liệu ({artifacts.length})</button><button className={tab === "chats" ? "active" : ""} onClick={() => setTab("chats")}><MessageSquareText size={16} />Hỏi đáp ({conversations.length})</button></div>
+      <div className="library-list">
+        {tab === "documents" ? artifacts.map((item) => <article key={item.id}><div className="library-icon"><FileText size={19} /></div><div><small>{item.kind.replaceAll("_", " ")} · {formatDate(item.updated_at)}</small><h3>{item.title}</h3><p>{item.content.slice(0, 180)}</p></div><button className="icon-button" type="button" onClick={async () => { await artifactApi.remove(item.id); reload(); }} aria-label="Xóa tài liệu"><Trash2 size={15} /></button></article>) : conversations.map((item) => <article key={item.id}><div className="library-icon"><MessageSquareText size={19} /></div><div><small>{item.message_count} tin nhắn · {formatDate(item.updated_at)}</small><h3>{item.title}</h3><p>Cuộc trò chuyện pháp lý đã lưu.</p></div><button className="icon-button" type="button" onClick={async () => { await conversationApi.update(item.id, { status: "ARCHIVED" }); reload(); }} aria-label="Lưu trữ"><Archive size={15} /></button></article>)}
+        {((tab === "documents" && !artifacts.length) || (tab === "chats" && !conversations.length)) && <div className="empty-state"><FolderClock size={30} /><h3>Chưa có dữ liệu</h3><p>Kết quả AI của bạn sẽ tự động được lưu tại đây.</p></div>}
+      </div>
+    </section>
+  );
+}
+
+function FeedbackModal({ open, page, onClose }: { open: boolean; page: string; onClose: () => void }) {
+  const [message, setMessage] = useState("");
+  const [sent, setSent] = useState(false);
+  if (!open) return null;
+  return <div className="modal-backdrop"><form className="modal feedback-modal" onSubmit={async (event) => { event.preventDefault(); await sendFeedback({ message, page }); setSent(true); setMessage(""); }}><header><div><span className="eyebrow">Phản hồi</span><h2>Giúp VLegal tốt hơn</h2></div><button className="icon-button" type="button" onClick={onClose}><X size={17} /></button></header>{sent && <div className="success-notice"><CheckCircle2 size={16} />Đã ghi nhận góp ý.</div>}<textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Nội dung góp ý…" /><footer><button className="ghost-button" type="button" onClick={onClose}>Đóng</button><button className="primary-button" type="submit" disabled={message.length < 3}>Gửi góp ý</button></footer></form></div>;
+}
+
+function SignInGate({ error, onContinue }: { error?: string; onContinue: () => void }) {
+  return <div className="signin-page"><div className="signin-card"><div className="brand-mark"><Scale size={29} /></div><span className="eyebrow">VLegal AI</span><h1>Đăng nhập bằng Google</h1><p>Dùng tài khoản Gmail hoặc Google Workspace để lưu lịch sử, quản lý tài liệu và sử dụng các công cụ hợp đồng AI.</p>{error && <ErrorNotice error={error} />}<a className="primary-button signin-button google-signin" href={authApi.loginUrl(window.location.pathname)}><span className="google-mark">G</span>Tiếp tục với Google</a><button className="guest-continue" type="button" onClick={onContinue}>Tiếp tục hỏi đáp không cần đăng nhập</button><small>Không đăng nhập vẫn dùng được chat tạm thời; nội dung không được lưu vào tài khoản hoặc PostgreSQL.</small></div></div>;
 }
 
 function App() {
   const [path, navigate] = usePath();
-  const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 820);
+  const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 900);
   const [dark, setDark] = useState(() => localStorage.getItem("vlegal-theme") === "dark");
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
 
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
@@ -1017,89 +776,35 @@ function App() {
   }, [dark]);
 
   useEffect(() => {
-    getStats().then(setStats).catch(() => setStats(null));
+    authApi.me().then(setUser).catch((reason) => {
+      if (!(reason instanceof ApiError) || reason.status !== 401) setAuthError((reason as Error).message);
+    }).finally(() => setAuthLoading(false));
+    getStats().then(setStats).catch(() => undefined);
   }, []);
 
-  const activeRoute = useMemo(
-    () => routes.find((route) => route.path === path) || routes[0],
-    [path],
-  );
-
+  const activeRoute = useMemo(() => routes.find((route) => route.path === path) || routes[0], [path]);
   const page = useMemo(() => {
+    if (!user && path !== "/") return <SignInGate error={authError} onContinue={() => navigate("/")} />;
     if (path === "/tao-hop-dong") return <ContractPage />;
-    if (path === "/phan-tich-hop-dong") return <ReviewPage />;
+    if (path === "/review-hop-dong" || path === "/phan-tich-hop-dong") return <ReviewPage />;
     if (path === "/so-sanh-hop-dong") return <ComparePage />;
-    if (path === "/ky-van-ban") return <SignPage />;
-    if (path === "/bai-viet") return <ArticlesPage navigate={navigate} />;
-    if (path === "/gioi-thieu") return <AboutPage />;
-    return <ChatPage />;
-  }, [path, navigate]);
+    if (path === "/ky-van-ban") return <SignaturePage />;
+    if (path === "/bai-viet") return <ArticlesPage />;
+    if (path === "/thu-vien") return <LibraryPage />;
+    return <ChatPage user={user} />;
+  }, [authError, navigate, path, user]);
+
+  if (authLoading) return <div className="app-loading"><Scale size={34} /><span>Đang mở VLegal AI…</span></div>;
 
   return (
     <div className="app-shell">
       <aside className={collapsed ? "sidebar collapsed" : "sidebar"}>
-        <div className="brand-row">
-          <button className="brand" type="button" onClick={() => navigate("/")}>
-            <Scale size={25} />
-            <span>VLegal AI</span>
-          </button>
-          <button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label="Thu gọn sidebar">
-            <AlignLeft size={18} />
-          </button>
-        </div>
-        <nav className="nav-list">
-          {routes.map((route) => {
-            const Icon = route.icon;
-            return (
-              <button
-                key={route.path}
-                type="button"
-                className={activeRoute.path === route.path ? "active" : ""}
-                onClick={() => navigate(route.path)}
-              >
-                <Icon size={19} />
-                <span>{route.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <div className="sidebar-meta">
-          <div>
-            <strong>{stats?.documents ?? "-"}</strong>
-            <span>văn bản</span>
-          </div>
-          <div>
-            <strong>{stats?.chunks ?? "-"}</strong>
-            <span>chunks</span>
-          </div>
-        </div>
-        <div className="sidebar-actions">
-          <button type="button" onClick={() => setFeedbackOpen(true)}>
-            <Bot size={17} />
-            <span>Gửi góp ý</span>
-          </button>
-          <button type="button" className="login-button">
-            <LogIn size={17} />
-            <span>Đăng nhập Google</span>
-          </button>
-          <button type="button" onClick={() => setDark((value) => !value)}>
-            {dark ? <Sun size={17} /> : <Moon size={17} />}
-            <span>{dark ? "Chế độ sáng" : "Chế độ tối"}</span>
-          </button>
-        </div>
+        <div className="brand-row"><button className="brand" type="button" onClick={() => navigate("/")}><span className="brand-mark"><Scale size={22} /></span><span><strong>VLegal</strong><small>Legal intelligence</small></span></button><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label="Thu gọn"><AlignLeft size={18} /></button></div>
+        <nav className="nav-list"><span className="nav-label">Không gian làm việc</span>{routes.map((route) => { const Icon = route.icon; return <button key={route.path} type="button" className={activeRoute.path === route.path ? "active" : ""} onClick={() => { navigate(route.path); if (window.innerWidth <= 900) setCollapsed(true); }}><Icon size={19} /><span>{route.label}</span></button>; })}</nav>
+        <div className="system-card"><ShieldCheck size={17} /><span><strong>Luật luôn được kiểm tra</strong><small>{stats?.documents ?? "—"} văn bản · {stats?.chunks ?? "—"} chunks</small></span></div>
+        <div className="sidebar-actions"><button type="button" onClick={() => setFeedbackOpen(true)}><Bot size={17} /><span>Gửi góp ý</span></button><button type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={17} /> : <Moon size={17} />}<span>{dark ? "Giao diện sáng" : "Giao diện tối"}</span></button>{user ? <div className="user-card"><span className="user-avatar">{user.avatar_url ? <img src={user.avatar_url} alt="" /> : user.display_name.charAt(0).toUpperCase()}</span><span><strong>{user.display_name}</strong><small>{user.email}</small></span><button type="button" onClick={async () => { await authApi.logout(); window.location.reload(); }} aria-label="Đăng xuất"><LogOut size={16} /></button></div> : <div className="user-card guest-user-card"><span className="user-avatar"><UserRound size={17} /></span><span><strong>Khách</strong><small>Chat tạm thời</small></span><a href={authApi.loginUrl(path)} aria-label="Đăng nhập bằng Google"><LogIn size={16} /></a></div>}</div>
       </aside>
-      <div className="content-shell">
-        <header className="mobile-topbar">
-          <button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label="Mở menu">
-            <Menu size={19} />
-          </button>
-          <strong>{activeRoute.label}</strong>
-          <button className="icon-button" type="button" onClick={() => setDark((value) => !value)} aria-label="Đổi giao diện">
-            {dark ? <Sun size={18} /> : <Moon size={18} />}
-          </button>
-        </header>
-        <main className="content">{page}</main>
-      </div>
+      <div className="content-shell"><header className="mobile-topbar"><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)}><Menu size={19} /></button><strong>{activeRoute.label}</strong><button className="icon-button" type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button></header><main className="content">{page}</main></div>
       <FeedbackModal open={feedbackOpen} page={path} onClose={() => setFeedbackOpen(false)} />
     </div>
   );
