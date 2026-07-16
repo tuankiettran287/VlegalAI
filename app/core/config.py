@@ -62,11 +62,17 @@ class Settings(BaseSettings):
     require_freshness_check: bool = True
     max_laws_verified_per_request: int = 16
 
-    qwen_api_key: str = ""
-    qwen_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-    qwen_model: str = "qwen3-235b-a22b-instruct-2507"
-    qwen_embedding_model: str = "text-embedding-v4"
-    qwen_timeout_seconds: int = 90
+    # Qwen runs in-process from a checkpoint that already exists on disk.
+    # No prompt or legal document is sent to an external model API.
+    qwen_model_path: str = str(PROJECT_ROOT / "models" / "Qwen3-4B")
+    qwen_model: str = "Qwen3-4B"
+    qwen_device: Literal["auto", "cuda", "cpu", "mps"] = "auto"
+    qwen_dtype: Literal["auto", "bfloat16", "float16", "float32"] = "auto"
+    qwen_max_input_tokens: int = Field(default=24_576, ge=512)
+    qwen_max_new_tokens: int = Field(default=5_120, ge=64)
+    qwen_max_concurrent_generations: int = Field(default=1, ge=1, le=8)
+    qwen_top_p: float = Field(default=0.9, gt=0, le=1)
+    qwen_trust_remote_code: bool = False
 
     tavily_api_key: str = ""
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"
@@ -151,7 +157,15 @@ class Settings(BaseSettings):
 
     @property
     def qwen_ready(self) -> bool:
-        return bool(self.qwen_api_key)
+        model_path = Path(self.qwen_model_path).expanduser()
+        if not model_path.is_absolute():
+            model_path = PROJECT_ROOT / model_path
+        return model_path.is_dir() and (model_path / "config.json").is_file()
+
+    @property
+    def qwen_local_path(self) -> Path:
+        model_path = Path(self.qwen_model_path).expanduser()
+        return model_path if model_path.is_absolute() else PROJECT_ROOT / model_path
 
     @property
     def tavily_ready(self) -> bool:

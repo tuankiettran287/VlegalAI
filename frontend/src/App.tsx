@@ -42,7 +42,6 @@ import {
   Trash2,
   Upload,
   UserRound,
-  Wifi,
   X,
 } from "lucide-react";
 import {
@@ -54,7 +53,6 @@ import {
   compareContracts,
   conversationApi,
   draftContract,
-  getStats,
   getTemplates,
   prepareSignature,
   reviewContract,
@@ -63,7 +61,6 @@ import {
   type DraftResponse,
   type ReviewResponse,
   type SignatureResponse,
-  type StatsResponse,
 } from "./api";
 import { sampleQuestions, templateFallback } from "./data";
 import type {
@@ -96,6 +93,7 @@ function uid() {
 const GUEST_CHAT_STORAGE_KEY = "vlegal-guest-chat-v1";
 
 function readGuestMessages(): ChatMessage[] {
+  if (typeof window === "undefined") return [];
   try {
     const parsed = JSON.parse(sessionStorage.getItem(GUEST_CHAT_STORAGE_KEY) || "[]") as ChatMessage[];
     return parsed
@@ -107,6 +105,7 @@ function readGuestMessages(): ChatMessage[] {
 }
 
 function writeGuestMessages(messages: ChatMessage[]) {
+  if (typeof window === "undefined") return;
   const completed = messages.filter((item) => !item.pending).slice(-24);
   try {
     if (!completed.length) {
@@ -150,13 +149,14 @@ function formatDate(value?: string | null) {
 }
 
 function usePath() {
-  const [path, setPath] = useState(window.location.pathname);
+  const [path, setPath] = useState(() => window.location.pathname.replace(/\/$/, "") || "/");
   useEffect(() => {
-    const onPop = () => setPath(window.location.pathname);
+    const onPop = () => setPath(window.location.pathname.replace(/\/$/, "") || "/");
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
   const navigate = useCallback((nextPath: string) => {
+    if (window.location.pathname.replace(/\/$/, "") === nextPath) return;
     window.history.pushState({}, "", nextPath);
     setPath(nextPath);
   }, []);
@@ -209,7 +209,7 @@ function VerificationBadge({ report }: { report?: VerificationReport }) {
               REPLACED: "Đã thay thế",
               UNKNOWN: "Chưa rõ",
             }[item.status]}</span>
-            {item.index_updated && <small>Đã cập nhật chỉ mục</small>}
+            {item.index_updated && <small>Đã cập nhật dữ liệu</small>}
             {item.source_url && (
               <a href={item.source_url} target="_blank" rel="noreferrer" aria-label={`Mở nguồn ${item.code}`}>
                 <ExternalLink size={14} />
@@ -319,7 +319,7 @@ function DocumentInput({ title, value, onChange }: { title: string; value: strin
   );
 }
 
-function ChatPage({ user }: { user: User | null }) {
+function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: boolean }) {
   const authenticated = Boolean(user);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -402,8 +402,8 @@ function ChatPage({ user }: { user: User | null }) {
   };
 
   return (
-    <section className="chat-page">
-      <aside className={historyOpen ? "chat-history" : "chat-history hidden"}>
+    <section className={historyOpen ? "chat-page" : "chat-page history-collapsed"}>
+      <aside id="chat-history-panel" className={historyOpen ? "chat-history" : "chat-history hidden"}>
         <div className="history-head">
           <strong>{authenticated ? "Lịch sử hỏi đáp" : "Phiên trò chuyện tạm"}</strong>
           <button className="icon-button compact" type="button" onClick={newConversation} aria-label="Tạo cuộc trò chuyện">
@@ -438,9 +438,9 @@ function ChatPage({ user }: { user: User | null }) {
           {!authenticated && (
             <div className="guest-session-card">
               <Clock3 size={18} />
-              <strong>Không lưu trên máy chủ</strong>
-              <p>Đoạn chat chỉ tồn tại trong tab này và sẽ mất khi kết thúc phiên trình duyệt.</p>
-              <a href={authApi.loginUrl("/")}><LogIn size={14} /> Đăng nhập Google để lưu</a>
+              <strong>Phiên trò chuyện tạm</strong>
+              <p>Nội dung chỉ được giữ trong tab hiện tại và sẽ tự xóa khi bạn kết thúc phiên.</p>
+              {authAvailable && <a href={authApi.loginUrl("/")}><LogIn size={14} /> Đăng nhập để lưu lịch sử</a>}
             </div>
           )}
         </div>
@@ -448,15 +448,22 @@ function ChatPage({ user }: { user: User | null }) {
 
       <div className="chat-main">
         <header className="chat-topbar">
-          <button className="icon-button compact" type="button" onClick={() => setHistoryOpen((value) => !value)} aria-label="Ẩn hiện lịch sử">
+          <button
+            className="icon-button compact"
+            type="button"
+            onClick={() => setHistoryOpen((value) => !value)}
+            aria-label={historyOpen ? "Ẩn lịch sử trò chuyện" : "Hiện lịch sử trò chuyện"}
+            aria-controls="chat-history-panel"
+            aria-expanded={historyOpen}
+          >
             <History size={17} />
           </button>
           <div className="chat-title">
             <strong>Trợ lý pháp lý</strong>
-            <span><Wifi size={12} /> {authenticated ? "Tự động dùng toàn bộ kho luật" : "Phiên tạm thời · không lưu trên máy chủ"}</span>
+            <span><ShieldCheck size={12} /> {authenticated ? "Tự động đối chiếu căn cứ liên quan" : "Đang dùng phiên trò chuyện tạm"}</span>
           </div>
           <div className="chat-topbar-actions">
-            {!authenticated && <a className="google-login-inline" href={authApi.loginUrl("/")}><LogIn size={15} /> Đăng nhập Google</a>}
+            {!authenticated && authAvailable && <a className="google-login-inline" href={authApi.loginUrl("/")}><LogIn size={15} /> Đăng nhập Google</a>}
             <button className="ghost-button" type="button" onClick={newConversation}>
               <Plus size={16} /> Cuộc trò chuyện mới
             </button>
@@ -467,9 +474,14 @@ function ChatPage({ user }: { user: User | null }) {
           {messages.length === 0 ? (
             <div className="welcome">
               <div className="welcome-mark"><Scale size={30} /></div>
-              <span className="eyebrow">Kho luật Việt Nam hợp nhất</span>
-              <h1>Hỏi pháp luật, nhận câu trả lời có căn cứ đang còn hiệu lực.</h1>
-              <p>{authenticated ? "Mỗi kết quả được đối chiếu nguồn chính thức, tự cập nhật văn bản thay thế và lưu vào lịch sử của bạn." : "Bạn có thể hỏi ngay không cần đăng nhập. Đoạn chat hiện tại chỉ được giữ tạm trong tab trình duyệt này."}</p>
+              <span className="eyebrow">Tra cứu pháp lý có kiểm chứng</span>
+              <h1>Hiểu đúng quy định.<br />Ra quyết định tự tin hơn.</h1>
+              <p>{authenticated ? "Mỗi câu trả lời được đối chiếu với căn cứ liên quan, kiểm tra hiệu lực và lưu lại để bạn tiếp tục xử lý sau." : "Bạn có thể bắt đầu ngay mà không cần đăng nhập. Nội dung hiện tại chỉ được giữ tạm trong trình duyệt."}</p>
+              <div className="welcome-proof" aria-label="Cam kết chất lượng câu trả lời">
+                <span><ShieldCheck size={15} /> Kiểm tra hiệu lực</span>
+                <span><BookOpen size={15} /> Kèm căn cứ</span>
+                <span><CheckCircle2 size={15} /> Áp dụng toàn bộ luật liên quan</span>
+              </div>
               <div className="suggestion-grid">
                 {sampleQuestions.map((question) => (
                   <button key={question} type="button" onClick={() => submit(question)}>
@@ -503,7 +515,7 @@ function ChatPage({ user }: { user: User | null }) {
             submit();
           }}
         >
-          <div className="policy-line"><CheckCircle2 size={14} /> Đối chiếu nguồn chính thức · AI Qwen3 · áp dụng toàn bộ kho luật{!authenticated && " · chat tạm thời"}</div>
+          <div className="policy-line"><CheckCircle2 size={14} /> Câu trả lời có căn cứ và được kiểm tra hiệu lực{!authenticated && " · phiên tạm thời"}</div>
           <div className="input-wrap">
             <textarea
               value={input}
@@ -562,7 +574,7 @@ function ContractPage() {
 
   return (
     <section className="tool-page">
-      <PageHeader title="Tạo hợp đồng bằng AI" subtitle="Qwen3 soạn bản nháp từ yêu cầu của bạn, tự áp dụng toàn bộ văn bản liên quan và kiểm tra hiệu lực trước khi tạo." />
+      <PageHeader title="Tạo hợp đồng" subtitle="Tạo bản nháp theo yêu cầu, tự đối chiếu các quy định liên quan và kiểm tra hiệu lực trước khi hoàn thiện." />
       {error && <ErrorNotice error={error} onClose={() => setError("")} />}
       <div className="workspace-grid">
         <form className="workspace-card tool-form" onSubmit={submit}>
@@ -629,7 +641,7 @@ function ReviewPage() {
           <label className="field"><span>Tên tài liệu</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Hợp đồng dịch vụ 2026" /></label>
           <DocumentInput title="Nội dung hợp đồng" value={text} onChange={setText} />
           <button className="primary-button align-right" type="submit" disabled={loading || text.trim().length < 20}>
-            {loading ? "Đang review…" : "Review bằng Qwen3"}
+            {loading ? "Đang phân tích…" : "Phân tích hợp đồng"}
           </button>
         </form>
         <ResultPanel title="Kết quả review" text={result?.summary || "Kết quả tổng quan, danh sách rủi ro và khuyến nghị sẽ hiển thị tại đây."} sources={result?.sources} verification={result?.verification}>
@@ -660,7 +672,7 @@ function ComparePage() {
         <DocumentInput title="Bản gốc" value={original} onChange={setOriginal} />
         <DocumentInput title="Bản sửa đổi" value={revised} onChange={setRevised} />
         <button className="primary-button compare-submit" type="submit" disabled={loading || original.length < 20 || revised.length < 20}>
-          <FileDiff size={16} /> {loading ? "Đang so sánh…" : "So sánh bằng Qwen3"}
+          <FileDiff size={16} /> {loading ? "Đang so sánh…" : "So sánh hai phiên bản"}
         </button>
       </form>
       {result && <ResultPanel title={`Mức tương đồng ${result.similarity}%`} text={result.summary} sources={result.sources} verification={result.verification}>
@@ -714,7 +726,7 @@ function ArticlesPage() {
   }, [load]);
   return (
     <section className="tool-page articles-page">
-      <PageHeader title="Bài viết & nghiên cứu web" subtitle="Đọc bài đã biên tập hoặc dùng Tavily để nghiên cứu chủ đề pháp lý trên internet với nguồn dẫn rõ ràng." />
+      <PageHeader title="Bài viết & nghiên cứu" subtitle="Đọc nội dung đã biên tập hoặc tìm hiểu chủ đề pháp lý từ các nguồn công khai có dẫn chứng rõ ràng." />
       {error && <ErrorNotice error={error} onClose={() => setError("")} />}
       <form className="web-search-card" onSubmit={async (event) => {
         event.preventDefault(); if (!query.trim()) return; setLoading(true); setError("");
@@ -756,19 +768,18 @@ function FeedbackModal({ open, page, onClose }: { open: boolean; page: string; o
   return <div className="modal-backdrop"><form className="modal feedback-modal" onSubmit={async (event) => { event.preventDefault(); await sendFeedback({ message, page }); setSent(true); setMessage(""); }}><header><div><span className="eyebrow">Phản hồi</span><h2>Giúp VLegal tốt hơn</h2></div><button className="icon-button" type="button" onClick={onClose}><X size={17} /></button></header>{sent && <div className="success-notice"><CheckCircle2 size={16} />Đã ghi nhận góp ý.</div>}<textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Nội dung góp ý…" /><footer><button className="ghost-button" type="button" onClick={onClose}>Đóng</button><button className="primary-button" type="submit" disabled={message.length < 3}>Gửi góp ý</button></footer></form></div>;
 }
 
-function SignInGate({ error, onContinue }: { error?: string; onContinue: () => void }) {
-  return <div className="signin-page"><div className="signin-card"><div className="brand-mark"><Scale size={29} /></div><span className="eyebrow">VLegal AI</span><h1>Đăng nhập bằng Google</h1><p>Dùng tài khoản Gmail hoặc Google Workspace để lưu lịch sử, quản lý tài liệu và sử dụng các công cụ hợp đồng AI.</p>{error && <ErrorNotice error={error} />}<a className="primary-button signin-button google-signin" href={authApi.loginUrl(window.location.pathname)}><span className="google-mark">G</span>Tiếp tục với Google</a><button className="guest-continue" type="button" onClick={onContinue}>Tiếp tục hỏi đáp không cần đăng nhập</button><small>Không đăng nhập vẫn dùng được chat tạm thời; nội dung không được lưu vào tài khoản hoặc PostgreSQL.</small></div></div>;
+function SignInGate({ available, returnTo, onContinue }: { available: boolean; returnTo: string; onContinue: () => void }) {
+  return <div className="signin-page"><div className="signin-card"><div className="brand-mark"><Scale size={29} /></div><span className="eyebrow">Không gian cá nhân</span><h1>{available ? "Đăng nhập để tiếp tục" : "Tính năng này đang tạm gián đoạn"}</h1><p>{available ? "Dùng tài khoản Google để lưu lịch sử, quản lý tài liệu và sử dụng các công cụ hợp đồng." : "Bạn vẫn có thể hỏi đáp pháp luật trong phiên trò chuyện tạm thời."}</p>{available && <a className="primary-button signin-button google-signin" href={authApi.loginUrl(returnTo)}><span className="google-mark">G</span>Tiếp tục với Google</a>}<button className="guest-continue" type="button" onClick={onContinue}>Quay lại hỏi đáp</button><small>Phiên khách chỉ được lưu tạm trong trình duyệt và không gắn với tài khoản.</small></div></div>;
 }
 
 function App() {
   const [path, navigate] = usePath();
-  const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 900);
-  const [dark, setDark] = useState(() => localStorage.getItem("vlegal-theme") === "dark");
+  const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 900);
+  const [dark, setDark] = useState(() => typeof window !== "undefined" && localStorage.getItem("vlegal-theme") === "dark");
   const [feedbackOpen, setFeedbackOpen] = useState(false);
-  const [stats, setStats] = useState<StatsResponse | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [authError, setAuthError] = useState("");
+  const [authAvailable, setAuthAvailable] = useState(true);
 
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
@@ -776,33 +787,38 @@ function App() {
   }, [dark]);
 
   useEffect(() => {
-    authApi.me().then(setUser).catch((reason) => {
-      if (!(reason instanceof ApiError) || reason.status !== 401) setAuthError((reason as Error).message);
+    Promise.allSettled([authApi.capabilities(), authApi.me()]).then(([capabilityResult, userResult]) => {
+      // Chỉ ẩn nút khi backend xác nhận SSO chưa được cấu hình.
+      // Nếu backend tạm mất kết nối, giữ nút để không biến lỗi mạng thành trạng thái "tắt tính năng".
+      setAuthAvailable(capabilityResult.status === "rejected" || capabilityResult.value.google_login);
+      if (userResult.status === "fulfilled") setUser(userResult.value);
+      if (userResult.status === "rejected" && userResult.reason instanceof ApiError && userResult.reason.status !== 401) {
+        setUser(null);
+      }
     }).finally(() => setAuthLoading(false));
-    getStats().then(setStats).catch(() => undefined);
   }, []);
 
   const activeRoute = useMemo(() => routes.find((route) => route.path === path) || routes[0], [path]);
   const page = useMemo(() => {
-    if (!user && path !== "/") return <SignInGate error={authError} onContinue={() => navigate("/")} />;
+    if (!user && path !== "/") return <SignInGate available={authAvailable} returnTo={path} onContinue={() => navigate("/")} />;
     if (path === "/tao-hop-dong") return <ContractPage />;
     if (path === "/review-hop-dong" || path === "/phan-tich-hop-dong") return <ReviewPage />;
     if (path === "/so-sanh-hop-dong") return <ComparePage />;
     if (path === "/ky-van-ban") return <SignaturePage />;
     if (path === "/bai-viet") return <ArticlesPage />;
     if (path === "/thu-vien") return <LibraryPage />;
-    return <ChatPage user={user} />;
-  }, [authError, navigate, path, user]);
+    return <ChatPage user={user} authAvailable={authAvailable} />;
+  }, [authAvailable, navigate, path, user]);
 
   if (authLoading) return <div className="app-loading"><Scale size={34} /><span>Đang mở VLegal AI…</span></div>;
 
   return (
     <div className="app-shell">
       <aside className={collapsed ? "sidebar collapsed" : "sidebar"}>
-        <div className="brand-row"><button className="brand" type="button" onClick={() => navigate("/")}><span className="brand-mark"><Scale size={22} /></span><span><strong>VLegal</strong><small>Legal intelligence</small></span></button><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label="Thu gọn"><AlignLeft size={18} /></button></div>
+        <div className="brand-row"><button className="brand" type="button" title={collapsed ? "Mở thanh điều hướng" : "Về trang chủ"} aria-label={collapsed ? "Mở thanh điều hướng" : "Về trang chủ"} onClick={() => { if (collapsed) { setCollapsed(false); return; } if (path !== "/") navigate("/"); }}><span className="brand-mark"><Scale size={22} /></span><span><strong>VLegal</strong><small>Trợ lý pháp lý</small></span></button><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Mở thanh điều hướng" : "Thu gọn thanh điều hướng"}><AlignLeft size={18} /></button></div>
         <nav className="nav-list"><span className="nav-label">Không gian làm việc</span>{routes.map((route) => { const Icon = route.icon; return <button key={route.path} type="button" className={activeRoute.path === route.path ? "active" : ""} onClick={() => { navigate(route.path); if (window.innerWidth <= 900) setCollapsed(true); }}><Icon size={19} /><span>{route.label}</span></button>; })}</nav>
-        <div className="system-card"><ShieldCheck size={17} /><span><strong>Luật luôn được kiểm tra</strong><small>{stats?.documents ?? "—"} văn bản · {stats?.chunks ?? "—"} chunks</small></span></div>
-        <div className="sidebar-actions"><button type="button" onClick={() => setFeedbackOpen(true)}><Bot size={17} /><span>Gửi góp ý</span></button><button type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={17} /> : <Moon size={17} />}<span>{dark ? "Giao diện sáng" : "Giao diện tối"}</span></button>{user ? <div className="user-card"><span className="user-avatar">{user.avatar_url ? <img src={user.avatar_url} alt="" /> : user.display_name.charAt(0).toUpperCase()}</span><span><strong>{user.display_name}</strong><small>{user.email}</small></span><button type="button" onClick={async () => { await authApi.logout(); window.location.reload(); }} aria-label="Đăng xuất"><LogOut size={16} /></button></div> : <div className="user-card guest-user-card"><span className="user-avatar"><UserRound size={17} /></span><span><strong>Khách</strong><small>Chat tạm thời</small></span><a href={authApi.loginUrl(path)} aria-label="Đăng nhập bằng Google"><LogIn size={16} /></a></div>}</div>
+        <div className="trust-card"><ShieldCheck size={17} /><span><strong>Căn cứ minh bạch</strong><small>Kiểm tra hiệu lực trước khi trả lời</small></span></div>
+        <div className="sidebar-actions"><button type="button" onClick={() => setFeedbackOpen(true)}><Bot size={17} /><span>Gửi góp ý</span></button><button type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={17} /> : <Moon size={17} />}<span>{dark ? "Giao diện sáng" : "Giao diện tối"}</span></button>{user ? <div className="user-card"><span className="user-avatar">{user.avatar_url ? <img src={user.avatar_url} alt="" /> : user.display_name.charAt(0).toUpperCase()}</span><span><strong>{user.display_name}</strong><small>{user.email}</small></span><button type="button" onClick={async () => { await authApi.logout(); window.location.reload(); }} aria-label="Đăng xuất"><LogOut size={16} /></button></div> : <div className="user-card guest-user-card"><span className="user-avatar"><UserRound size={17} /></span><span><strong>Khách</strong><small>Phiên tạm thời</small></span>{authAvailable && <a href={authApi.loginUrl(path)} aria-label="Đăng nhập bằng Google"><LogIn size={16} /></a>}</div>}</div>
       </aside>
       <div className="content-shell"><header className="mobile-topbar"><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)}><Menu size={19} /></button><strong>{activeRoute.label}</strong><button className="icon-button" type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button></header><main className="content">{page}</main></div>
       <FeedbackModal open={feedbackOpen} page={path} onClose={() => setFeedbackOpen(false)} />

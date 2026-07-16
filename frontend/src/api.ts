@@ -21,19 +21,48 @@ export class ApiError extends Error {
   }
 }
 
+const configuredApiOrigin = (import.meta.env.VITE_API_URL || "").trim().replace(/\/$/, "");
+
+function apiUrl(path: string) {
+  if (configuredApiOrigin) return `${configuredApiOrigin}${path}`;
+  if (import.meta.env.DEV && typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}:8000${path}`;
+  }
+  return path;
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    credentials: "include",
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(url), {
+      credentials: "include",
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(init?.headers || {}),
+      },
+    });
+  } catch {
+    throw new ApiError("Tính năng này đang tạm gián đoạn. Vui lòng thử lại sau.", 0, "UNAVAILABLE");
+  }
   if (response.status === 204) return undefined as T;
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new ApiError(data.detail || data.message || "Không thể kết nối máy chủ", response.status, data.code);
+    const fallback = response.status === 401
+      ? "Vui lòng đăng nhập để tiếp tục."
+      : response.status === 403
+        ? "Bạn chưa có quyền thực hiện thao tác này."
+        : response.status === 404
+          ? "Không tìm thấy nội dung yêu cầu."
+          : response.status === 429
+            ? "Bạn thao tác quá nhanh. Vui lòng thử lại sau ít phút."
+            : response.status >= 500
+              ? "Tính năng này đang tạm gián đoạn. Vui lòng thử lại sau."
+              : "Yêu cầu chưa thể hoàn tất. Vui lòng kiểm tra và thử lại.";
+    const safeDetail = [400, 409, 422].includes(response.status)
+      ? data.detail || data.message
+      : undefined;
+    throw new ApiError(typeof safeDetail === "string" ? safeDetail : fallback, response.status, data.code);
   }
   return data as T;
 }
@@ -47,8 +76,9 @@ function patch<T>(url: string, body: unknown) {
 }
 
 export const authApi = {
+  capabilities: () => requestJson<{ google_login: boolean }>("/api/auth/capabilities"),
   me: () => requestJson<User>("/api/auth/me"),
-  loginUrl: (returnTo = window.location.pathname) => `/api/auth/google/login?return_to=${encodeURIComponent(returnTo)}`,
+  loginUrl: (returnTo = typeof window !== "undefined" ? window.location.pathname : "/") => apiUrl(`/api/auth/google/login?return_to=${encodeURIComponent(returnTo)}`),
   logout: () => requestJson<void>("/api/auth/logout", { method: "POST" }),
 };
 
@@ -97,7 +127,6 @@ export type DraftResponse = {
   checklist: string[];
   sources: Source[];
   verification: VerificationReport;
-  model: string;
 };
 
 export function draftContract(payload: { prompt: string; template_id?: string; template_name?: string }) {
@@ -111,7 +140,6 @@ export type ReviewResponse = {
   recommendations: string[];
   sources: Source[];
   verification: VerificationReport;
-  model: string;
 };
 
 export function reviewContract(payload: { title?: string; text: string }) {
@@ -127,7 +155,6 @@ export type CompareResponse = {
   recommendation: string;
   sources: Source[];
   verification: VerificationReport;
-  model: string;
 };
 
 export function compareContracts(payload: {
@@ -172,20 +199,6 @@ export const articleApi = {
 
 export function getTemplates() {
   return requestJson<{ items: Template[]; categories: string[] }>("/api/templates");
-}
-
-export type StatsResponse = {
-  documents?: number;
-  nodes?: number;
-  edges?: number;
-  chunks?: number;
-  conversations?: number;
-  artifacts?: number;
-  retrieval_policy?: string;
-};
-
-export function getStats() {
-  return requestJson<StatsResponse>("/api/stats");
 }
 
 export function sendFeedback(payload: { message: string; page?: string }) {

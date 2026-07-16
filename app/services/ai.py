@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import gc
 import json
 import re
 from typing import Any
-
-import httpx
 
 from app.core.config import Settings
 
@@ -16,6 +16,150 @@ class QwenError(RuntimeError):
 class QwenService:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._model: Any | None = None
+        self._tokenizer: Any | None = None
+        self._torch: Any | None = None
+        self._load_lock = asyncio.Lock()
+        self._generation_slots = asyncio.Semaphore(settings.qwen_max_concurrent_generations)
+
+    def _load_local_model(self) -> None:
+        if self._model is not None and self._tokenizer is not None:
+            return
+        model_path = self.settings.qwen_local_path
+        if not self.settings.qwen_ready:
+            raise QwenError(
+                f"Không tìm thấy checkpoint Qwen offline tại '{model_path}'. "
+                "Hãy đặt đầy đủ model và tokenizer vào thư mục này."
+            )
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as exc:
+            raise QwenError(
+                "Thiếu thư viện chạy Qwen offline. Hãy cài torch, transformers, accelerate và safetensors."
+            ) from exc
+
+        dtype: Any = "auto"
+        if self.settings.qwen_dtype != "auto":
+            dtype = getattr(torch, self.settings.qwen_dtype)
+
+        device = self.settings.qwen_device
+        if device == "cuda" and not torch.cuda.is_available():
+            raise QwenError("QWEN_DEVICE=cuda nhưng máy chủ không nhận được CUDA.")
+        if device == "mps" and not torch.backends.mps.is_available():
+            raise QwenError("QWEN_DEVICE=mps nhưng máy chủ không hỗ trợ Apple MPS.")
+
+        model_kwargs: dict[str, Any] = {
+            "local_files_only": True,
+            "trust_remote_code": self.settings.qwen_trust_remote_code,
+            "low_cpu_mem_usage": True,
+            "torch_dtype": dtype,
+        }
+        if device == "auto":
+            model_kwargs["device_map"] = "auto"
+        else:
+            model_kwargs["device_map"] = {"": "cuda:0" if device == "cuda" else device}
+
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                local_files_only=True,
+                trust_remote_code=self.settings.qwen_trust_remote_code,
+            )
+            model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
+        except Exception as exc:
+            raise QwenError(f"Không thể nạp model Qwen offline từ '{model_path}': {exc}") from exc
+
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        model.eval()
+        self._torch = torch
+        self._tokenizer = tokenizer
+        self._model = model
+
+    async def _ensure_loaded(self) -> None:
+        if self._model is not None and self._tokenizer is not None:
+            return
+        async with self._load_lock:
+            if self._model is None or self._tokenizer is None:
+                await asyncio.to_thread(self._load_local_model)
+
+    def _generate(
+        self,
+        system: str,
+        user: str,
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        model = self._model
+        tokenizer = self._tokenizer
+        torch = self._torch
+        if model is None or tokenizer is None or torch is None:
+            raise QwenError("Model Qwen offline chưa được nạp.")
+
+        # Keep the system policy and the end of the user payload (which contains
+        # the current question) when a long contract/evidence bundle exceeds
+        # the local model context budget.
+        system_tokens = tokenizer.encode(system, add_special_tokens=False)
+        user_tokens = tokenizer.encode(user, add_special_tokens=False)
+        user_budget = max(256, self.settings.qwen_max_input_tokens - len(system_tokens) - 384)
+        if len(user_tokens) > user_budget:
+            head_size = max(64, user_budget // 4)
+            tail_size = user_budget - head_size
+            user = (
+                tokenizer.decode(user_tokens[:head_size], skip_special_tokens=True)
+                + "\n\n[... nội dung giữa đã được rút gọn do giới hạn ngữ cảnh ...]\n\n"
+                + tokenizer.decode(user_tokens[-tail_size:], skip_special_tokens=True)
+            )
+
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        try:
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            # Compatible fallback for a tokenizer whose template predates the
+            # explicit Qwen3 thinking switch.
+            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+        encoded = tokenizer(
+            prompt,
+            return_tensors="pt",
+            add_special_tokens=False,
+            truncation=True,
+            max_length=self.settings.qwen_max_input_tokens,
+        )
+        input_device = model.get_input_embeddings().weight.device
+        encoded = {name: tensor.to(input_device) for name, tensor in encoded.items()}
+        input_length = encoded["input_ids"].shape[-1]
+        output_limit = min(max_tokens, self.settings.qwen_max_new_tokens)
+        do_sample = temperature > 0
+        generation_kwargs: dict[str, Any] = {
+            "max_new_tokens": output_limit,
+            "do_sample": do_sample,
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+            "use_cache": True,
+        }
+        if do_sample:
+            generation_kwargs.update(
+                temperature=max(temperature, 0.01),
+                top_p=self.settings.qwen_top_p,
+            )
+
+        try:
+            with torch.inference_mode():
+                generated = model.generate(**encoded, **generation_kwargs)
+            content = tokenizer.decode(generated[0][input_length:], skip_special_tokens=True).strip()
+        except Exception as exc:
+            raise QwenError(f"Qwen offline không thể sinh phản hồi: {exc}") from exc
+        if not content:
+            raise QwenError("Qwen offline trả về nội dung rỗng.")
+        return content
 
     async def complete(
         self,
@@ -27,31 +171,23 @@ class QwenService:
         json_schema: dict[str, Any] | None = None,
     ) -> str:
         if not self.settings.qwen_ready:
-            raise QwenError("QWEN_API_KEY chưa được cấu hình")
-        payload: dict[str, Any] = {
-            "model": self.settings.qwen_model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False,
-            "enable_thinking": False,
-        }
-        if json_schema:
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "vlegal_response", "strict": True, "schema": json_schema},
-            }
-        headers = {"Authorization": f"Bearer {self.settings.qwen_api_key}", "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=self.settings.qwen_timeout_seconds) as client:
-            response = await client.post(
-                f"{self.settings.qwen_base_url.rstrip('/')}/chat/completions", headers=headers, json=payload
+            raise QwenError(
+                f"Chưa có checkpoint Qwen offline tại '{self.settings.qwen_local_path}'."
             )
-        if response.is_error:
-            raise QwenError(f"Qwen trả về HTTP {response.status_code}: {response.text[:300]}")
-        try:
-            return response.json()["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, TypeError) as exc:
-            raise QwenError("Phản hồi Qwen không đúng định dạng") from exc
+        if json_schema:
+            user = (
+                f"{user}\n\nChỉ trả về đúng một JSON object hợp lệ, không dùng markdown. "
+                f"JSON Schema bắt buộc:\n{json.dumps(json_schema, ensure_ascii=False)}"
+            )
+        await self._ensure_loaded()
+        async with self._generation_slots:
+            return await asyncio.to_thread(
+                self._generate,
+                system,
+                user,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
 
     async def complete_json(
         self,
@@ -62,22 +198,37 @@ class QwenService:
         temperature: float = 0.05,
         max_tokens: int = 2600,
     ) -> dict[str, Any]:
-        try:
-            content = await self.complete(
-                system, user, temperature=temperature, max_tokens=max_tokens, json_schema=schema
-            )
-        except QwenError:
-            content = await self.complete(
-                system + "\nChỉ trả về một JSON object hợp lệ, không dùng markdown.",
-                user + f"\n\nJSON Schema bắt buộc:\n{json.dumps(schema, ensure_ascii=False)}",
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+        content = await self.complete(
+            system, user, temperature=temperature, max_tokens=max_tokens, json_schema=schema
+        )
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
         try:
-            return json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise QwenError("Qwen không trả về JSON hợp lệ") from exc
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            repaired = await self.complete(
+                "Bạn sửa dữ liệu thành JSON hợp lệ. Chỉ trả về JSON, không giải thích.",
+                f"JSON Schema:\n{json.dumps(schema, ensure_ascii=False)}\n\nDữ liệu cần sửa:\n{content}",
+                temperature=0,
+                max_tokens=max_tokens,
+            )
+            repaired = re.sub(r"^```(?:json)?\s*|\s*```$", "", repaired.strip(), flags=re.IGNORECASE)
+            try:
+                parsed = json.loads(repaired)
+            except json.JSONDecodeError as exc:
+                raise QwenError("Qwen offline không trả về JSON hợp lệ.") from exc
+        if not isinstance(parsed, dict):
+            raise QwenError("Qwen offline phải trả về một JSON object.")
+        return parsed
+
+    async def close(self) -> None:
+        async with self._load_lock:
+            self._model = None
+            self._tokenizer = None
+            torch = self._torch
+            self._torch = None
+        gc.collect()
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 LEGAL_SYSTEM_PROMPT = """Bạn là VLegal AI, trợ lý nghiên cứu pháp luật Việt Nam.

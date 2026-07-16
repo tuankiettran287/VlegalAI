@@ -24,7 +24,7 @@ from app.core.security import (
 )
 from app.db import get_db
 from app.models import SsoIdentity, User
-from app.schemas import UserOut
+from app.schemas import AuthCapabilities, UserOut
 
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -131,6 +131,12 @@ def require_roles(*roles: str):
         return user
 
     return dependency
+
+
+@router.get("/capabilities", response_model=AuthCapabilities)
+async def capabilities(settings: Settings = Depends(get_settings)) -> AuthCapabilities:
+    """Expose feature availability without returning provider configuration."""
+    return AuthCapabilities(google_login=settings.oidc_ready)
 
 
 @router.get("/login", include_in_schema=False)

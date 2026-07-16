@@ -9,6 +9,10 @@ services:
       NEO4J_PASSWORD: local-neo4j-password
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: local-qdrant-key
+      QWEN_MODEL_PATH: /models/qwen3
+      QWEN_DEVICE: auto
+    volumes:
+      - ${QWEN_MODEL_HOST_PATH:-./models/Qwen3-4B}:/models/qwen3:ro
     ports:
       - "8000:8000"
     depends_on:
@@ -20,7 +24,7 @@ services:
 
   worker:
     build: .
-    command: celery -A app.worker.celery_app worker --loglevel=INFO --concurrency=4
+    command: celery -A app.worker.celery_app worker --loglevel=INFO --concurrency=1
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
@@ -31,6 +35,10 @@ services:
       NEO4J_PASSWORD: local-neo4j-password
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: local-qdrant-key
+      QWEN_MODEL_PATH: /models/qwen3
+      QWEN_DEVICE: auto
+    volumes:
+      - ${QWEN_MODEL_HOST_PATH:-./models/Qwen3-4B}:/models/qwen3:ro
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }

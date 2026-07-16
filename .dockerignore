@@ -7,6 +7,9 @@ venv
 **/*.pyc
 frontend/node_modules
 frontend/dist
+frontend/.next
+frontend/out
+models
 storage
 Data (1)
 *.ipynb

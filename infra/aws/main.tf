@@ -13,12 +13,17 @@ locals {
     { name = "RETRIEVER_BACKEND", value = "hybrid_rag" },
     { name = "REQUIRE_FRESHNESS_CHECK", value = "true" },
     { name = "AWS_REGION", value = var.aws_region },
-    { name = "WEB_CONCURRENCY", value = "2" },
+    { name = "WEB_CONCURRENCY", value = "1" },
+    { name = "QWEN_MODEL_PATH", value = "/models/qwen3" },
+    { name = "QWEN_MODEL", value = var.qwen_model },
+    { name = "QWEN_DEVICE", value = var.qwen_device },
+    { name = "QWEN_DTYPE", value = var.qwen_dtype },
+    { name = "QWEN_MAX_CONCURRENT_GENERATIONS", value = "1" },
   ]
   secret_keys = [
     "DATABASE_URL", "REDIS_URL", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND",
     "SESSION_SECRET", "MESSAGE_ENCRYPTION_KEY", "OIDC_ISSUER", "OIDC_CLIENT_ID",
-    "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URI", "QWEN_API_KEY", "TAVILY_API_KEY",
+    "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URI", "TAVILY_API_KEY",
     "NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD", "QDRANT_URL", "QDRANT_API_KEY"
   ]
   container_secrets = [for key in local.secret_keys : {
@@ -150,6 +155,56 @@ resource "aws_security_group" "redis" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_security_group" "qwen_efs" {
+  name_prefix = "${var.name}-qwen-efs-"
+  vpc_id      = var.vpc_id
+  ingress {
+    from_port       = 2049
+    to_port         = 2049
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ecs.id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_efs_file_system" "qwen" {
+  encrypted        = true
+  performance_mode = "generalPurpose"
+  throughput_mode  = "bursting"
+  lifecycle_policy {
+    transition_to_ia = "AFTER_30_DAYS"
+  }
+  tags = merge(var.tags, { Name = "${var.name}-qwen-model" })
+}
+
+resource "aws_efs_mount_target" "qwen" {
+  count           = length(var.private_subnet_ids)
+  file_system_id  = aws_efs_file_system.qwen.id
+  subnet_id       = var.private_subnet_ids[count.index]
+  security_groups = [aws_security_group.qwen_efs.id]
+}
+
+resource "aws_efs_access_point" "qwen" {
+  file_system_id = aws_efs_file_system.qwen.id
+  posix_user {
+    uid = 1000
+    gid = 1000
+  }
+  root_directory {
+    path = "/qwen3"
+    creation_info {
+      owner_uid   = 1000
+      owner_gid   = 1000
+      permissions = "0755"
+    }
   }
 }
 
@@ -290,7 +345,6 @@ resource "aws_secretsmanager_secret_version" "runtime" {
     OIDC_CLIENT_ID         = var.oidc_client_id
     OIDC_CLIENT_SECRET     = var.oidc_client_secret
     OIDC_REDIRECT_URI      = "${var.public_url}/api/auth/google/callback"
-    QWEN_API_KEY           = var.qwen_api_key
     TAVILY_API_KEY         = var.tavily_api_key
     NEO4J_URI              = var.neo4j_uri
     NEO4J_USER             = var.neo4j_user
@@ -382,12 +436,12 @@ resource "aws_lb_listener" "https" {
 }
 
 resource "aws_ecs_task_definition" "api" {
-  depends_on = [aws_secretsmanager_secret_version.runtime]
+  depends_on = [aws_secretsmanager_secret_version.runtime, aws_efs_mount_target.qwen]
   family = "${var.name}-api"
   network_mode = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu = 2048
-  memory = 4096
+  cpu = var.api_task_cpu
+  memory = var.api_task_memory
   execution_role_arn = aws_iam_role.ecs_execution.arn
   task_role_arn = aws_iam_role.ecs_task.arn
   container_definitions = jsonencode([{
@@ -395,9 +449,21 @@ resource "aws_ecs_task_definition" "api" {
     portMappings = [{ containerPort = 8000, protocol = "tcp" }]
     environment = local.common_environment
     secrets = local.container_secrets
+    mountPoints = [{ sourceVolume = "qwen-model", containerPath = "/models/qwen3", readOnly = true }]
     healthCheck = { command = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live')\""], interval = 30, timeout = 5, retries = 3, startPeriod = 45 }
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
+  volume {
+    name = "qwen-model"
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.qwen.id
+      transit_encryption = "ENABLED"
+      authorization_config {
+        access_point_id = aws_efs_access_point.qwen.id
+        iam             = "DISABLED"
+      }
+    }
+  }
 }
 
 resource "aws_ecs_service" "api" {
@@ -424,21 +490,33 @@ resource "aws_ecs_service" "api" {
 }
 
 resource "aws_ecs_task_definition" "worker" {
-  depends_on = [aws_secretsmanager_secret_version.runtime]
+  depends_on = [aws_secretsmanager_secret_version.runtime, aws_efs_mount_target.qwen]
   family = "${var.name}-worker"
   network_mode = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu = 2048
-  memory = 4096
+  cpu = var.worker_task_cpu
+  memory = var.worker_task_memory
   execution_role_arn = aws_iam_role.ecs_execution.arn
   task_role_arn = aws_iam_role.ecs_task.arn
   container_definitions = jsonencode([{
     name = "worker", image = "${aws_ecr_repository.app.repository_url}:${var.image_tag}", essential = true
-    command = ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=INFO", "--concurrency=4"]
+    command = ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
     environment = local.common_environment
     secrets = local.container_secrets
+    mountPoints = [{ sourceVolume = "qwen-model", containerPath = "/models/qwen3", readOnly = true }]
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.worker.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "worker" } }
   }])
+  volume {
+    name = "qwen-model"
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.qwen.id
+      transit_encryption = "ENABLED"
+      authorization_config {
+        access_point_id = aws_efs_access_point.qwen.id
+        iam             = "DISABLED"
+      }
+    }
+  }
 }
 resource "aws_ecs_service" "worker" {
   name = "worker"

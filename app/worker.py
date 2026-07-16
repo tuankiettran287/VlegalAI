@@ -63,6 +63,7 @@ async def _verify_corpus() -> dict[str, int]:
                 failed += 1
     finally:
         await freshness.close()
+        await ai.close()
     return {"checked": checked, "updated": updated, "failed": failed}
 
 

@@ -25,7 +25,7 @@ thái từng văn bản, URL chính thức và việc chỉ mục có vừa đư
 
 ## Kiến trúc
 
-- `frontend/`: React + TypeScript + Vite, responsive, Google login, guest chat, lịch sử và CRUD.
+- `frontend/`: ReactJS + TypeScript + Vite, responsive, Google login, guest chat, lịch sử và CRUD.
 - `app/main.py`: FastAPI app factory/lifespan, middleware và static SPA.
 - `app/api.py`: chat, hợp đồng AI, conversation/artifact/article CRUD, chữ ký.
 - `app/auth.py`: Google OIDC Authorization Code + PKCE và session cookie HttpOnly.
@@ -48,11 +48,18 @@ Sao chép `.env.example` thành `.env`. Các biến bắt buộc cho luồng pro
 - `DATABASE_URL`, `REDIS_URL`
 - `SESSION_SECRET`, `MESSAGE_ENCRYPTION_KEY`
 - `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
-- `QWEN_API_KEY`, `TAVILY_API_KEY`
+- `QWEN_MODEL_PATH`, `QWEN_DEVICE`, `QWEN_DTYPE`, `TAVILY_API_KEY`
 - `NEO4J_*`, `QDRANT_*`
 
 `RETRIEVER_BACKEND`, provider và API key chỉ tồn tại ở backend; frontend không
 có màn hình cấu hình kỹ thuật hoặc bộ chọn luật.
+
+Qwen3 chạy hoàn toàn trong tiến trình backend bằng checkpoint ở
+`QWEN_MODEL_PATH`; không dùng DashScope/OpenAI-compatible API và không gửi prompt
+ra dịch vụ model bên ngoài. Chuẩn bị sẵn model vào `models/Qwen3-4B` hoặc đặt
+`QWEN_MODEL_HOST_PATH` đến thư mục checkpoint trước khi chạy Docker Compose.
+Mỗi API/worker process chỉ nạp một bản model và mặc định xử lý một lượt sinh tại
+một thời điểm để tránh nhân bản RAM/VRAM.
 
 Trong Google Cloud Console, tạo OAuth client loại **Web application**, thêm origin
 của frontend và đăng ký chính xác redirect URI

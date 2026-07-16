@@ -271,8 +271,16 @@ async def liveness() -> dict[str, str]:
 
 
 @router.get("/health/ready", tags=["health"])
-async def readiness(db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+async def readiness(
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
     await db.scalar(select(func.now()))
+    if not settings.qwen_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Qwen offline checkpoint is not available",
+        )
     return {"status": "ready"}
 
 

@@ -41,6 +41,9 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+# Ignore stale build output when switching frontend toolchains locally.
+frontend/.next/
+frontend/out/
 .npm/
 .pnpm-store/
 npm-debug.log*
@@ -73,6 +76,8 @@ blob-report/
 *.pid.lock
 
 # Local model/checkpoint artifacts
+/models/*
+!/models/README.md
 *.safetensors
 *.pt
 *.pth

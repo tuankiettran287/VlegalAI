@@ -51,7 +51,6 @@ export type Conversation = {
   id: string;
   title: string;
   status: "ACTIVE" | "ARCHIVED";
-  retrieval_mode: string;
   created_at: string;
   updated_at: string;
   message_count: number;

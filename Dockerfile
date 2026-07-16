@@ -9,8 +9,11 @@ FROM python:3.12-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    TOKENIZERS_PARALLELISM=false \
     PORT=8000 \
-    WEB_CONCURRENCY=4
+    WEB_CONCURRENCY=1
 WORKDIR /app
 RUN groupadd --system vlegal && useradd --system --gid vlegal --create-home vlegal
 COPY requirements.txt ./
