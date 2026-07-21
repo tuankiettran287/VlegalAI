@@ -34,16 +34,18 @@ thái từng văn bản, URL chính thức và việc chỉ mục có vừa đư
 - `app/services/indexer.py`: tải luật mới, chunk, cập nhật Qdrant và Neo4j.
 - `app/worker.py`: Celery refresh toàn bộ kho luật theo lịch.
 - `migrations/`: Alembic PostgreSQL migrations.
-- `infra/aws/`: ECS Fargate, ALB, RDS PostgreSQL, RDS Proxy, ElastiCache, ECR,
-  Secrets Manager, autoscaling và CloudWatch bằng Terraform.
+- `compose.production.yml`: stack production chạy hoàn toàn bằng Docker Compose.
+- `Caddyfile`: reverse proxy, HTTPS tự động và security headers.
 
 Nội dung hội thoại, tài liệu hợp đồng, feedback và văn bản trong gói ký được mã
-hóa AES-256-GCM trước khi lưu PostgreSQL. RDS, Redis và lưu lượng nội bộ production
-đều được cấu hình mã hóa.
+hóa AES-256-GCM trước khi lưu PostgreSQL. Dữ liệu PostgreSQL, Redis, Neo4j,
+Qdrant, Caddy và chỉ mục pháp lý được lưu trong Docker volumes.
 
 ## Cấu hình
 
-Sao chép `.env.example` thành `.env`. Các biến bắt buộc cho luồng production:
+Cho môi trường local, sao chép `.env.example` thành `.env`. Production dùng
+`.env.production.example` làm mẫu và lưu secret trong `.env.production`. Các biến
+bắt buộc cho luồng production:
 
 - `DATABASE_URL`, `REDIS_URL`
 - `SESSION_SECRET`, `MESSAGE_ENCRYPTION_KEY`
@@ -56,10 +58,11 @@ có màn hình cấu hình kỹ thuật hoặc bộ chọn luật.
 
 Qwen3 chạy hoàn toàn trong tiến trình backend bằng checkpoint ở
 `QWEN_MODEL_PATH`; không dùng DashScope/OpenAI-compatible API và không gửi prompt
-ra dịch vụ model bên ngoài. Chuẩn bị sẵn model vào `models/Qwen3-4B` hoặc đặt
-`QWEN_MODEL_HOST_PATH` đến thư mục checkpoint trước khi chạy Docker Compose.
-Mỗi API/worker process chỉ nạp một bản model và mặc định xử lý một lượt sinh tại
-một thời điểm để tránh nhân bản RAM/VRAM.
+ra dịch vụ model bên ngoài. Service `model-init` tự tải `QWEN_MODEL_REPO` từ
+Hugging Face vào named volume `qwen_model`; API và worker chỉ khởi động sau khi
+checkpoint đã đầy đủ. Volume được giữ qua các lần rebuild/restart nên model không
+bị tải lại. Mỗi API/worker process chỉ nạp một bản model và mặc định xử lý một
+lượt sinh tại một thời điểm để tránh nhân bản RAM/VRAM.
 
 Trong Google Cloud Console, tạo OAuth client loại **Web application**, thêm origin
 của frontend và đăng ký chính xác redirect URI
@@ -83,16 +86,31 @@ document/chunk, article, signature packet và feedback. API chính:
 - `POST /api/signatures/prepare`
 - `GET /api/laws` để theo dõi phiên bản và thời điểm kiểm tra
 
-## Container và AWS
+## Docker
 
 `Dockerfile` build frontend rồi đóng gói chung với API. `docker-compose.yml` mô
-tả toàn bộ stack phát triển. Production sử dụng `infra/aws`: tối thiểu hai API
-task và hai worker, scale ngang đến giới hạn cấu hình; PostgreSQL chạy trên RDS
-Multi-AZ qua RDS Proxy. Migration chạy bằng task definition riêng trước khi roll
-service, không chạy đồng thời trong mọi replica.
+tả stack phát triển. Production sử dụng `compose.production.yml`: Caddy, API,
+Celery worker/beat, PostgreSQL, Redis, Neo4j và Qdrant cùng chạy trên một Docker
+host. Migration được chạy một lần và phải thành công trước khi cập nhật API/worker.
 
-Xem [hướng dẫn AWS](infra/aws/README.md) và workflow
-[deploy-aws.yml](.github/workflows/deploy-aws.yml).
+Chạy local toàn bộ stack, gồm cả bước tải model:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Lần đầu cần đủ dung lượng đĩa và thời gian tải Qwen3-14B. Theo dõi riêng bằng
+`docker compose logs -f model-init`; các lần sau checkpoint được dùng lại từ
+Docker volume.
+
+Xem [hướng dẫn deploy Docker](deploy.md) và workflow
+[deploy-docker.yml](.github/workflows/deploy-docker.yml).
+
+Nếu triển khai một container API/frontend lên Google Cloud Run, xem
+[hướng dẫn Cloud Run](deploy-gcp-cloud-run.md). Cloud Run không chạy trực tiếp
+Compose stack; model dùng Cloud Storage volume, còn database/Redis/Neo4j/Qdrant
+phải chuyển sang dịch vụ bên ngoài.
 
 > VLegal AI hỗ trợ nghiên cứu và nghiệp vụ, không thay thế ý kiến của luật sư
 > đối với vụ việc hoặc giao dịch cụ thể.

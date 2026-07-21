@@ -1,6 +1,28 @@
+x-app-image: &app-image
+  image: "${VLEGAL_IMAGE:-vlegal-ai:local}"
+  build:
+    context: .
+
 services:
+  model-init:
+    <<: *app-image
+    command: ["python", "scripts/download_qwen_model.py", "--output-dir", "/models/qwen3"]
+    env_file: .env
+    environment:
+      HF_HUB_OFFLINE: "0"
+      TRANSFORMERS_OFFLINE: "0"
+      QWEN_MODEL_PATH: /models/qwen3
+      QWEN_MODEL_REPO: ${QWEN_MODEL_REPO:-Qwen/Qwen3-14B}
+      QWEN_MODEL_REVISION: ${QWEN_MODEL_REVISION:-main}
+    user: "0:0"
+    healthcheck:
+      disable: true
+    volumes:
+      - qwen_model:/models/qwen3
+    restart: "no"
+
   api:
-    build: .
+    <<: *app-image
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
@@ -12,10 +34,11 @@ services:
       QWEN_MODEL_PATH: /models/qwen3
       QWEN_DEVICE: auto
     volumes:
-      - ${QWEN_MODEL_HOST_PATH:-./models/Qwen3-4B}:/models/qwen3:ro
+      - qwen_model:/models/qwen3:ro
     ports:
       - "8000:8000"
     depends_on:
+      model-init: { condition: service_completed_successfully }
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
       neo4j: { condition: service_healthy }
@@ -23,8 +46,10 @@ services:
     restart: unless-stopped
 
   worker:
-    build: .
+    <<: *app-image
     command: celery -A app.worker.celery_app worker --loglevel=INFO --concurrency=1
+    healthcheck:
+      disable: true
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
@@ -38,15 +63,18 @@ services:
       QWEN_MODEL_PATH: /models/qwen3
       QWEN_DEVICE: auto
     volumes:
-      - ${QWEN_MODEL_HOST_PATH:-./models/Qwen3-4B}:/models/qwen3:ro
+      - qwen_model:/models/qwen3:ro
     depends_on:
+      model-init: { condition: service_completed_successfully }
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
     restart: unless-stopped
 
   migrate:
-    build: .
+    <<: *app-image
     command: alembic upgrade head
+    healthcheck:
+      disable: true
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
@@ -55,8 +83,10 @@ services:
     restart: "no"
 
   beat:
-    build: .
+    <<: *app-image
     command: celery -A app.worker.celery_app beat --loglevel=INFO
+    healthcheck:
+      disable: true
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
@@ -114,6 +144,7 @@ services:
       - qdrant_data:/qdrant/storage
 
 volumes:
+  qwen_model:
   postgres_data:
   redis_data:
   neo4j_data:

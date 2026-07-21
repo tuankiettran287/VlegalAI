@@ -64,8 +64,8 @@ class Settings(BaseSettings):
 
     # Qwen runs in-process from a checkpoint that already exists on disk.
     # No prompt or legal document is sent to an external model API.
-    qwen_model_path: str = str(PROJECT_ROOT / "models" / "Qwen3-4B")
-    qwen_model: str = "Qwen3-4B"
+    qwen_model_path: str = str(PROJECT_ROOT / "models" / "Qwen3-14B")
+    qwen_model: str = "Qwen3-14B"
     qwen_device: Literal["auto", "cuda", "cpu", "mps"] = "auto"
     qwen_dtype: Literal["auto", "bfloat16", "float16", "float32"] = "auto"
     qwen_max_input_tokens: int = Field(default=24_576, ge=512)
@@ -100,9 +100,6 @@ class Settings(BaseSettings):
     legal_data_dir: str = str(PROJECT_ROOT / "Data (1)")
     legal_storage_dir: str = str(PROJECT_ROOT / "storage" / "graphrag")
     legal_graphrag_db: str = str(PROJECT_ROOT / "storage" / "graphrag" / "legal_graphrag.sqlite")
-
-    aws_region: str = "ap-southeast-1"
-    s3_bucket: str = ""
 
     @field_validator(
         "cors_origins",

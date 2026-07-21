@@ -1,0 +1,239 @@
+name: vlegal
+
+x-app-image: &app-image
+  image: "${VLEGAL_IMAGE:-vlegal-ai:latest}"
+  build:
+    context: .
+
+x-app-environment: &app-environment
+  APP_ENV: production
+  PUBLIC_URL: "https://${DOMAIN:?Set DOMAIN in .env.production}"
+  FRONTEND_URL: "https://${DOMAIN:?Set DOMAIN in .env.production}"
+  CORS_ORIGINS: "https://${DOMAIN:?Set DOMAIN in .env.production}"
+  COOKIE_SECURE: "true"
+  OIDC_REDIRECT_URI: "https://${DOMAIN:?Set DOMAIN in .env.production}/api/auth/google/callback"
+  DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}"
+  REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0"
+  CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/1"
+  CELERY_RESULT_BACKEND: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/2"
+  NEO4J_URI: bolt://neo4j:7687
+  NEO4J_USER: "${NEO4J_USER:-neo4j}"
+  NEO4J_PASSWORD: "${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}"
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_API_KEY: "${QDRANT_API_KEY:?Set QDRANT_API_KEY}"
+  QWEN_MODEL_PATH: /models/qwen3
+  LEGAL_DATA_DIR: /app/legal-data
+  LEGAL_STORAGE_DIR: /app/storage/graphrag
+  LEGAL_GRAPHRAG_DB: /app/storage/graphrag/legal_graphrag.sqlite
+  SESSION_SECRET: "${SESSION_SECRET:?Set SESSION_SECRET}"
+  MESSAGE_ENCRYPTION_KEY: "${MESSAGE_ENCRYPTION_KEY:?Set MESSAGE_ENCRYPTION_KEY}"
+  OIDC_CLIENT_ID: "${OIDC_CLIENT_ID:?Set OIDC_CLIENT_ID}"
+  OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:?Set OIDC_CLIENT_SECRET}"
+  TAVILY_API_KEY: "${TAVILY_API_KEY:?Set TAVILY_API_KEY}"
+
+services:
+  model-init:
+    <<: *app-image
+    init: true
+    command: ["python", "scripts/download_qwen_model.py", "--output-dir", "/models/qwen3"]
+    env_file:
+      - "${APP_ENV_FILE:-.env.production}"
+    environment:
+      HF_HUB_OFFLINE: "0"
+      TRANSFORMERS_OFFLINE: "0"
+      QWEN_MODEL_PATH: /models/qwen3
+      QWEN_MODEL_REPO: "${QWEN_MODEL_REPO:-Qwen/Qwen3-14B}"
+      QWEN_MODEL_REVISION: "${QWEN_MODEL_REVISION:-main}"
+    user: "0:0"
+    healthcheck:
+      disable: true
+    volumes:
+      - qwen_model:/models/qwen3
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    <<: *app-image
+    init: true
+    env_file:
+      - "${APP_ENV_FILE:-.env.production}"
+    environment:
+      <<: *app-environment
+    volumes:
+      - qwen_model:/models/qwen3:ro
+      - "${LEGAL_DATA_HOST_PATH:-./legal-data}:/app/legal-data:ro"
+      - legal_storage:/app/storage
+    expose:
+      - "8000"
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    <<: *app-image
+    init: true
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
+    healthcheck:
+      disable: true
+    env_file:
+      - "${APP_ENV_FILE:-.env.production}"
+    environment:
+      <<: *app-environment
+    volumes:
+      - qwen_model:/models/qwen3:ro
+      - "${LEGAL_DATA_HOST_PATH:-./legal-data}:/app/legal-data:ro"
+      - legal_storage:/app/storage
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  beat:
+    <<: *app-image
+    init: true
+    command: ["celery", "-A", "app.worker.celery_app", "beat", "--loglevel=INFO"]
+    healthcheck:
+      disable: true
+    env_file:
+      - "${APP_ENV_FILE:-.env.production}"
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0"
+      CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/1"
+      CELERY_RESULT_BACKEND: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/2"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    <<: *app-image
+    command: ["alembic", "upgrade", "head"]
+    healthcheck:
+      disable: true
+    env_file:
+      - "${APP_ENV_FILE:-.env.production}"
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:?Set POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER:?Set POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD}"]
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?Set REDIS_PASSWORD}"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}"
+      NEO4J_server_memory_heap_initial__size: "${NEO4J_HEAP_INITIAL:-512m}"
+      NEO4J_server_memory_heap_max__size: "${NEO4J_HEAP_MAX:-1G}"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.3
+    environment:
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?Set QDRANT_API_KEY}"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      DOMAIN: "${DOMAIN:?Set DOMAIN}"
+      ACME_EMAIL: "${ACME_EMAIL:?Set ACME_EMAIL}"
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  qwen_model:
+  postgres_data:
+  redis_data:
+  neo4j_data:
+  qdrant_data:
+  legal_storage:
+  caddy_data:
+  caddy_config:

@@ -15,5 +15,5 @@ Data (1)
 *.ipynb
 *.docx
 *.png
-.env
+.env*
 

@@ -2,16 +2,12 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
 env.json
 *.pem
 *.key
 *.p12
 *.pfx
-terraform.tfvars
-*.auto.tfvars
-*.tfstate
-*.tfstate.*
-.terraform/
 
 # Python
 __pycache__/

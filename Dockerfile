@@ -28,5 +28,5 @@ USER vlegal
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live', timeout=3)"
-CMD ["sh", "-c", "gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker --workers ${WEB_CONCURRENCY} --bind 0.0.0.0:${PORT} --timeout 120 --graceful-timeout 30 --keep-alive 5 --max-requests 2000 --max-requests-jitter 200"]
+CMD ["sh", "-c", "exec gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker --workers ${WEB_CONCURRENCY} --bind 0.0.0.0:${PORT} --timeout 120 --graceful-timeout 30 --keep-alive 5 --max-requests 2000 --max-requests-jitter 200"]
 

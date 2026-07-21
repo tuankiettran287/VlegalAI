@@ -28,3 +28,4 @@ torch>=2.5,<3
 transformers>=4.51,<6
 accelerate>=1.2,<2
 safetensors>=0.4,<1
+huggingface-hub>=0.30,<2
