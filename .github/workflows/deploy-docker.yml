@@ -16,8 +16,10 @@ concurrency:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.image.outputs.name }}:${{ github.sha }}
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, frontend, worker, beat, migrate, model-init]
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +31,7 @@ jobs:
       - name: Set image name
         id: image
         shell: bash
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -43,6 +45,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: docker/${{ matrix.service }}.Dockerfile
           push: true
           tags: |
             ${{ steps.image.outputs.name }}:${{ github.sha }}
@@ -65,7 +68,6 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/vlegal' }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-          IMAGE: ${{ needs.build-and-push.outputs.image }}
         run: |
           : "${DEPLOY_USER:?Set the DEPLOY_USER secret}"
           : "${DEPLOY_SSH_KEY:?Set the DEPLOY_SSH_KEY secret}"
@@ -76,11 +78,19 @@ jobs:
           chmod 600 "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
           SSH=(ssh -i "$HOME/.ssh/deploy_key" -p "$DEPLOY_PORT" -o BatchMode=yes)
           SCP=(scp -i "$HOME/.ssh/deploy_key" -P "$DEPLOY_PORT" -o BatchMode=yes)
+          IMAGE_BASE="ghcr.io/${GITHUB_REPOSITORY,,}"
           "${SSH[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
           "${SCP[@]}" compose.production.yml Caddyfile scripts/deploy-docker.sh \
             "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
           "${SSH[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd '$DEPLOY_PATH' && chmod +x deploy-docker.sh && VLEGAL_IMAGE='$IMAGE' PULL_IMAGE=1 ./deploy-docker.sh"
+            "cd '$DEPLOY_PATH' && chmod +x deploy-docker.sh && \
+             VLEGAL_API_IMAGE='$IMAGE_BASE-api:$GITHUB_SHA' \
+             VLEGAL_FRONTEND_IMAGE='$IMAGE_BASE-frontend:$GITHUB_SHA' \
+             VLEGAL_WORKER_IMAGE='$IMAGE_BASE-worker:$GITHUB_SHA' \
+             VLEGAL_BEAT_IMAGE='$IMAGE_BASE-beat:$GITHUB_SHA' \
+             VLEGAL_MIGRATE_IMAGE='$IMAGE_BASE-migrate:$GITHUB_SHA' \
+             VLEGAL_MODEL_INIT_IMAGE='$IMAGE_BASE-model-init:$GITHUB_SHA' \
+             PULL_IMAGE=1 ./deploy-docker.sh"
 
       - name: Deployment not configured
         if: env.DEPLOY_HOST == ''

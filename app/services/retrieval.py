@@ -9,8 +9,8 @@ from app.core.config import Settings
 from app.external_graphrag import (
     ExternalGraphRAGConfig,
     Neo4jGraphRAGStore,
-    Neo4jQdrantGraphRAGStore,
-    QdrantGraphRAGStore,
+    Neo4jPostgresGraphRAGStore,
+    PostgresGraphRAGStore,
 )
 from app.legal_graphrag import GraphRAGStore
 
@@ -21,11 +21,8 @@ def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
         neo4j_user=settings.neo4j_user,
         neo4j_password=settings.neo4j_password,
         neo4j_database=settings.neo4j_database,
-        qdrant_url=settings.qdrant_url,
-        qdrant_api_key=settings.qdrant_api_key,
-        qdrant_collection=settings.qdrant_collection,
-        qdrant_vector_name=settings.qdrant_vector_name,
-        qdrant_vector_size=settings.qdrant_vector_size,
+        database_url=settings.database_url,
+        postgres_vector_size=settings.postgres_vector_size,
     )
 
 
@@ -46,9 +43,9 @@ class RetrievalService:
             config = _external_config(self.settings)
             backend = self.settings.retriever_backend
             if backend == "hybrid_rag":
-                self._store = await run_in_threadpool(Neo4jQdrantGraphRAGStore, config)
+                self._store = await run_in_threadpool(Neo4jPostgresGraphRAGStore, config)
             elif backend == "rag":
-                self._store = await run_in_threadpool(QdrantGraphRAGStore, config)
+                self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
             elif backend == "graphrag":
                 self._store = await run_in_threadpool(Neo4jGraphRAGStore, config)
             else:

@@ -123,7 +123,6 @@ class LegalChunk(Base):
     text_hash: Mapped[str] = mapped_column(String(64), index=True)
     ordinal: Mapped[int] = mapped_column(Integer)
     version: Mapped[int] = mapped_column(Integer)
-    qdrant_point_id: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     document: Mapped[LegalDocument] = relationship(back_populates="chunks")

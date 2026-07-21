@@ -13,11 +13,11 @@ tài liệu và các công cụ hợp đồng.
 Người dùng không phải chọn RAG, GraphRAG hay từng luật áp dụng. Backend luôn tìm
 trên toàn bộ kho luật bằng Hybrid GraphRAG, sau đó thực hiện tuần tự:
 
-1. Lấy các chunk liên quan từ Qdrant và mở rộng quan hệ trên Neo4j.
+1. Lấy các chunk liên quan bằng `pgvector` trong PostgreSQL và mở rộng quan hệ trên Neo4j.
 2. Dùng Tavily đối chiếu số hiệu trên các nguồn chính thức được cho phép.
 3. Dùng Qwen3 phân loại còn hiệu lực, sửa đổi, hết hiệu lực hoặc bị thay thế.
 4. Nếu có bản mới, tải nguồn chính thức, tách Điều/Khoản thành chunk, upsert
-   PostgreSQL + Qdrant, dựng node/edge Neo4j và truy xuất lại.
+   PostgreSQL/pgvector, dựng node/edge Neo4j và truy xuất lại.
 5. Chỉ sau đó Qwen3 mới sinh kết quả có trích dẫn `[S1]`, `[S2]`.
 
 Kết quả API kèm `verification` để frontend hiển thị thời điểm kiểm tra, trạng
@@ -26,12 +26,12 @@ thái từng văn bản, URL chính thức và việc chỉ mục có vừa đư
 ## Kiến trúc
 
 - `frontend/`: ReactJS + TypeScript + Vite, responsive, Google login, guest chat, lịch sử và CRUD.
-- `app/main.py`: FastAPI app factory/lifespan, middleware và static SPA.
+- `app/main.py`: FastAPI API service, lifespan và middleware.
 - `app/api.py`: chat, hợp đồng AI, conversation/artifact/article CRUD, chữ ký.
 - `app/auth.py`: Google OIDC Authorization Code + PKCE và session cookie HttpOnly.
 - `app/models.py`: SQLAlchemy PostgreSQL models.
 - `app/services/freshness.py`: kiểm tra hiệu lực bắt buộc trước kết quả pháp lý.
-- `app/services/indexer.py`: tải luật mới, chunk, cập nhật Qdrant và Neo4j.
+- `app/services/indexer.py`: tải luật mới, chunk, cập nhật PostgreSQL/pgvector và Neo4j.
 - `app/worker.py`: Celery refresh toàn bộ kho luật theo lịch.
 - `migrations/`: Alembic PostgreSQL migrations.
 - `compose.production.yml`: stack production chạy hoàn toàn bằng Docker Compose.
@@ -39,7 +39,7 @@ thái từng văn bản, URL chính thức và việc chỉ mục có vừa đư
 
 Nội dung hội thoại, tài liệu hợp đồng, feedback và văn bản trong gói ký được mã
 hóa AES-256-GCM trước khi lưu PostgreSQL. Dữ liệu PostgreSQL, Redis, Neo4j,
-Qdrant, Caddy và chỉ mục pháp lý được lưu trong Docker volumes.
+Caddy và chỉ mục pháp lý được lưu trong Docker volumes.
 
 ## Cấu hình
 
@@ -51,7 +51,7 @@ bắt buộc cho luồng production:
 - `SESSION_SECRET`, `MESSAGE_ENCRYPTION_KEY`
 - `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
 - `QWEN_MODEL_PATH`, `QWEN_DEVICE`, `QWEN_DTYPE`, `TAVILY_API_KEY`
-- `NEO4J_*`, `QDRANT_*`
+- `NEO4J_*`, `POSTGRES_VECTOR_SIZE`
 
 `RETRIEVER_BACKEND`, provider và API key chỉ tồn tại ở backend; frontend không
 có màn hình cấu hình kỹ thuật hoặc bộ chọn luật.
@@ -66,7 +66,8 @@ lượt sinh tại một thời điểm để tránh nhân bản RAM/VRAM.
 
 Trong Google Cloud Console, tạo OAuth client loại **Web application**, thêm origin
 của frontend và đăng ký chính xác redirect URI
-`https://<domain>/api/auth/google/callback`. `OIDC_ISSUER` luôn là
+`<frontend-url>/api/auth/google/callback`. `frontend-url` có thể là URL mặc định
+`*.run.app`, không bắt buộc có domain riêng. `OIDC_ISSUER` luôn là
 `https://accounts.google.com`.
 
 Guest chat được giới hạn phân tán qua Redis bằng
@@ -88,10 +89,10 @@ document/chunk, article, signature packet và feedback. API chính:
 
 ## Docker
 
-`Dockerfile` build frontend rồi đóng gói chung với API. `docker-compose.yml` mô
-tả stack phát triển. Production sử dụng `compose.production.yml`: Caddy, API,
-Celery worker/beat, PostgreSQL, Redis, Neo4j và Qdrant cùng chạy trên một Docker
-host. Migration được chạy một lần và phải thành công trước khi cập nhật API/worker.
+Thư mục `docker/` có Dockerfile riêng cho `api`, `frontend`, `worker`, `beat`,
+`migrate` và `model-init`; Compose build thành sáu image độc lập. PostgreSQL dùng
+image có extension `pgvector`, Neo4j lưu graph, Redis làm cache/Celery broker.
+Migration phải thành công trước khi API và worker khởi động.
 
 Chạy local toàn bộ stack, gồm cả bước tải model:
 
@@ -107,10 +108,10 @@ Docker volume.
 Xem [hướng dẫn deploy Docker](deploy.md) và workflow
 [deploy-docker.yml](.github/workflows/deploy-docker.yml).
 
-Nếu triển khai một container API/frontend lên Google Cloud Run, xem
-[hướng dẫn Cloud Run](deploy-gcp-cloud-run.md). Cloud Run không chạy trực tiếp
-Compose stack; model dùng Cloud Storage volume, còn database/Redis/Neo4j/Qdrant
-phải chuyển sang dịch vụ bên ngoài.
+Nếu triển khai lên Google Cloud Run, xem [hướng dẫn Cloud Run](deploy-gcp-cloud-run.md).
+API/frontend là hai service riêng dùng URL `run.app`; worker/beat là Worker Pool,
+model/migration là Job. Model dùng Cloud Storage volume, PostgreSQL chuyển sang
+Cloud SQL, Redis sang Memorystore và Neo4j chạy trên GCE/GKE hoặc Neo4j Aura.
 
 > VLegal AI hỗ trợ nghiên cứu và nghiệp vụ, không thay thế ý kiến của luật sư
 > đối với vụ việc hoặc giao dịch cụ thể.

@@ -12,11 +12,14 @@
 		-Server
 	}
 
-	reverse_proxy api:8000 {
+	@api path /api/*
+	reverse_proxy @api api:8080 {
 		health_uri /api/health/live
 		health_interval 30s
 		health_timeout 5s
 	}
+
+	reverse_proxy frontend:8080
 
 	log {
 		output stdout

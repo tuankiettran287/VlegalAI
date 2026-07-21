@@ -1,153 +1,101 @@
-# Deploy VLegalAI lên Google Cloud Run
+# Deploy VLegalAI lên GCP không cần tên miền
 
-Tài liệu này deploy **container API/frontend** lên Cloud Run. Không dùng
-`docker-compose.yml` trên Cloud Run: PostgreSQL, Redis, Neo4j và Qdrant phải chạy
-ở dịch vụ bên ngoài; Caddy không cần vì Cloud Run đã cung cấp HTTPS.
+Hướng dẫn này dùng URL mặc định `https://*.run.app` của Cloud Run, không dùng
+Caddy, load balancer, DNS hay custom domain. Mỗi tiến trình ứng dụng có một
+Dockerfile và một image riêng.
 
-## 1. Kiến trúc đích
+## Kiến trúc GCP
 
-| Thành phần local | Thành phần trên GCP |
-| --- | --- |
-| `api` + frontend | Một Cloud Run service |
-| `model-init` | Một Cloud Run Job chạy một lần |
-| volume `qwen_model` | Cloud Storage bucket mount read-only |
-| PostgreSQL | Cloud SQL for PostgreSQL |
-| Redis | Memorystore for Redis |
-| Neo4j | Neo4j Aura hoặc Neo4j trên GCE/GKE |
-| Qdrant | Qdrant Cloud hoặc Qdrant trên GCE/GKE |
-| `migrate` | Cloud Run Job chạy trước mỗi release |
-| Caddy | Không dùng; Cloud Run terminate HTTPS |
+| Image | Tài nguyên GCP | Vai trò |
+| --- | --- | --- |
+| `vlegal-api` | Cloud Run Service có GPU | FastAPI và Qwen inference |
+| `vlegal-frontend` | Cloud Run Service CPU | React SPA và reverse proxy `/api` |
+| `vlegal-worker` | Cloud Run Worker Pool có GPU | Celery consumer chạy liên tục |
+| `vlegal-beat` | Cloud Run Worker Pool CPU | Celery scheduler chạy liên tục |
+| `vlegal-migrate` | Cloud Run Job | `alembic upgrade head` |
+| `vlegal-model-init` | Cloud Run Job | tải checkpoint vào Cloud Storage |
 
-Cloud Run không giữ file ghi vào filesystem sau khi instance dừng. Vì vậy không
-được tải checkpoint 27,52 GiB vào filesystem của container lúc startup. Bucket
-Cloud Storage được mount như thư mục `/models/qwen3`; model chỉ cần tải vào bucket
-một lần. Xem [container runtime contract](https://docs.cloud.google.com/run/docs/container-contract)
-và [Cloud Storage volume mounts](https://docs.cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts).
+PostgreSQL/pgvector nên chạy trên Cloud SQL, Redis trên Memorystore và Neo4j
+trên Neo4j Aura hoặc GCE/GKE. Không chạy ba database này bằng Cloud Run vì Cloud
+Run không cung cấp persistent block storage/TCP endpoint phù hợp cho chúng.
 
-### Chọn GPU
+Frontend gọi API qua chính origin frontend (`/api`). Nginx chuyển tiếp request
+sang URL Cloud Run của API, nên browser không cần biết URL backend và cookie OIDC
+vẫn là same-site. Sau khi deploy, script tự đặt:
 
-Checkpoint `Qwen/Qwen3-14B` hiện tại không phù hợp với L4 24 GB ở dạng BF16 đầy
-đủ. Hướng dẫn dưới đây dùng `nvidia-rtx-pro-6000` 96 GB tại Singapore. Cloud Run
-yêu cầu tối thiểu 20 CPU và 80 GiB RAM cho GPU này. Nếu chi phí quá cao, cần đổi
-sang checkpoint quantized hoặc model nhỏ rồi mới chọn `nvidia-l4`.
+```text
+PUBLIC_URL=<frontend-run.app-url>
+FRONTEND_URL=<frontend-run.app-url>
+CORS_ORIGINS=<frontend-run.app-url>
+OIDC_REDIRECT_URI=<frontend-run.app-url>/api/auth/google/callback
+```
 
-Danh sách GPU/region hiện hành nằm tại
-[Cloud Run GPU support](https://docs.cloud.google.com/run/docs/configuring/services/gpu).
+## Dockerfile riêng
 
-## 2. Chuẩn bị project và Artifact Registry
+```text
+docker/api.Dockerfile
+docker/frontend.Dockerfile
+docker/worker.Dockerfile
+docker/beat.Dockerfile
+docker/migrate.Dockerfile
+docker/model-init.Dockerfile
+```
 
-Các lệnh dưới đây dành cho PowerShell. Thay giá trị mẫu trước khi chạy:
+`docker-compose.yml`, `compose.production.yml` và workflow CI đã trỏ trực tiếp
+đến các file này. `Dockerfile` ở root chỉ được giữ để tương thích với lệnh build
+cũ; deploy mới không dùng file đó.
+
+## 1. Biến dùng chung
+
+Các lệnh dưới đây dành cho PowerShell:
 
 ```powershell
+cd F:\VlegalAI
+
 $PROJECT_ID = "your-gcp-project-id"
 $REGION = "asia-southeast1"
 $AR_REPO = "vlegal"
-$SERVICE = "vlegal-api"
-$MODEL_JOB = "vlegal-model-init"
-$MIGRATE_JOB = "vlegal-migrate"
+$TAG = git rev-parse --short HEAD
+$RUN_SA_NAME = "vlegal-run"
+$RUN_SA = "$RUN_SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
 $MODEL_BUCKET = "$PROJECT_ID-vlegal-qwen3-14b"
 $NETWORK = "default"
 $SUBNET = "default"
-$IMAGE_TAG = git rev-parse --short HEAD
-$IMAGE = "$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/vlegal-ai:$IMAGE_TAG"
-$RUN_SA_NAME = "vlegal-run"
-$RUN_SA = "$RUN_SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
+$NEO4J_URI = "neo4j+s://your-neo4j-host:7687"
 
 gcloud auth login
 gcloud config set project $PROJECT_ID
+```
 
+Cloud Run GPU `nvidia-rtx-pro-6000` hiện cần ít nhất 20 CPU/80 GiB RAM. Script
+dùng loại GPU này vì checkpoint Qwen3-14B đầy đủ không vừa L4 24 GB. Chỉ truyền
+`-GpuType nvidia-l4` sau khi đã thay bằng checkpoint nhỏ hoặc quantized phù hợp.
+
+## 2. Bootstrap project một lần
+
+```powershell
 gcloud services enable `
   run.googleapis.com `
   artifactregistry.googleapis.com `
-  cloudbuild.googleapis.com `
   secretmanager.googleapis.com `
+  storage.googleapis.com `
+  compute.googleapis.com `
   sqladmin.googleapis.com `
   redis.googleapis.com `
-  compute.googleapis.com `
-  storage.googleapis.com
+  servicenetworking.googleapis.com
 
 gcloud artifacts repositories create $AR_REPO `
   --repository-format=docker `
   --location=$REGION `
-  --description="VLegalAI container images"
+  --description="VLegalAI service images"
 
 gcloud iam service-accounts create $RUN_SA_NAME `
-  --display-name="VLegalAI Cloud Run"
-```
+  --display-name="VLegalAI Cloud Run runtime"
 
-Nếu repository hoặc service account đã tồn tại, bỏ qua lỗi `ALREADY_EXISTS`.
-Artifact Registry phải được tạo trước khi push image. Xem
-[Artifact Registry Docker quickstart](https://docs.cloud.google.com/artifact-registry/docs/docker/store-docker-container-images).
-
-## 3. Tạo các dịch vụ dữ liệu
-
-Tạo trong cùng region `asia-southeast1`:
-
-1. Cloud SQL PostgreSQL 16, database `vlegal`, user riêng cho ứng dụng, private IP.
-2. Memorystore Redis trong cùng VPC.
-3. Neo4j Aura và Qdrant Cloud, hoặc tự host chúng trên GCE/GKE với private IP.
-
-Cloud Run kết nối các địa chỉ private bằng Direct VPC egress. Google khuyến nghị
-Direct VPC cho Memorystore vì độ trễ/chi phí tốt hơn connector. Tham khảo
-[Cloud Run → Memorystore](https://docs.cloud.google.com/memorystore/docs/redis/connect-redis-instance-cloud-run),
-[Direct VPC egress](https://docs.cloud.google.com/run/docs/configuring/vpc-direct-vpc)
-và [Cloud Run → Cloud SQL PostgreSQL](https://docs.cloud.google.com/sql/docs/postgres/connect-run).
-
-Các URL cần chuẩn bị:
-
-```text
-DATABASE_URL=postgresql+asyncpg://vlegal:<password>@<cloud-sql-private-ip>:5432/vlegal
-REDIS_URL=redis://<memorystore-private-ip>:6379/0
-NEO4J_URI=neo4j+s://<neo4j-host>:7687
-QDRANT_URL=https://<qdrant-host>
-```
-
-Không commit các giá trị này. Tạo secrets trong Secret Manager bằng Console hoặc
-CLI. Danh sách tối thiểu:
-
-```text
-vlegal-database-url
-vlegal-redis-url
-vlegal-neo4j-password
-vlegal-qdrant-api-key
-vlegal-session-secret
-vlegal-message-key
-vlegal-oidc-client-id
-vlegal-oidc-client-secret
-vlegal-tavily-key
-```
-
-Gán quyền đọc secret cho service account:
-
-```powershell
 gcloud projects add-iam-policy-binding $PROJECT_ID `
   --member="serviceAccount:$RUN_SA" `
   --role="roles/secretmanager.secretAccessor"
-```
 
-Cloud Run hỗ trợ đưa Secret Manager secret vào environment variable hoặc file;
-xem [Cloud Run secrets](https://docs.cloud.google.com/run/docs/configuring/services/secrets).
-
-## 4. Build và push một container image
-
-Chạy tại `F:\VlegalAI`:
-
-```powershell
-cd F:\VlegalAI
-gcloud builds submit `
-  --timeout=3600s `
-  --tag $IMAGE `
-  .
-```
-
-Image này chứa frontend, API và runtime CUDA, nhưng **không chứa checkpoint**.
-Cloud Run import image theo digest cho mỗi revision; nên dùng tag Git SHA, không
-dùng duy nhất `latest` cho production. Xem
-[deploy container images](https://docs.cloud.google.com/run/docs/deploying).
-
-## 5. Tạo bucket và tải model đúng một lần
-
-```powershell
 gcloud storage buckets create "gs://$MODEL_BUCKET" `
   --location=$REGION `
   --uniform-bucket-level-access
@@ -157,171 +105,250 @@ gcloud storage buckets add-iam-policy-binding "gs://$MODEL_BUCKET" `
   --role="roles/storage.objectUser"
 ```
 
-Deploy `model-init` dưới dạng Cloud Run Job. Image chạy bằng UID/GID `999`, vì vậy
-volume mount được đặt cùng UID/GID để job có thể ghi:
+Nếu resource đã tồn tại, bỏ qua lỗi `ALREADY_EXISTS`. Network/subnet dùng cho
+Direct VPC egress phải nằm cùng region; subnet phải đủ IP cho Cloud Run và Worker
+Pool.
 
-```powershell
-gcloud run jobs deploy $MODEL_JOB `
-  --image=$IMAGE `
-  --region=$REGION `
-  --service-account=$RUN_SA `
-  --command=python `
-  --args="scripts/download_qwen_model.py,--output-dir,/models/qwen3" `
-  --cpu=4 `
-  --memory=8Gi `
-  --task-timeout=3h `
-  --max-retries=3 `
-  --set-env-vars="QWEN_MODEL_REPO=Qwen/Qwen3-14B,QWEN_MODEL_REVISION=main,HF_HUB_OFFLINE=0,TRANSFORMERS_OFFLINE=0" `
-  --add-volume="mount-path=/models/qwen3,type=cloud-storage,bucket=$MODEL_BUCKET,readonly=false,mount-options=uid=999;gid=999"
+## 3. Dịch vụ dữ liệu và Secret Manager
 
-gcloud run jobs execute $MODEL_JOB `
-  --region=$REGION `
-  --wait
-```
-
-Job phải kết thúc thành công và log phải có `Download completed` cùng
-`Checkpoint is ready`. Các lần chạy sau đọc `.vlegal-model.json` và thoát nhanh,
-không tải lại model.
-
-## 6. Chạy migration bằng Cloud Run Job
-
-```powershell
-gcloud run jobs deploy $MIGRATE_JOB `
-  --image=$IMAGE `
-  --region=$REGION `
-  --service-account=$RUN_SA `
-  --command=alembic `
-  --args="upgrade,head" `
-  --cpu=1 `
-  --memory=1Gi `
-  --task-timeout=15m `
-  --max-retries=1 `
-  --network=$NETWORK `
-  --subnet=$SUBNET `
-  --vpc-egress=private-ranges-only `
-  --set-secrets="DATABASE_URL=vlegal-database-url:latest"
-
-gcloud run jobs execute $MIGRATE_JOB `
-  --region=$REGION `
-  --wait
-```
-
-Chỉ deploy revision API sau khi migration trả thành công.
-
-## 7. Deploy API/frontend lên Cloud Run GPU
-
-Đặt endpoint Neo4j/Qdrant trước khi chạy:
-
-```powershell
-$NEO4J_URI = "neo4j+s://your-neo4j-host:7687"
-$QDRANT_URL = "https://your-qdrant-host"
-```
-
-Deploy container:
-
-```powershell
-gcloud run deploy $SERVICE `
-  --image=$IMAGE `
-  --region=$REGION `
-  --execution-environment=gen2 `
-  --service-account=$RUN_SA `
-  --port=8000 `
-  --gpu=1 `
-  --gpu-type=nvidia-rtx-pro-6000 `
-  --no-gpu-zonal-redundancy `
-  --cpu=20 `
-  --memory=80Gi `
-  --concurrency=1 `
-  --min-instances=0 `
-  --max-instances=1 `
-  --timeout=3600 `
-  --no-cpu-throttling `
-  --network=$NETWORK `
-  --subnet=$SUBNET `
-  --vpc-egress=private-ranges-only `
-  --allow-unauthenticated `
-  --add-volume="mount-path=/models/qwen3,type=cloud-storage,bucket=$MODEL_BUCKET,readonly=true" `
-  --set-env-vars="APP_ENV=production,QWEN_MODEL_PATH=/models/qwen3,QWEN_MODEL=Qwen3-14B,QWEN_DEVICE=cuda,QWEN_DTYPE=bfloat16,QWEN_MAX_CONCURRENT_GENERATIONS=1,WEB_CONCURRENCY=1,DATABASE_POOL_SIZE=5,DATABASE_MAX_OVERFLOW=5,RETRIEVER_BACKEND=hybrid_rag,NEO4J_URI=$NEO4J_URI,NEO4J_USER=neo4j,QDRANT_URL=$QDRANT_URL" `
-  --set-secrets="DATABASE_URL=vlegal-database-url:latest,REDIS_URL=vlegal-redis-url:latest,NEO4J_PASSWORD=vlegal-neo4j-password:latest,QDRANT_API_KEY=vlegal-qdrant-api-key:latest,SESSION_SECRET=vlegal-session-secret:latest,MESSAGE_ENCRYPTION_KEY=vlegal-message-key:latest,OIDC_CLIENT_ID=vlegal-oidc-client-id:latest,OIDC_CLIENT_SECRET=vlegal-oidc-client-secret:latest,TAVILY_API_KEY=vlegal-tavily-key:latest"
-```
-
-Cloud Run hiện hỗ trợ `nvidia-rtx-pro-6000` tại `asia-southeast1`. Nếu project
-chưa có quota, lần deploy GPU đầu có thể yêu cầu cấp quota. Cú pháp đầy đủ của
-lệnh nằm tại [`gcloud run deploy`](https://docs.cloud.google.com/sdk/gcloud/reference/run/deploy).
-
-## 8. Cập nhật URL public và Google OAuth
-
-```powershell
-$SERVICE_URL = gcloud run services describe $SERVICE `
-  --region=$REGION `
-  --format="value(status.url)"
-
-gcloud run services update $SERVICE `
-  --region=$REGION `
-  --update-env-vars="PUBLIC_URL=$SERVICE_URL,FRONTEND_URL=$SERVICE_URL,CORS_ORIGINS=$SERVICE_URL,OIDC_REDIRECT_URI=$SERVICE_URL/api/auth/google/callback,COOKIE_SECURE=true"
-
-Write-Output $SERVICE_URL
-```
-
-Trong Google Cloud Console của OAuth client, thêm Authorized redirect URI:
+Chuẩn bị các endpoint trước khi deploy:
 
 ```text
-https://<cloud-run-service-host>/api/auth/google/callback
+DATABASE_URL=postgresql+asyncpg://vlegal:<password>@<cloud-sql-private-ip>:5432/vlegal
+REDIS_URL=redis://<memorystore-private-ip>:6379/0
+NEO4J_URI=neo4j+s://<neo4j-host>:7687
 ```
 
-Nếu dùng custom domain, cập nhật lại bốn biến URL theo domain đó.
+Tạo các secret dưới đây trong Secret Manager và thêm ít nhất một version:
 
-## 9. Kiểm tra deployment
+```text
+vlegal-database-url
+vlegal-redis-url
+vlegal-neo4j-password
+vlegal-session-secret
+vlegal-message-key
+vlegal-oidc-client-id
+vlegal-oidc-client-secret
+vlegal-tavily-key
+```
+
+Không đưa secret vào source, image tag hoặc tham số `--set-env-vars`. Giá trị
+`vlegal-message-key` là khóa Fernet; có thể tạo offline bằng:
 
 ```powershell
-curl.exe -fsS "$SERVICE_URL/api/health/live"
-curl.exe -fsS "$SERVICE_URL/api/health/ready"
-curl.exe -I "$SERVICE_URL/"
-
-gcloud run services logs read $SERVICE `
-  --region=$REGION `
-  --limit=200
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-`live` phải trả `ok`; `ready` phải trả `ready`. Lần gọi AI đầu tiên sẽ nạp model
-từ Cloud Storage vào GPU nên chậm hơn. Sau khi kiểm thử, cân nhắc đặt
-`--min-instances=1` để tránh cold start, nhưng GPU sẽ phát sinh chi phí khi giữ
-instance nóng.
+## 4. Build và push từng image
 
-## 10. Worker và beat
-
-Lệnh trên chỉ deploy ingress container API/frontend. Không deploy Celery worker
-hoặc beat vào cùng Cloud Run service:
-
-- Celery worker liên tục nên phù hợp với Cloud Run worker pool, GKE hoặc GCE.
-- Tác vụ định kỳ nên chuyển thành Cloud Run Job và gọi bằng Cloud Scheduler.
-- Nếu chưa cần refresh corpus nền, API vẫn có thể chạy; kiểm tra hiệu lực trong
-  request hiện vẫn hoạt động qua Tavily/Qwen.
-
-## 11. Redeploy và model persistence
-
-Release code mới:
+Script build dùng đúng Dockerfile của từng service và mặc định target
+`linux/amd64`, là kiến trúc Cloud Run hỗ trợ:
 
 ```powershell
-$IMAGE_TAG = git rev-parse --short HEAD
-$IMAGE = "$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/vlegal-ai:$IMAGE_TAG"
-
-gcloud builds submit --timeout=3600s --tag $IMAGE .
-gcloud run jobs update $MIGRATE_JOB --image=$IMAGE --region=$REGION
-gcloud run jobs execute $MIGRATE_JOB --region=$REGION --wait
-gcloud run services update $SERVICE --image=$IMAGE --region=$REGION
+# Build + push toàn bộ sáu image
+.\scripts\gcp\build-images.ps1 `
+  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG -Push
 ```
 
-Không chạy lại model job khi chỉ đổi code. Checkpoint nằm trong Cloud Storage
-bucket nên mọi revision/instance dùng lại; chỉ chạy model job khi đổi
-`QWEN_MODEL_REPO` hoặc `QWEN_MODEL_REVISION`.
+Build/push riêng từng service:
 
-## 12. Lưu ý trước production
+```powershell
+.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service api -Push
+.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service frontend -Push
+.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service worker -Push
+.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service beat -Push
+.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service migrate -Push
+.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service model-init -Push
+```
 
-- Cloud Run không chạy nguyên stack Compose; mọi endpoint phụ thuộc phải sẵn sàng.
-- Không đưa `.env.production` hoặc secret vào image/source.
-- Giữ `max-instances=1` cho tới khi kiểm thử giới hạn Cloud SQL và chi phí GPU.
-- Bucket model chỉ cấp quyền cho service account; không public bucket.
-- Cloud Storage FUSE không hoàn toàn POSIX và đọc model sẽ chậm hơn local SSD.
-- Nếu cần latency ổn định hoặc chạy đủ Compose ít thay đổi, GCE với Persistent
-  Disk vẫn đơn giản và thường kinh tế hơn Cloud Run GPU cho workload này.
+Image được push theo dạng:
+
+```text
+asia-southeast1-docker.pkg.dev/<project>/vlegal/vlegal-<service>:<git-sha>
+```
+
+## 5. Deploy từng service/job lên GCP
+
+Chạy lần lượt theo thứ tự sau. `-ExecuteJobs` deploy rồi thực thi job; bỏ flag đó
+nếu chỉ muốn cập nhật cấu hình job mà chưa chạy.
+
+### 5.1 Tải model
+
+```powershell
+.\scripts\gcp\deploy.ps1 `
+  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
+  -ModelBucket $MODEL_BUCKET -Neo4jUri $NEO4J_URI `
+  -Component model-init -ExecuteJobs
+```
+
+Cloud Storage bucket được mount read-write vào job ở `/models/qwen3`. API và
+worker mount cùng bucket read-only. Job có marker nên chạy lại không tải checkpoint
+nếu repo/revision không thay đổi.
+
+### 5.2 Migration
+
+```powershell
+.\scripts\gcp\deploy.ps1 `
+  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
+  -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
+  -Component migrate -ExecuteJobs
+```
+
+### 5.3 API
+
+```powershell
+.\scripts\gcp\deploy.ps1 `
+  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
+  -ModelBucket $MODEL_BUCKET -Network $NETWORK -Subnet $SUBNET `
+  -Neo4jUri $NEO4J_URI -Component api
+```
+
+API được public để Nginx frontend có thể reverse proxy đến nó. API nghiệp vụ vẫn
+áp dụng session/role/rate-limit ở tầng ứng dụng; chỉ các endpoint được thiết kế
+public mới không cần đăng nhập.
+
+### 5.4 Frontend
+
+```powershell
+.\scripts\gcp\deploy.ps1 `
+  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
+  -Neo4jUri $NEO4J_URI -Component frontend
+```
+
+Script đọc URL API, đặt `API_UPSTREAM`, lấy URL frontend và cập nhật bốn biến URL
+của API. Không có bước cấu hình domain.
+
+### 5.5 Worker
+
+```powershell
+.\scripts\gcp\deploy.ps1 `
+  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
+  -ModelBucket $MODEL_BUCKET -Network $NETWORK -Subnet $SUBNET `
+  -Neo4jUri $NEO4J_URI -Component worker
+```
+
+### 5.6 Beat
+
+```powershell
+.\scripts\gcp\deploy.ps1 `
+  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
+  -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
+  -Component beat
+```
+
+Worker Pool không autoscale và `worker` giữ một GPU hoạt động liên tục. Nếu chỉ
+cần refresh kho luật theo ngày, nên chuyển tác vụ này thành Cloud Run Job + Cloud
+Scheduler để giảm chi phí; cấu hình hiện tại giữ nguyên semantics Celery đang có.
+
+### Deploy tất cả bằng một lệnh
+
+Sau khi dữ liệu, bucket và secrets đã sẵn sàng:
+
+```powershell
+.\scripts\gcp\deploy.ps1 `
+  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
+  -RunServiceAccount $RUN_SA -ModelBucket $MODEL_BUCKET `
+  -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
+  -Component all -ExecuteJobs
+```
+
+## 6. Lấy URL và cấu hình Google OAuth
+
+```powershell
+$FRONTEND_URL = gcloud run services describe vlegal-frontend `
+  --project=$PROJECT_ID --region=$REGION --format="value(status.url)"
+
+$API_URL = gcloud run services describe vlegal-api `
+  --project=$PROJECT_ID --region=$REGION --format="value(status.url)"
+
+Write-Output "Frontend: $FRONTEND_URL"
+Write-Output "API:      $API_URL"
+Write-Output "OAuth:    $FRONTEND_URL/api/auth/google/callback"
+```
+
+Trong Google OAuth client loại **Web application**, thêm:
+
+```text
+Authorized JavaScript origin: <FRONTEND_URL>
+Authorized redirect URI:      <FRONTEND_URL>/api/auth/google/callback
+```
+
+Đây là cấu hình URL `run.app`, không phải custom domain.
+
+## 7. Lệnh chạy từng Docker ở local
+
+Tạo `.env` trước:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Build riêng từng image:
+
+```powershell
+docker build -f docker/api.Dockerfile -t vlegal-api:local .
+docker build -f docker/frontend.Dockerfile -t vlegal-frontend:local .
+docker build -f docker/worker.Dockerfile -t vlegal-worker:local .
+docker build -f docker/beat.Dockerfile -t vlegal-beat:local .
+docker build -f docker/migrate.Dockerfile -t vlegal-migrate:local .
+docker build -f docker/model-init.Dockerfile -t vlegal-model-init:local .
+```
+
+Khởi động hạ tầng local trước:
+
+```powershell
+docker compose up -d postgres redis neo4j
+```
+
+Chạy từng service/job độc lập qua Compose:
+
+```powershell
+# Job một lần
+docker compose run --rm model-init
+docker compose run --rm migrate
+
+# Service chạy nền
+docker compose up -d api
+docker compose up -d frontend
+docker compose up -d worker
+docker compose up -d beat
+```
+
+Hoặc chạy toàn bộ stack:
+
+```powershell
+docker compose up -d --build
+```
+
+Xem log và dừng riêng từng service:
+
+```powershell
+docker compose logs -f api
+docker compose stop api
+docker compose rm -f api
+```
+
+Thay `api` bằng `frontend`, `worker` hoặc `beat` khi cần.
+
+## 8. Kiểm tra sau deploy
+
+```powershell
+curl.exe -fsS "$API_URL/api/health/live"
+curl.exe -fsS "$API_URL/api/health/ready"
+curl.exe -I "$FRONTEND_URL/"
+
+gcloud run services logs read vlegal-api `
+  --project=$PROJECT_ID --region=$REGION --limit=200
+```
+
+Các file/scripts trong thay đổi này chỉ tạo cấu hình; không tự build image, chạy
+container hay deploy tài nguyên khi checkout source.
+
+## Tài liệu GCP liên quan
+
+- [Cloud Run container runtime contract](https://docs.cloud.google.com/run/docs/container-contract)
+- [Deploy Cloud Run worker pools](https://docs.cloud.google.com/run/docs/deploy-worker-pools)
+- [Cloud Run GPU services](https://docs.cloud.google.com/run/docs/configuring/services/gpu)
+- [Cloud Run GPU worker pools](https://docs.cloud.google.com/run/docs/configuring/workerpools/gpu)
+- [Cloud Storage volume mounts](https://docs.cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts)
+- [Direct VPC egress](https://docs.cloud.google.com/run/docs/configuring/vpc-direct-vpc)

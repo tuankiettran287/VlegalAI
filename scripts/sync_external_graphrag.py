@@ -18,14 +18,14 @@ from app.legal_graphrag import DEFAULT_DATA_DIR, DEFAULT_DB_PATH, DEFAULT_STORAG
 def main() -> None:
     load_dotenv(PROJECT_ROOT / ".env", override=True)
     parser = argparse.ArgumentParser(
-        description="Sync LaborCare GraphRAG to Neo4j local and Qdrant Cloud."
+        description="Sync VLegalAI GraphRAG to Neo4j and PostgreSQL pgvector."
     )
     parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--storage-dir", type=Path, default=DEFAULT_STORAGE_DIR)
     parser.add_argument("--skip-sqlite-build", action="store_true")
     parser.add_argument("--reset-neo4j", action="store_true")
-    parser.add_argument("--reset-qdrant", action="store_true")
+    parser.add_argument("--reset-postgres", action="store_true")
     args = parser.parse_args()
 
     if not args.skip_sqlite_build:
@@ -38,7 +38,7 @@ def main() -> None:
         args.db_path,
         config=config,
         reset_neo4j=args.reset_neo4j,
-        reset_qdrant=args.reset_qdrant,
+        reset_postgres=args.reset_postgres,
     )
     print("External GraphRAG synced:")
     print(json.dumps(result, ensure_ascii=False, indent=2))

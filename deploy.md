@@ -1,8 +1,8 @@
 # Deploy VLegal AI bằng Docker
 
 Production chạy trên một máy Linux/VPS bằng `compose.production.yml`. Caddy nhận
-traffic ở cổng 80/443 và tự cấp HTTPS; chỉ Caddy được public. API, worker, beat,
-PostgreSQL, Redis, Neo4j và Qdrant giao tiếp trong mạng Docker. Dữ liệu được giữ
+traffic ở cổng 80/443 và tự cấp HTTPS; chỉ Caddy được public. Frontend, API,
+worker, beat, PostgreSQL/pgvector, Redis và Neo4j giao tiếp trong mạng Docker. Dữ liệu được giữ
 trong named volumes. Service `model-init` tải checkpoint Qwen từ Hugging Face vào
 volume `qwen_model`; API và worker mount volume này ở chế độ read-only.
 
@@ -12,7 +12,7 @@ volume `qwen_model`; API và worker mount volume này ở chế độ read-only.
 - Domain đã có bản ghi A/AAAA trỏ về IP máy chủ.
 - Firewall mở TCP 80/443 và UDP 443; SSH chỉ mở cho IP quản trị.
 - Đủ RAM/VRAM và dung lượng đĩa cho Qwen3-14B cùng các data store.
-- Không cài PostgreSQL, Redis, Neo4j hoặc Qdrant trực tiếp trên host.
+- Không cài PostgreSQL, Redis hoặc Neo4j trực tiếp trên host.
 
 Tạo thư mục triển khai:
 
@@ -45,7 +45,7 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 Điền `.env.production`, tối thiểu:
 
 - `DOMAIN`, `ACME_EMAIL`.
-- `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `NEO4J_PASSWORD`, `QDRANT_API_KEY`.
+- `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `NEO4J_PASSWORD`.
 - `SESSION_SECRET`, `MESSAGE_ENCRYPTION_KEY`.
 - `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `TAVILY_API_KEY`.
 - `QWEN_MODEL_REPO`, `QWEN_MODEL_REVISION`; thêm `HF_TOKEN` nếu repository model
@@ -69,7 +69,7 @@ Không commit `.env.production`; file này đã được `.gitignore`.
 
 Script deploy sẽ validate Compose, build image, đợi data services healthy, tải
 và kiểm tra model, chạy Alembic migration một lần, rồi mới cập nhật
-API/worker/beat/Caddy:
+frontend/API/worker/beat/Caddy:
 
 ```bash
 chmod +x scripts/deploy-docker.sh
@@ -95,7 +95,8 @@ và checkpoint Qwen đều sẵn sàng.
 Workflow `.github/workflows/deploy-docker.yml`:
 
 1. Validate `compose.production.yml`.
-2. Build một image và push hai tag lên GHCR: Git SHA bất biến và `latest`.
+2. Build sáu image (`api`, `frontend`, `worker`, `beat`, `migrate`, `model-init`)
+   và push tag Git SHA bất biến cùng `latest` lên GHCR.
 3. Nếu có cấu hình server, copy bundle deploy qua SSH.
 4. Pull đúng image Git SHA, chạy migration và cập nhật Compose stack.
 
@@ -140,13 +141,20 @@ docker compose --project-name vlegal --env-file .env.production \
 ```
 
 Trước mỗi thay đổi schema hoặc nâng phiên bản data store, backup PostgreSQL cùng
-các volume Neo4j/Qdrant. Không dùng `docker compose down -v` trên production vì
+các volume Neo4j. Không dùng `docker compose down -v` trên production vì
 tham số `-v` xóa toàn bộ named volumes.
 
-Rollback application bằng cách chọn Git SHA image đã chạy tốt:
+Rollback application bằng cách chọn cùng một Git SHA cho toàn bộ service image:
 
 ```bash
-VLEGAL_IMAGE=ghcr.io/<owner>/<repo>:<good-sha> PULL_IMAGE=1 \
+IMAGE_BASE=ghcr.io/<owner>/<repo>
+VLEGAL_API_IMAGE="$IMAGE_BASE-api:<good-sha>" \
+VLEGAL_FRONTEND_IMAGE="$IMAGE_BASE-frontend:<good-sha>" \
+VLEGAL_WORKER_IMAGE="$IMAGE_BASE-worker:<good-sha>" \
+VLEGAL_BEAT_IMAGE="$IMAGE_BASE-beat:<good-sha>" \
+VLEGAL_MIGRATE_IMAGE="$IMAGE_BASE-migrate:<good-sha>" \
+VLEGAL_MODEL_INIT_IMAGE="$IMAGE_BASE-model-init:<good-sha>" \
+PULL_IMAGE=1 \
   ./scripts/deploy-docker.sh
 ```
 

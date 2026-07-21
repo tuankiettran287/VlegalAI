@@ -3,14 +3,14 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 from neo4j import GraphDatabase
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
+import psycopg
+from psycopg.rows import dict_row
+from sqlalchemy.engine import make_url
 
 from app.legal_graphrag import DEFAULT_DB_PATH, hash_vector, key_terms, normalize_space, strip_accents
 
@@ -70,11 +70,8 @@ class ExternalGraphRAGConfig:
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
-    qdrant_url: str = ""
-    qdrant_api_key: str = ""
-    qdrant_collection: str = "laborcare_legal_chunks"
-    qdrant_vector_name: str = "abstract-dense-vector"
-    qdrant_vector_size: int = 1536
+    database_url: str = "postgresql+asyncpg://vlegal:vlegal@localhost:5432/vlegal"
+    postgres_vector_size: int = 1536
     batch_size: int = 256
 
     @classmethod
@@ -84,34 +81,30 @@ class ExternalGraphRAGConfig:
             neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
             neo4j_password=os.getenv("NEO4J_PASSWORD", ""),
             neo4j_database=os.getenv("NEO4J_DATABASE", "neo4j"),
-            qdrant_url=os.getenv("QDRANT_URL", ""),
-            qdrant_api_key=os.getenv("QDRANT_API_KEY", ""),
-            qdrant_collection=os.getenv("QDRANT_COLLECTION", "laborcare_legal_chunks"),
-            qdrant_vector_name=os.getenv("QDRANT_VECTOR_NAME", "abstract-dense-vector"),
-            qdrant_vector_size=int(os.getenv("QDRANT_VECTOR_SIZE", "1536")),
+            database_url=os.getenv(
+                "DATABASE_URL",
+                "postgresql+asyncpg://vlegal:vlegal@localhost:5432/vlegal",
+            ),
+            postgres_vector_size=int(os.getenv("POSTGRES_VECTOR_SIZE", "1536")),
             batch_size=int(os.getenv("EXTERNAL_SYNC_BATCH_SIZE", "256")),
         )
 
     @property
     def ready(self) -> bool:
-        return bool(self.neo4j_password and self.qdrant_url and self.qdrant_api_key)
+        return bool(self.neo4j_password and self.database_url)
 
     @property
     def neo4j_ready(self) -> bool:
         return bool(self.neo4j_password)
 
     @property
-    def qdrant_ready(self) -> bool:
-        return bool(self.qdrant_url and self.qdrant_api_key)
+    def postgres_ready(self) -> bool:
+        return bool(self.database_url)
 
 
 def relation_type(relation: str) -> str:
     key = strip_accents(relation).upper()
     return RELATION_TYPE_MAP.get(key, "RELATED_TO")
-
-
-def point_id(chunk_id: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"laborcare:{chunk_id}"))
 
 
 def batched(rows: Iterable[dict[str, Any]], size: int) -> Iterable[list[dict[str, Any]]]:
@@ -134,8 +127,20 @@ def sqlite_rows(db_path: Path | str, table: str) -> list[dict[str, Any]]:
         conn.close()
 
 
-def qdrant_client(config: ExternalGraphRAGConfig) -> QdrantClient:
-    return QdrantClient(url=config.qdrant_url, api_key=config.qdrant_api_key, timeout=60)
+def postgres_dsn(database_url: str) -> str:
+    """Convert SQLAlchemy async URLs to a DSN accepted by psycopg."""
+    url = make_url(database_url)
+    if not url.drivername.startswith("postgresql"):
+        raise ValueError("DATABASE_URL must point to PostgreSQL")
+    return url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+
+def postgres_connection(config: ExternalGraphRAGConfig):
+    return psycopg.connect(
+        postgres_dsn(config.database_url),
+        row_factory=dict_row,
+        autocommit=True,
+    )
 
 
 def neo4j_driver(config: ExternalGraphRAGConfig):
@@ -248,34 +253,108 @@ def sync_neo4j(
     return {"nodes": len(nodes), "edges": len(edges), "chunks": len(chunks)}
 
 
-def ensure_qdrant_collection(
-    client: QdrantClient,
-    config: ExternalGraphRAGConfig,
-    reset: bool = False,
-) -> None:
-    exists = client.collection_exists(config.qdrant_collection)
-    if reset and exists:
-        client.delete_collection(config.qdrant_collection)
-        exists = False
-    if not exists:
-        client.create_collection(
-            collection_name=config.qdrant_collection,
-            vectors_config={
-                config.qdrant_vector_name: VectorParams(
-                    size=config.qdrant_vector_size,
-                    distance=Distance.COSINE,
+def vector_literal(values: Iterable[float]) -> str:
+    return "[" + ",".join(f"{float(value):.8g}" for value in values) + "]"
+
+
+def postgres_dense_vector(text: str, config: ExternalGraphRAGConfig) -> list[float]:
+    return list(hash_vector(text, dims=config.postgres_vector_size))
+
+
+def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) -> None:
+    if config.postgres_vector_size > 2000:
+        raise ValueError("POSTGRES_VECTOR_SIZE must be <= 2000 when using an HNSW vector index")
+    with postgres_connection(config) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS graphrag_chunk (
+                    chunk_id VARCHAR(255) PRIMARY KEY,
+                    doc_id VARCHAR(255) NOT NULL,
+                    node_id VARCHAR(255) NOT NULL,
+                    chunk_type VARCHAR(32) NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    path_label TEXT NOT NULL DEFAULT '',
+                    citation TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL,
+                    token_count INTEGER NOT NULL DEFAULT 0,
+                    ordinal INTEGER NOT NULL DEFAULT 0,
+                    source_url TEXT,
+                    law_code VARCHAR(120),
+                    law_status VARCHAR(32),
+                    law_version INTEGER,
+                    embedding vector({config.postgres_vector_size}) NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
-            },
-        )
-    for field in ["chunk_id", "node_id", "doc_id", "chunk_type"]:
-        try:
-            client.create_payload_index(
-                collection_name=config.qdrant_collection,
-                field_name=field,
-                field_schema="keyword",
+                """
             )
-        except Exception:
-            pass
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_doc_id ON graphrag_chunk (doc_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_node_id ON graphrag_chunk (node_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_type ON graphrag_chunk (chunk_type)")
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_search ON graphrag_chunk USING gin (
+                    to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(citation, '') || ' ' || coalesce(text, ''))
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_embedding_hnsw
+                ON graphrag_chunk USING hnsw (embedding vector_cosine_ops)
+                WITH (m = 16, ef_construction = 64)
+                """
+            )
+            if reset:
+                cursor.execute("TRUNCATE TABLE graphrag_chunk")
+
+
+def upsert_postgres_chunks(
+    rows: Iterable[dict[str, Any]],
+    config: ExternalGraphRAGConfig,
+) -> int:
+    prepared: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        vector_text = f"{row.get('title', '')}\n{row.get('path_label', '')}\n{row.get('text', '')}"
+        row["embedding"] = vector_literal(postgres_dense_vector(vector_text, config))
+        prepared.append(row)
+    if not prepared:
+        return 0
+
+    statement = """
+        INSERT INTO graphrag_chunk (
+            chunk_id, doc_id, node_id, chunk_type, title, path_label, citation,
+            text, token_count, ordinal, source_url, law_code, law_status,
+            law_version, embedding, updated_at
+        ) VALUES (
+            %(chunk_id)s, %(doc_id)s, %(node_id)s, %(chunk_type)s,
+            %(title)s, %(path_label)s, %(citation)s, %(text)s,
+            %(token_count)s, %(ordinal)s, %(source_url)s, %(law_code)s,
+            %(law_status)s, %(law_version)s, %(embedding)s::vector, now()
+        )
+        ON CONFLICT (chunk_id) DO UPDATE SET
+            doc_id = EXCLUDED.doc_id,
+            node_id = EXCLUDED.node_id,
+            chunk_type = EXCLUDED.chunk_type,
+            title = EXCLUDED.title,
+            path_label = EXCLUDED.path_label,
+            citation = EXCLUDED.citation,
+            text = EXCLUDED.text,
+            token_count = EXCLUDED.token_count,
+            ordinal = EXCLUDED.ordinal,
+            source_url = EXCLUDED.source_url,
+            law_code = EXCLUDED.law_code,
+            law_status = EXCLUDED.law_status,
+            law_version = EXCLUDED.law_version,
+            embedding = EXCLUDED.embedding,
+            updated_at = now()
+    """
+    with postgres_connection(config) as connection:
+        with connection.cursor() as cursor:
+            cursor.executemany(statement, prepared)
+    return len(prepared)
 
 
 def score_chunk_payload(
@@ -333,28 +412,23 @@ def neo4j_fulltext_query(query: str) -> str:
     return " OR ".join(lucene_escape(term) for term in terms if term)
 
 
-def qdrant_dense_vector(text: str, config: ExternalGraphRAGConfig) -> list[float]:
-    return list(hash_vector(text, dims=config.qdrant_vector_size))
-
-
-def sync_qdrant(
+def sync_postgres(
     db_path: Path | str = DEFAULT_DB_PATH,
     config: ExternalGraphRAGConfig | None = None,
     reset: bool = False,
 ) -> dict[str, int]:
     config = config or ExternalGraphRAGConfig.from_env()
-    if not config.qdrant_url or not config.qdrant_api_key:
-        raise RuntimeError("QDRANT_URL and QDRANT_API_KEY are required to sync Qdrant.")
+    if not config.postgres_ready:
+        raise RuntimeError("DATABASE_URL is required to sync PostgreSQL.")
 
     chunks = sqlite_rows(db_path, "chunks")
-    client = qdrant_client(config)
-    ensure_qdrant_collection(client, config, reset=reset)
+    ensure_postgres_schema(config, reset=reset)
 
     total = 0
     for batch in batched(chunks, config.batch_size):
-        points = []
+        rows = []
         for row in batch:
-            payload = {
+            rows.append({
                 "chunk_id": row["chunk_id"],
                 "doc_id": row["doc_id"],
                 "node_id": row["node_id"],
@@ -365,26 +439,21 @@ def sync_qdrant(
                 "text": row["text"],
                 "token_count": row["token_count"],
                 "ordinal": row["ordinal"],
-            }
-            vector_text = f"{row['title']}\n{row['path_label']}\n{row['text']}"
-            points.append(
-                PointStruct(
-                    id=point_id(row["chunk_id"]),
-                    vector={config.qdrant_vector_name: qdrant_dense_vector(vector_text, config)},
-                    payload=payload,
-                )
-            )
-        client.upsert(collection_name=config.qdrant_collection, points=points, wait=True)
-        total += len(points)
+                "source_url": None,
+                "law_code": None,
+                "law_status": None,
+                "law_version": None,
+            })
+        total += upsert_postgres_chunks(rows, config)
 
-    return {"chunks": total, "collection": config.qdrant_collection}
+    return {"chunks": total}
 
 
 def sync_external_graphrag(
     db_path: Path | str = DEFAULT_DB_PATH,
     config: ExternalGraphRAGConfig | None = None,
     reset_neo4j: bool = False,
-    reset_qdrant: bool = False,
+    reset_postgres: bool = False,
 ) -> dict[str, Any]:
     config = config or ExternalGraphRAGConfig.from_env()
     res = {}
@@ -393,55 +462,60 @@ def sync_external_graphrag(
     except Exception as exc:
         res["neo4j"] = {"error": f"{type(exc).__name__}: {exc}"}
     try:
-        res["qdrant"] = sync_qdrant(db_path, config, reset=reset_qdrant)
+        res["postgres"] = sync_postgres(db_path, config, reset=reset_postgres)
     except Exception as exc:
-        res["qdrant"] = {"error": f"{type(exc).__name__}: {exc}"}
+        res["postgres"] = {"error": f"{type(exc).__name__}: {exc}"}
     return res
 
 
-class QdrantGraphRAGStore:
+class PostgresGraphRAGStore:
     def __init__(self, config: ExternalGraphRAGConfig | None = None):
         self.config = config or ExternalGraphRAGConfig.from_env()
-        if not self.config.qdrant_ready:
-            raise RuntimeError("Qdrant backend requires QDRANT_URL and QDRANT_API_KEY.")
-        self.qdrant = qdrant_client(self.config)
-        self.qdrant.get_collection(self.config.qdrant_collection)
+        if not self.config.postgres_ready:
+            raise RuntimeError("PostgreSQL backend requires DATABASE_URL.")
+        self.connection = postgres_connection(self.config)
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM graphrag_chunk LIMIT 1")
 
     def close(self) -> None:
-        return None
+        self.connection.close()
 
     def stats(self) -> dict[str, Any]:
-        count = self.qdrant.count(
-            collection_name=self.config.qdrant_collection,
-            exact=True,
-        ).count
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) AS chunks, count(DISTINCT doc_id) AS documents FROM graphrag_chunk")
+            counts = cursor.fetchone() or {"chunks": 0, "documents": 0}
         return {
-            "backend": "qdrant",
-            "documents": 0,
+            "backend": "postgres",
+            "documents": counts["documents"],
             "nodes": 0,
             "edges": 0,
-            "chunks": count,
+            "chunks": counts["chunks"],
             "relations": {},
-            "qdrant_collection": self.config.qdrant_collection,
         }
 
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         query = normalize_space(query)
         if not query:
             return []
-        result = self.qdrant.query_points(
-            collection_name=self.config.qdrant_collection,
-            query=qdrant_dense_vector(query, self.config),
-            using=self.config.qdrant_vector_name,
-            limit=max(24, top_k * 4),
-            with_payload=True,
-        )
-        points = getattr(result, "points", result)
+        query_vector = vector_literal(postgres_dense_vector(query, self.config))
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
+                       citation, text, token_count, ordinal, source_url,
+                       1 - (embedding <=> %s::vector) AS _score
+                FROM graphrag_chunk
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (query_vector, query_vector, max(24, top_k * 4)),
+            )
+            candidates = cursor.fetchall()
         rows = []
-        for rank, point in enumerate(points, start=1):
-            row = dict(point.payload or {})
-            row["score"] = score_chunk_payload(row, query, float(point.score or 0.0), rank)
-            row["reasons"] = ["qdrant"]
+        for rank, source in enumerate(candidates, start=1):
+            row = dict(source)
+            row["score"] = score_chunk_payload(row, query, float(row.pop("_score", 0.0)), rank)
+            row["reasons"] = ["postgres_vector"]
             rows.append(row)
         rows.sort(key=lambda row: row["score"], reverse=True)
         selected = rows[:top_k]
@@ -709,19 +783,21 @@ class Neo4jGraphRAGStore:
         return rows
 
 
-class Neo4jQdrantGraphRAGStore:
+class Neo4jPostgresGraphRAGStore:
     def __init__(self, config: ExternalGraphRAGConfig | None = None):
         self.config = config or ExternalGraphRAGConfig.from_env()
         if not self.config.ready:
             raise RuntimeError(
-                "Hybrid backend requires NEO4J_PASSWORD, QDRANT_URL, and QDRANT_API_KEY."
+                "Hybrid backend requires NEO4J_PASSWORD and DATABASE_URL."
             )
-        self.qdrant = qdrant_client(self.config)
+        self.postgres = postgres_connection(self.config)
         self.driver = neo4j_driver(self.config)
         self.driver.verify_connectivity()
-        self.qdrant.get_collection(self.config.qdrant_collection)
+        with self.postgres.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM graphrag_chunk LIMIT 1")
 
     def close(self) -> None:
+        self.postgres.close()
         self.driver.close()
 
     def stats(self) -> dict[str, Any]:
@@ -755,20 +831,18 @@ class Neo4jQdrantGraphRAGStore:
                 ORDER BY count DESC
                 """
             ).data()
-        qdrant_count = self.qdrant.count(
-            collection_name=self.config.qdrant_collection,
-            exact=True,
-        ).count
+        with self.postgres.cursor() as cursor:
+            cursor.execute("SELECT count(*) AS count FROM graphrag_chunk")
+            postgres_count = (cursor.fetchone() or {"count": 0})["count"]
         return {
-            "backend": "neo4j+qdrant",
+            "backend": "neo4j+postgres",
             "documents": row["documents"] if row else 0,
             "nodes": row["nodes"] if row else 0,
             "edges": row["edges"] if row else 0,
-            "chunks": qdrant_count,
+            "chunks": postgres_count,
             "neo4j_chunks": row["chunks"] if row else 0,
             "relations": {item["relation"]: item["count"] for item in rel_rows},
             "node_types": {item["node_type"]: item["count"] for item in node_type_rows},
-            "qdrant_collection": self.config.qdrant_collection,
             "neo4j_uri": self.config.neo4j_uri,
         }
 
@@ -776,7 +850,7 @@ class Neo4jQdrantGraphRAGStore:
         query = normalize_space(query)
         if not query:
             return []
-        candidates = self._qdrant_candidates(query, max(32, top_k * 5))
+        candidates = self._postgres_candidates(query, max(32, top_k * 5))
         if not candidates:
             return []
 
@@ -826,7 +900,7 @@ class Neo4jQdrantGraphRAGStore:
         for chunk_id, score in sorted(scores.items(), key=lambda item: item[1], reverse=True):
             row = dict(rows_by_chunk[chunk_id])
             row["score"] = round(score, 4)
-            row["reasons"] = row.get("reasons") or ["qdrant", "neo4j"]
+            row["reasons"] = row.get("reasons") or ["postgres_vector", "neo4j"]
             selected.append(row)
             if len(selected) >= top_k:
                 break
@@ -834,21 +908,23 @@ class Neo4jQdrantGraphRAGStore:
             row["source_id"] = f"S{idx}"
         return selected
 
-    def _qdrant_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
-        result = self.qdrant.query_points(
-            collection_name=self.config.qdrant_collection,
-            query=qdrant_dense_vector(query, self.config),
-            using=self.config.qdrant_vector_name,
-            limit=limit,
-            with_payload=True,
-        )
-        points = getattr(result, "points", result)
-        rows = []
-        for point in points:
-            payload = dict(point.payload or {})
-            payload["_score"] = float(point.score or 0.0)
-            payload["reasons"] = ["qdrant"]
-            rows.append(payload)
+    def _postgres_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
+        query_vector = vector_literal(postgres_dense_vector(query, self.config))
+        with self.postgres.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
+                       citation, text, token_count, ordinal, source_url,
+                       1 - (embedding <=> %s::vector) AS _score
+                FROM graphrag_chunk
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (query_vector, query_vector, limit),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+        for row in rows:
+            row["reasons"] = ["postgres_vector"]
         return rows
 
     def _expand_node_scores(self, node_scores: dict[str, float]) -> dict[str, float]:
@@ -959,14 +1035,16 @@ class Neo4jQdrantGraphRAGStore:
         return rows
 
     def chunks_by_node(self, node_id: str, limit: int = 5) -> list[dict[str, Any]]:
-        result = self.qdrant.scroll(
-            collection_name=self.config.qdrant_collection,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="node_id", match=MatchValue(value=node_id))]
-            ),
-            limit=limit,
-            with_payload=True,
-            with_vectors=False,
-        )
-        points, _ = result
-        return [dict(point.payload or {}) for point in points]
+        with self.postgres.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
+                       citation, text, token_count, ordinal, source_url
+                FROM graphrag_chunk
+                WHERE node_id = %s
+                ORDER BY ordinal
+                LIMIT %s
+                """,
+                (node_id, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]

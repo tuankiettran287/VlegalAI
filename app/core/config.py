@@ -91,11 +91,7 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
-    qdrant_url: str = "http://qdrant:6333"
-    qdrant_api_key: str = ""
-    qdrant_collection: str = "vlegal_legal_chunks"
-    qdrant_vector_name: str = "abstract-dense-vector"
-    qdrant_vector_size: int = 1536
+    postgres_vector_size: int = Field(default=1536, ge=1, le=2000)
 
     legal_data_dir: str = str(PROJECT_ROOT / "Data (1)")
     legal_storage_dir: str = str(PROJECT_ROOT / "storage" / "graphrag")
@@ -134,8 +130,9 @@ class Settings(BaseSettings):
         aliases = {
             "auto": "hybrid_rag",
             "hybrid": "hybrid_rag",
-            "neo4j_qdrant": "hybrid_rag",
-            "qdrant": "rag",
+            "neo4j_postgres": "hybrid_rag",
+            "postgres": "rag",
+            "pgvector": "rag",
             "vector": "rag",
             "neo4j": "graphrag",
             "graph": "graphrag",

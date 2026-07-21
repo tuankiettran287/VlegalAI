@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import io
 import re
-import uuid
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -14,8 +13,6 @@ from docx import Document
 from fastapi.concurrency import run_in_threadpool
 from neo4j import GraphDatabase
 from pypdf import PdfReader
-from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,8 +20,8 @@ from app.core.config import Settings
 from app.external_graphrag import (
     ExternalGraphRAGConfig,
     ensure_neo4j_schema,
-    ensure_qdrant_collection,
-    qdrant_dense_vector,
+    ensure_postgres_schema,
+    upsert_postgres_chunks,
 )
 from app.models import LegalChunk, LegalDocument
 
@@ -148,11 +145,8 @@ class LegalIndexer:
             neo4j_user=self.settings.neo4j_user,
             neo4j_password=self.settings.neo4j_password,
             neo4j_database=self.settings.neo4j_database,
-            qdrant_url=self.settings.qdrant_url,
-            qdrant_api_key=self.settings.qdrant_api_key,
-            qdrant_collection=self.settings.qdrant_collection,
-            qdrant_vector_name=self.settings.qdrant_vector_name,
-            qdrant_vector_size=self.settings.qdrant_vector_size,
+            database_url=self.settings.database_url,
+            postgres_vector_size=self.settings.postgres_vector_size,
         )
 
     async def index_candidate(self, db: AsyncSession, candidate: LegalCandidate) -> LegalDocument:
@@ -201,11 +195,9 @@ class LegalIndexer:
         )
         rows: list[LegalChunk] = []
         for chunk in chunks:
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"vlegal:{chunk['external_chunk_id']}"))
             row = LegalChunk(
                 document_id=document.id,
                 version=document.version,
-                qdrant_point_id=point_id,
                 **chunk,
             )
             db.add(row)
@@ -218,12 +210,11 @@ class LegalIndexer:
         self, document: LegalDocument, chunks: list[LegalChunk], replaces_code: str | None
     ) -> None:
         config = self._external_config()
-        if config.qdrant_url:
-            client = QdrantClient(url=config.qdrant_url, api_key=config.qdrant_api_key or None, timeout=60)
-            ensure_qdrant_collection(client, config)
-            points = []
+        if config.postgres_ready:
+            ensure_postgres_schema(config)
+            rows = []
             for chunk in chunks:
-                payload = {
+                rows.append({
                     "chunk_id": chunk.external_chunk_id,
                     "doc_id": document.external_doc_id or str(document.id),
                     "node_id": chunk.node_id,
@@ -238,17 +229,8 @@ class LegalIndexer:
                     "law_code": document.code,
                     "law_status": document.status,
                     "law_version": document.version,
-                }
-                vector_text = f"{chunk.title}\n{chunk.citation}\n{chunk.text}"
-                points.append(
-                    PointStruct(
-                        id=chunk.qdrant_point_id,
-                        vector={config.qdrant_vector_name: qdrant_dense_vector(vector_text, config)},
-                        payload=payload,
-                    )
-                )
-            for offset in range(0, len(points), 128):
-                client.upsert(config.qdrant_collection, points=points[offset : offset + 128], wait=True)
+                })
+            upsert_postgres_chunks(rows, config)
 
         if config.neo4j_password:
             driver = GraphDatabase.driver(config.neo4j_uri, auth=(config.neo4j_user, config.neo4j_password))
