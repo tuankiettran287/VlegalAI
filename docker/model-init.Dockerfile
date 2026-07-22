@@ -16,11 +16,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.model-init.txt
 
 COPY scripts/download_qwen_model.py ./scripts/download_qwen_model.py
+COPY scripts/download_embedding_model.py ./scripts/download_embedding_model.py
 
-RUN mkdir -p /models/qwen3 \
-    && chown -R vlegal:vlegal /app /models/qwen3
+RUN mkdir -p /models/qwen3 /models/embedding \
+    && chown -R vlegal:vlegal /app /models/qwen3 /models/embedding
 
 USER vlegal
 HEALTHCHECK NONE
 
-CMD ["python", "scripts/download_qwen_model.py", "--output-dir", "/models/qwen3"]
+CMD ["sh", "-c", "python scripts/download_qwen_model.py --output-dir /models/qwen3 && python scripts/download_embedding_model.py --output-dir /models/embedding"]

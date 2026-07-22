@@ -272,14 +272,24 @@ async def liveness() -> dict[str, str]:
 
 @router.get("/health/ready", tags=["health"])
 async def readiness(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, str]:
     await db.scalar(select(func.now()))
+    try:
+        await request.app.state.guest_limiter.redis.ping()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Redis is not available") from exc
     if not settings.qwen_ready:
         raise HTTPException(
             status_code=503,
             detail="Qwen offline checkpoint is not available",
+        )
+    if not settings.embedding_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="BGE-M3 embedding checkpoint is not available",
         )
     return {"status": "ready"}
 

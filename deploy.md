@@ -95,7 +95,7 @@ và checkpoint Qwen đều sẵn sàng.
 Workflow `.github/workflows/deploy-docker.yml`:
 
 1. Validate `compose.production.yml`.
-2. Build sáu image (`api`, `frontend`, `worker`, `beat`, `migrate`, `model-init`)
+2. Build bảy image (`api`, `frontend`, `worker`, `beat`, `migrate`, `model-init`, `reindex`)
    và push tag Git SHA bất biến cùng `latest` lên GHCR.
 3. Nếu có cấu hình server, copy bundle deploy qua SSH.
 4. Pull đúng image Git SHA, chạy migration và cập nhật Compose stack.
@@ -154,6 +154,7 @@ VLEGAL_WORKER_IMAGE="$IMAGE_BASE-worker:<good-sha>" \
 VLEGAL_BEAT_IMAGE="$IMAGE_BASE-beat:<good-sha>" \
 VLEGAL_MIGRATE_IMAGE="$IMAGE_BASE-migrate:<good-sha>" \
 VLEGAL_MODEL_INIT_IMAGE="$IMAGE_BASE-model-init:<good-sha>" \
+VLEGAL_REINDEX_IMAGE="$IMAGE_BASE-reindex:<good-sha>" \
 PULL_IMAGE=1 \
   ./scripts/deploy-docker.sh
 ```

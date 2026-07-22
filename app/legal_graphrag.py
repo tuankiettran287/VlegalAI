@@ -10,9 +10,11 @@ import unicodedata
 from array import array
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from docx import Document
+
+from app.services.embeddings import EmbeddingConfig, get_embedding_service
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +22,6 @@ DEFAULT_DATA_DIR = PROJECT_ROOT / "Data (1)"
 DEFAULT_STORAGE_DIR = PROJECT_ROOT / "storage" / "graphrag"
 DEFAULT_DB_PATH = DEFAULT_STORAGE_DIR / "legal_graphrag.sqlite"
 
-VECTOR_DIMS = 384
 CHUNK_WINDOW_WORDS = 360
 CHUNK_OVERLAP_WORDS = 70
 
@@ -151,17 +152,6 @@ def detect_issuer(code: str, filename: str) -> str:
     return "Cơ quan nhà nước"
 
 
-def words_for_vector(text: str) -> list[str]:
-    normalized = strip_accents(text).lower()
-    words = [w for w in VN_WORD_RE.findall(normalized) if len(w) >= 2]
-    grams: list[str] = []
-    for word in words:
-        grams.append(f"w:{word}")
-        if len(word) >= 5:
-            grams.extend(f"c:{word[i:i+4]}" for i in range(0, len(word) - 3))
-    return grams
-
-
 def key_terms(text: str) -> list[str]:
     stop = {
         "theo",
@@ -193,23 +183,8 @@ def key_terms(text: str) -> list[str]:
     return list(dict.fromkeys(terms))
 
 
-def hash_vector(text: str, dims: int = VECTOR_DIMS) -> array:
-    vec = array("f", [0.0] * dims)
-    for gram in words_for_vector(text):
-        digest = hashlib.blake2b(gram.encode("utf-8"), digest_size=8).digest()
-        idx = int.from_bytes(digest[:4], "little") % dims
-        sign = 1.0 if digest[4] & 1 else -1.0
-        weight = 1.3 if gram.startswith("w:") else 0.45
-        vec[idx] += sign * weight
-    norm = math.sqrt(sum(v * v for v in vec))
-    if norm:
-        for i, value in enumerate(vec):
-            vec[i] = value / norm
-    return vec
-
-
-def vector_to_blob(vec: array) -> bytes:
-    return vec.tobytes()
+def vector_to_blob(vec: Iterable[float]) -> bytes:
+    return array("f", vec).tobytes()
 
 
 def blob_to_vector(blob: bytes) -> array:
@@ -218,7 +193,7 @@ def blob_to_vector(blob: bytes) -> array:
     return vec
 
 
-def dot(a: array, b: array) -> float:
+def dot(a: Iterable[float], b: Iterable[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
@@ -240,10 +215,16 @@ def docx_lines(path: Path) -> list[str]:
 
 
 class LegalGraphBuilder:
-    def __init__(self, data_dir: Path, storage_dir: Path):
+    def __init__(
+        self,
+        data_dir: Path,
+        storage_dir: Path,
+        embedding_config: EmbeddingConfig | None = None,
+    ):
         self.data_dir = data_dir
         self.storage_dir = storage_dir
         self.db_path = storage_dir / "legal_graphrag.sqlite"
+        self.embedding_config = embedding_config or EmbeddingConfig.from_env()
         self.docs: dict[str, dict[str, Any]] = OrderedDict()
         self.nodes: dict[str, dict[str, Any]] = OrderedDict()
         self.edges: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -267,6 +248,7 @@ class LegalGraphBuilder:
         self._build_reference_edges()
         self._extract_multi_layer_graph()
         self._build_chunks()
+        self._embed_chunks()
         self._write_sqlite()
         self._write_jsonl()
         return {
@@ -903,7 +885,6 @@ class LegalGraphBuilder:
         if chunk_id in self.chunks:
             return
         heading = title or node["label"]
-        vector_text = f"{heading}\n{citation}\n{text}"
         self.chunks[chunk_id] = {
             "chunk_id": chunk_id,
             "doc_id": doc_id,
@@ -915,8 +896,16 @@ class LegalGraphBuilder:
             "text": text,
             "token_count": token_count(text),
             "ordinal": ordinal,
-            "vector": vector_to_blob(hash_vector(vector_text)),
+            "vector": b"",
         }
+
+    def _embed_chunks(self) -> None:
+        rows = list(self.chunks.values())
+        texts = [f"{row['title']}\n{row['path_label']}\n{row['text']}" for row in rows]
+        service = get_embedding_service(self.embedding_config)
+        embeddings = service.embed_documents(texts, show_progress=True)
+        for row, embedding in zip(rows, embeddings, strict=True):
+            row["vector"] = vector_to_blob(embedding)
 
     def _build_chunks(self) -> None:
         ordinal = 0
@@ -1004,6 +993,10 @@ class LegalGraphBuilder:
                 ordinal INTEGER,
                 vector BLOB
             );
+            CREATE TABLE index_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             CREATE VIRTUAL TABLE chunk_fts USING fts5(
                 chunk_id UNINDEXED,
                 title,
@@ -1041,6 +1034,14 @@ class LegalGraphBuilder:
             self.chunks.values(),
         )
         conn.executemany(
+            "INSERT INTO index_metadata(key, value) VALUES (?, ?)",
+            [
+                ("embedding_model", self.embedding_config.model_repo),
+                ("embedding_revision", self.embedding_config.model_revision),
+                ("embedding_dimensions", str(self.embedding_config.dimensions)),
+            ],
+        )
+        conn.executemany(
             "INSERT INTO chunk_fts(chunk_id, title, path_label, citation, text) VALUES (:chunk_id, :title, :path_label, :citation, :text)",
             self.chunks.values(),
         )
@@ -1065,13 +1066,41 @@ class LegalGraphBuilder:
 
 
 class GraphRAGStore:
-    def __init__(self, db_path: Path | str | None = None):
+    def __init__(
+        self,
+        db_path: Path | str | None = None,
+        embedding_config: EmbeddingConfig | None = None,
+    ):
         self.db_path = Path(db_path or os.getenv("LEGAL_GRAPHRAG_DB", DEFAULT_DB_PATH))
+        self.embedding_config = embedding_config or EmbeddingConfig.from_env()
         if not self.db_path.exists():
             raise FileNotFoundError(f"GraphRAG index not found: {self.db_path}")
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._vectors: list[tuple[str, bytes]] | None = None
+        try:
+            self._validate_embedding_metadata()
+        except Exception:
+            self.conn.close()
+            raise
+
+    def _validate_embedding_metadata(self) -> None:
+        try:
+            rows = self.conn.execute("SELECT key, value FROM index_metadata").fetchall()
+        except sqlite3.OperationalError as exc:
+            raise RuntimeError(
+                "Local GraphRAG index uses legacy hash vectors; rebuild it with BGE-M3."
+            ) from exc
+        metadata = {row["key"]: row["value"] for row in rows}
+        expected = {
+            "embedding_model": self.embedding_config.model_repo,
+            "embedding_revision": self.embedding_config.model_revision,
+            "embedding_dimensions": str(self.embedding_config.dimensions),
+        }
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            raise RuntimeError(
+                f"Local GraphRAG embedding metadata {metadata!r} does not match {expected!r}; rebuild the index."
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -1221,10 +1250,15 @@ class GraphRAGStore:
         return self._vectors
 
     def _vector_search(self, query: str, limit: int) -> list[tuple[str, float]]:
-        qvec = hash_vector(query)
+        qvec = get_embedding_service(self.embedding_config).embed_query(query)
         scored = []
         for chunk_id, blob in self._load_vectors():
-            scored.append((chunk_id, dot(qvec, blob_to_vector(blob))))
+            vector = blob_to_vector(blob)
+            if len(vector) != self.embedding_config.dimensions:
+                raise RuntimeError(
+                    f"Chunk {chunk_id} has {len(vector)} embedding dimensions; rebuild the index."
+                )
+            scored.append((chunk_id, dot(qvec, vector)))
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:limit]
 
@@ -1355,5 +1389,6 @@ def build_index(
     builder = LegalGraphBuilder(
         Path(data_dir or os.getenv("LEGAL_DATA_DIR", DEFAULT_DATA_DIR)),
         Path(storage_dir or os.getenv("LEGAL_STORAGE_DIR", DEFAULT_STORAGE_DIR)),
+        EmbeddingConfig.from_env(),
     )
     return builder.build()

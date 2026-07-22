@@ -147,6 +147,12 @@ class LegalIndexer:
             neo4j_database=self.settings.neo4j_database,
             database_url=self.settings.database_url,
             postgres_vector_size=self.settings.postgres_vector_size,
+            embedding_model_path=self.settings.embedding_model_path,
+            embedding_model_repo=self.settings.embedding_model_repo,
+            embedding_model_revision=self.settings.embedding_model_revision,
+            embedding_device=self.settings.embedding_device,
+            embedding_batch_size=self.settings.embedding_batch_size,
+            embedding_max_sequence_length=self.settings.embedding_max_sequence_length,
         )
 
     async def index_candidate(self, db: AsyncSession, candidate: LegalCandidate) -> LegalDocument:

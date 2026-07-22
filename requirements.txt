@@ -11,7 +11,8 @@ httpx>=0.28.1
 PyJWT[crypto]>=2.10.1
 cryptography>=44.0.0
 redis[hiredis]>=5.2.1
-celery[redis]>=5.4.0
+celery[redis,gcpubsub]>=5.5,<6
+google-auth>=2.40,<3
 beautifulsoup4>=4.12.3
 pypdf>=5.1.0
 neo4j
@@ -21,3 +22,4 @@ transformers>=4.51,<6
 accelerate>=1.2,<2
 safetensors>=0.4,<1
 huggingface-hub>=0.30,<2
+sentence-transformers>=5.1,<6

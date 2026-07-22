@@ -13,6 +13,19 @@ from app.external_graphrag import (
     PostgresGraphRAGStore,
 )
 from app.legal_graphrag import GraphRAGStore
+from app.services.embeddings import EmbeddingConfig
+
+
+def _embedding_config(settings: Settings) -> EmbeddingConfig:
+    return EmbeddingConfig(
+        model_path=settings.embedding_model_path,
+        model_repo=settings.embedding_model_repo,
+        model_revision=settings.embedding_model_revision,
+        device=settings.embedding_device,
+        dimensions=settings.postgres_vector_size,
+        batch_size=settings.embedding_batch_size,
+        max_sequence_length=settings.embedding_max_sequence_length,
+    )
 
 
 def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
@@ -23,6 +36,12 @@ def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
         neo4j_database=settings.neo4j_database,
         database_url=settings.database_url,
         postgres_vector_size=settings.postgres_vector_size,
+        embedding_model_path=settings.embedding_model_path,
+        embedding_model_repo=settings.embedding_model_repo,
+        embedding_model_revision=settings.embedding_model_revision,
+        embedding_device=settings.embedding_device,
+        embedding_batch_size=settings.embedding_batch_size,
+        embedding_max_sequence_length=settings.embedding_max_sequence_length,
     )
 
 
@@ -49,7 +68,11 @@ class RetrievalService:
             elif backend == "graphrag":
                 self._store = await run_in_threadpool(Neo4jGraphRAGStore, config)
             else:
-                self._store = await run_in_threadpool(GraphRAGStore, self.settings.legal_graphrag_db)
+                self._store = await run_in_threadpool(
+                    GraphRAGStore,
+                    self.settings.legal_graphrag_db,
+                    _embedding_config(self.settings),
+                )
         return self._store
 
     async def retrieve(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]:

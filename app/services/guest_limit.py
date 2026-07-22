@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 
-from redis.asyncio import Redis
-
 from app.core.config import Settings
+from app.core.redis_client import create_async_redis
 
 
 class GuestRateLimitExceeded(RuntimeError):
@@ -20,17 +20,20 @@ class GuestRateLimiter:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.redis = Redis.from_url(settings.redis_url, decode_responses=True)
+        self.redis = create_async_redis(settings)
 
     async def close(self) -> None:
         await self.redis.aclose()
 
     async def check(self, subject: str) -> None:
         now = datetime.now(UTC)
-        minute_key = f"guest-chat:minute:{now:%Y%m%d%H%M}:{subject}"
-        hour_key = f"guest-chat:hour:{now:%Y%m%d%H}:{subject}"
+        # The hash tag keeps both counters in one Redis Cluster slot. Hashing
+        # also prevents braces in an untrusted subject from changing the slot.
+        subject_slot = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:32]
+        minute_key = f"guest-chat:{{{subject_slot}}}:minute:{now:%Y%m%d%H%M}"
+        hour_key = f"guest-chat:{{{subject_slot}}}:hour:{now:%Y%m%d%H}"
         try:
-            async with self.redis.pipeline(transaction=True) as pipeline:
+            async with self.redis.pipeline(transaction=not self.settings.redis_cluster_mode) as pipeline:
                 pipeline.incr(minute_key)
                 pipeline.expire(minute_key, 90)
                 pipeline.incr(hour_key)

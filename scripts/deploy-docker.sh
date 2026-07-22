@@ -39,9 +39,9 @@ compose=(docker compose --project-name "$PROJECT_NAME" --env-file "$ENV_FILE" -f
 "${compose[@]}" config --quiet
 
 if [[ "${PULL_IMAGE:-0}" == "1" ]]; then
-  "${compose[@]}" pull model-init migrate api frontend worker beat
+  "${compose[@]}" pull model-init migrate reindex api frontend worker beat
 else
-  "${compose[@]}" build --pull model-init migrate api frontend worker beat
+  "${compose[@]}" build --pull model-init migrate reindex api frontend worker beat
 fi
 
 "${compose[@]}" up -d --wait --wait-timeout 300 postgres redis neo4j

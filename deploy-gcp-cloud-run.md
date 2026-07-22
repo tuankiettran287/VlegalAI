@@ -13,10 +13,11 @@ Dockerfile và một image riêng.
 | `vlegal-worker` | Cloud Run Worker Pool có GPU | Celery consumer chạy liên tục |
 | `vlegal-beat` | Cloud Run Worker Pool CPU | Celery scheduler chạy liên tục |
 | `vlegal-migrate` | Cloud Run Job | `alembic upgrade head` |
-| `vlegal-model-init` | Cloud Run Job | tải checkpoint vào Cloud Storage |
+| `vlegal-model-init` | Cloud Run Job | tải Qwen3 và BGE-M3 vào hai bucket Cloud Storage |
+| `vlegal-reindex` | Cloud Run Job GPU | embedding lại corpus và đồng bộ Neo4j/pgvector |
 
 PostgreSQL/pgvector nên chạy trên Cloud SQL, Redis trên Memorystore và Neo4j
-trên Neo4j Aura hoặc GCE/GKE. Không chạy ba database này bằng Cloud Run vì Cloud
+trên Compute Engine hoặc GKE. Không chạy ba database này bằng Cloud Run vì Cloud
 Run không cung cấp persistent block storage/TCP endpoint phù hợp cho chúng.
 
 Frontend gọi API qua chính origin frontend (`/api`). Nginx chuyển tiếp request
@@ -39,6 +40,7 @@ docker/worker.Dockerfile
 docker/beat.Dockerfile
 docker/migrate.Dockerfile
 docker/model-init.Dockerfile
+docker/reindex.Dockerfile
 ```
 
 `docker-compose.yml`, `compose.production.yml` và workflow CI đã trỏ trực tiếp
@@ -59,8 +61,13 @@ $TAG = git rev-parse --short HEAD
 $RUN_SA_NAME = "vlegal-run"
 $RUN_SA = "$RUN_SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
 $MODEL_BUCKET = "$PROJECT_ID-vlegal-qwen3-14b"
+$EMBEDDING_BUCKET = "$PROJECT_ID-vlegal-bge-m3"
+$CORPUS_BUCKET = "$PROJECT_ID-vlegal-corpus"
 $NETWORK = "default"
 $SUBNET = "default"
+$REDIS_HOST = "10.170.0.3"
+$REDIS_PORT = 6379
+$REDIS_CA_SECRET = "vlegal-redis-server-ca"
 $NEO4J_URI = "neo4j+s://your-neo4j-host:7687"
 
 gcloud auth login
@@ -82,6 +89,7 @@ gcloud services enable `
   compute.googleapis.com `
   sqladmin.googleapis.com `
   redis.googleapis.com `
+  pubsub.googleapis.com `
   servicenetworking.googleapis.com
 
 gcloud artifacts repositories create $AR_REPO `
@@ -96,6 +104,15 @@ gcloud projects add-iam-policy-binding $PROJECT_ID `
   --member="serviceAccount:$RUN_SA" `
   --role="roles/secretmanager.secretAccessor"
 
+gcloud projects add-iam-policy-binding $PROJECT_ID `
+  --member="serviceAccount:$RUN_SA" `
+  --role="roles/redis.dbConnectionUser"
+
+# Celery dùng Pub/Sub làm broker vì Redis Cluster không phải Celery transport.
+gcloud projects add-iam-policy-binding $PROJECT_ID `
+  --member="serviceAccount:$RUN_SA" `
+  --role="roles/pubsub.editor"
+
 gcloud storage buckets create "gs://$MODEL_BUCKET" `
   --location=$REGION `
   --uniform-bucket-level-access
@@ -103,6 +120,24 @@ gcloud storage buckets create "gs://$MODEL_BUCKET" `
 gcloud storage buckets add-iam-policy-binding "gs://$MODEL_BUCKET" `
   --member="serviceAccount:$RUN_SA" `
   --role="roles/storage.objectUser"
+
+gcloud storage buckets create "gs://$EMBEDDING_BUCKET" `
+  --location=$REGION `
+  --uniform-bucket-level-access
+
+gcloud storage buckets add-iam-policy-binding "gs://$EMBEDDING_BUCKET" `
+  --member="serviceAccount:$RUN_SA" `
+  --role="roles/storage.objectUser"
+
+gcloud storage buckets create "gs://$CORPUS_BUCKET" `
+  --location=$REGION `
+  --uniform-bucket-level-access
+
+gcloud storage buckets add-iam-policy-binding "gs://$CORPUS_BUCKET" `
+  --member="serviceAccount:$RUN_SA" `
+  --role="roles/storage.objectViewer"
+
+gcloud storage rsync ".\Data (1)" "gs://$CORPUS_BUCKET" --recursive
 ```
 
 Nếu resource đã tồn tại, bỏ qua lỗi `ALREADY_EXISTS`. Network/subnet dùng cho
@@ -115,15 +150,35 @@ Chuẩn bị các endpoint trước khi deploy:
 
 ```text
 DATABASE_URL=postgresql+asyncpg://vlegal:<password>@<cloud-sql-private-ip>:5432/vlegal
-REDIS_URL=redis://<memorystore-private-ip>:6379/0
+REDIS_URL=rediss://10.170.0.3:6379/0
+REDIS_CLUSTER_MODE=true
+REDIS_IAM_AUTH=true
+REDIS_CA_CERTS=/var/run/secrets/redis/server-ca.pem
 NEO4J_URI=neo4j+s://<neo4j-host>:7687
+```
+
+Redis này là Memorystore for Redis Cluster qua PSC, bật IAM Auth và TLS. API và
+worker dùng Redis Cluster client cho rate limit/cache/lock. Celery dùng Google
+Pub/Sub làm broker vì Redis Cluster chỉ hỗ trợ database `0` và Celery không có
+Redis Cluster transport.
+
+Upload CA đã tải từ Memorystore vào Secret Manager. File `server-ca.pem` bị bỏ
+qua bởi Git và Docker build; Cloud Run mount certificate thành file lúc chạy:
+
+```powershell
+gcloud secrets create $REDIS_CA_SECRET `
+  --replication-policy=automatic `
+  --data-file=server-ca.pem
+
+# Nếu secret đã tồn tại, chỉ thêm version mới:
+gcloud secrets versions add $REDIS_CA_SECRET --data-file=server-ca.pem
 ```
 
 Tạo các secret dưới đây trong Secret Manager và thêm ít nhất một version:
 
 ```text
 vlegal-database-url
-vlegal-redis-url
+vlegal-redis-server-ca
 vlegal-neo4j-password
 vlegal-session-secret
 vlegal-message-key
@@ -145,7 +200,7 @@ Script build dùng đúng Dockerfile của từng service và mặc định targ
 `linux/amd64`, là kiến trúc Cloud Run hỗ trợ:
 
 ```powershell
-# Build + push toàn bộ sáu image
+# Build + push toàn bộ bảy image
 .\scripts\gcp\build-images.ps1 `
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG -Push
 ```
@@ -159,6 +214,7 @@ Build/push riêng từng service:
 .\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service beat -Push
 .\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service migrate -Push
 .\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service model-init -Push
+.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service reindex -Push
 ```
 
 Image được push theo dạng:
@@ -177,13 +233,14 @@ nếu chỉ muốn cập nhật cấu hình job mà chưa chạy.
 ```powershell
 .\scripts\gcp\deploy.ps1 `
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -ModelBucket $MODEL_BUCKET -Neo4jUri $NEO4J_URI `
+  -ModelBucket $MODEL_BUCKET -EmbeddingBucket $EMBEDDING_BUCKET `
+  -Neo4jUri $NEO4J_URI `
   -Component model-init -ExecuteJobs
 ```
 
-Cloud Storage bucket được mount read-write vào job ở `/models/qwen3`. API và
-worker mount cùng bucket read-only. Job có marker nên chạy lại không tải checkpoint
-nếu repo/revision không thay đổi.
+Hai Cloud Storage bucket được mount read-write vào job ở `/models/qwen3` và
+`/models/embedding`. API/worker mount lại read-only. Job có marker nên chạy lại
+không tải checkpoint nếu repo/revision không thay đổi.
 
 ### 5.2 Migration
 
@@ -194,12 +251,33 @@ nếu repo/revision không thay đổi.
   -Component migrate -ExecuteJobs
 ```
 
-### 5.3 API
+### 5.3 Re-index embedding
+
+Trước khi deploy API lần đầu, chạy job tạo lại embedding. Migration
+`20260721_0003` chủ động xoá vector hash cũ vì không thể đổi trực tiếp sang
+BGE-M3; job này tạo vector chuẩn hoá 1024 chiều từ corpus và dùng lại chính vector
+đó khi ghi vào PostgreSQL:
 
 ```powershell
 .\scripts\gcp\deploy.ps1 `
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -ModelBucket $MODEL_BUCKET -Network $NETWORK -Subnet $SUBNET `
+  -EmbeddingBucket $EMBEDDING_BUCKET -CorpusBucket $CORPUS_BUCKET `
+  -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
+  -Component reindex -ExecuteJobs
+```
+
+Job re-index dùng image riêng `vlegal-reindex`, một L4 trong thời gian chạy, BGE-M3 từ
+bucket chỉ đọc và corpus từ `$CORPUS_BUCKET`. File SQLite trung gian nằm trong
+filesystem tạm của job; dữ liệu lâu dài được ghi vào Cloud SQL/pgvector và Neo4j.
+
+### 5.4 API
+
+```powershell
+.\scripts\gcp\deploy.ps1 `
+  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
+  -ModelBucket $MODEL_BUCKET -EmbeddingBucket $EMBEDDING_BUCKET `
+  -Network $NETWORK -Subnet $SUBNET `
+  -RedisHost $REDIS_HOST -RedisPort $REDIS_PORT -RedisCaSecret $REDIS_CA_SECRET `
   -Neo4jUri $NEO4J_URI -Component api
 ```
 
@@ -207,7 +285,7 @@ API được public để Nginx frontend có thể reverse proxy đến nó. API
 áp dụng session/role/rate-limit ở tầng ứng dụng; chỉ các endpoint được thiết kế
 public mới không cần đăng nhập.
 
-### 5.4 Frontend
+### 5.5 Frontend
 
 ```powershell
 .\scripts\gcp\deploy.ps1 `
@@ -218,16 +296,18 @@ public mới không cần đăng nhập.
 Script đọc URL API, đặt `API_UPSTREAM`, lấy URL frontend và cập nhật bốn biến URL
 của API. Không có bước cấu hình domain.
 
-### 5.5 Worker
+### 5.6 Worker
 
 ```powershell
 .\scripts\gcp\deploy.ps1 `
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -ModelBucket $MODEL_BUCKET -Network $NETWORK -Subnet $SUBNET `
+  -ModelBucket $MODEL_BUCKET -EmbeddingBucket $EMBEDDING_BUCKET `
+  -Network $NETWORK -Subnet $SUBNET `
+  -RedisHost $REDIS_HOST -RedisPort $REDIS_PORT -RedisCaSecret $REDIS_CA_SECRET `
   -Neo4jUri $NEO4J_URI -Component worker
 ```
 
-### 5.6 Beat
+### 5.7 Beat
 
 ```powershell
 .\scripts\gcp\deploy.ps1 `
@@ -248,7 +328,9 @@ Sau khi dữ liệu, bucket và secrets đã sẵn sàng:
 .\scripts\gcp\deploy.ps1 `
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
   -RunServiceAccount $RUN_SA -ModelBucket $MODEL_BUCKET `
+  -EmbeddingBucket $EMBEDDING_BUCKET -CorpusBucket $CORPUS_BUCKET `
   -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
+  -RedisHost $REDIS_HOST -RedisPort $REDIS_PORT -RedisCaSecret $REDIS_CA_SECRET `
   -Component all -ExecuteJobs
 ```
 
@@ -292,6 +374,7 @@ docker build -f docker/worker.Dockerfile -t vlegal-worker:local .
 docker build -f docker/beat.Dockerfile -t vlegal-beat:local .
 docker build -f docker/migrate.Dockerfile -t vlegal-migrate:local .
 docker build -f docker/model-init.Dockerfile -t vlegal-model-init:local .
+docker build -f docker/reindex.Dockerfile -t vlegal-reindex:local .
 ```
 
 Khởi động hạ tầng local trước:
@@ -306,6 +389,7 @@ Chạy từng service/job độc lập qua Compose:
 # Job một lần
 docker compose run --rm model-init
 docker compose run --rm migrate
+docker compose --profile jobs run --rm reindex --reset-postgres --reset-neo4j
 
 # Service chạy nền
 docker compose up -d api

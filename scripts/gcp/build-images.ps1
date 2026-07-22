@@ -4,8 +4,8 @@ param(
     [string]$Region = "asia-southeast1",
     [string]$Repository = "vlegal",
     [string]$Tag = "",
-    [ValidateSet("api", "frontend", "worker", "beat", "migrate", "model-init")]
-    [string[]]$Service = @("api", "frontend", "worker", "beat", "migrate", "model-init"),
+    [ValidateSet("api", "frontend", "worker", "beat", "migrate", "model-init", "reindex")]
+    [string[]]$Service = @("api", "frontend", "worker", "beat", "migrate", "model-init", "reindex"),
     [switch]$Push
 )
 

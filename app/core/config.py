@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     database_max_overflow: int = 40
     database_pool_timeout: int = 30
     redis_url: str = "redis://redis:6379/0"
+    redis_cluster_mode: bool = False
+    redis_iam_auth: bool = False
+    redis_ca_certs: str = ""
 
     session_secret: str = "replace-with-at-least-32-random-characters"
     session_ttl_seconds: int = 8 * 60 * 60
@@ -74,6 +77,15 @@ class Settings(BaseSettings):
     qwen_top_p: float = Field(default=0.9, gt=0, le=1)
     qwen_trust_remote_code: bool = False
 
+    # BGE-M3 runs locally and creates normalized semantic embeddings for every
+    # legal chunk. Runtime services never send legal text to an embedding API.
+    embedding_model_path: str = str(PROJECT_ROOT / "models" / "bge-m3")
+    embedding_model_repo: str = "BAAI/bge-m3"
+    embedding_model_revision: str = "main"
+    embedding_device: Literal["auto", "cuda", "cpu", "mps"] = "auto"
+    embedding_batch_size: int = Field(default=4, ge=1, le=128)
+    embedding_max_sequence_length: int = Field(default=2048, ge=128, le=8192)
+
     tavily_api_key: str = ""
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"
     tavily_timeout_seconds: int = 30
@@ -91,7 +103,7 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
-    postgres_vector_size: int = Field(default=1536, ge=1, le=2000)
+    postgres_vector_size: int = Field(default=1024, ge=1, le=2000)
 
     legal_data_dir: str = str(PROJECT_ROOT / "Data (1)")
     legal_storage_dir: str = str(PROJECT_ROOT / "storage" / "graphrag")
@@ -160,6 +172,20 @@ class Settings(BaseSettings):
     def qwen_local_path(self) -> Path:
         model_path = Path(self.qwen_model_path).expanduser()
         return model_path if model_path.is_absolute() else PROJECT_ROOT / model_path
+
+    @property
+    def embedding_local_path(self) -> Path:
+        model_path = Path(self.embedding_model_path).expanduser()
+        return model_path if model_path.is_absolute() else PROJECT_ROOT / model_path
+
+    @property
+    def embedding_ready(self) -> bool:
+        model_path = self.embedding_local_path
+        return (
+            model_path.is_dir()
+            and (model_path / "config.json").is_file()
+            and (model_path / "modules.json").is_file()
+        )
 
     @property
     def tavily_ready(self) -> bool:

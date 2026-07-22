@@ -13,7 +13,7 @@ tài liệu và các công cụ hợp đồng.
 Người dùng không phải chọn RAG, GraphRAG hay từng luật áp dụng. Backend luôn tìm
 trên toàn bộ kho luật bằng Hybrid GraphRAG, sau đó thực hiện tuần tự:
 
-1. Lấy các chunk liên quan bằng `pgvector` trong PostgreSQL và mở rộng quan hệ trên Neo4j.
+1. Mã hoá câu hỏi bằng BGE-M3, lấy các chunk gần nghĩa bằng `pgvector` trong PostgreSQL và mở rộng quan hệ trên Neo4j.
 2. Dùng Tavily đối chiếu số hiệu trên các nguồn chính thức được cho phép.
 3. Dùng Qwen3 phân loại còn hiệu lực, sửa đổi, hết hiệu lực hoặc bị thay thế.
 4. Nếu có bản mới, tải nguồn chính thức, tách Điều/Khoản thành chunk, upsert
@@ -51,6 +51,7 @@ bắt buộc cho luồng production:
 - `SESSION_SECRET`, `MESSAGE_ENCRYPTION_KEY`
 - `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
 - `QWEN_MODEL_PATH`, `QWEN_DEVICE`, `QWEN_DTYPE`, `TAVILY_API_KEY`
+- `EMBEDDING_MODEL_PATH`, `EMBEDDING_DEVICE`, `EMBEDDING_BATCH_SIZE`
 - `NEO4J_*`, `POSTGRES_VECTOR_SIZE`
 
 `RETRIEVER_BACKEND`, provider và API key chỉ tồn tại ở backend; frontend không
@@ -63,6 +64,12 @@ Hugging Face vào named volume `qwen_model`; API và worker chỉ khởi động
 checkpoint đã đầy đủ. Volume được giữ qua các lần rebuild/restart nên model không
 bị tải lại. Mỗi API/worker process chỉ nạp một bản model và mặc định xử lý một
 lượt sinh tại một thời điểm để tránh nhân bản RAM/VRAM.
+
+BGE-M3 cũng chạy local từ `EMBEDDING_MODEL_PATH`. Mỗi chunk và mỗi câu hỏi đều
+được mã hoá bằng cùng checkpoint thành vector chuẩn hoá 1024 chiều; nội dung pháp
+lý không được gửi tới embedding API bên ngoài. `model-init` tải checkpoint vào
+volume `embedding_model` riêng. Chỉ mục hash 384/1536 chiều cũ không tương thích
+và phải được tạo lại sau migration.
 
 Trong Google Cloud Console, tạo OAuth client loại **Web application**, thêm origin
 của frontend và đăng ký chính xác redirect URI
@@ -90,7 +97,7 @@ document/chunk, article, signature packet và feedback. API chính:
 ## Docker
 
 Thư mục `docker/` có Dockerfile riêng cho `api`, `frontend`, `worker`, `beat`,
-`migrate` và `model-init`; Compose build thành sáu image độc lập. PostgreSQL dùng
+`migrate`, `model-init` và `reindex`; Compose build thành bảy image độc lập. PostgreSQL dùng
 image có extension `pgvector`, Neo4j lưu graph, Redis làm cache/Celery broker.
 Migration phải thành công trước khi API và worker khởi động.
 
@@ -99,6 +106,14 @@ Chạy local toàn bộ stack, gồm cả bước tải model:
 ```bash
 cp .env.example .env
 docker compose up --build
+```
+
+Tạo lại toàn bộ embedding từ corpus hiện có và đồng bộ Neo4j/pgvector:
+
+```bash
+docker compose run --rm model-init
+docker compose run --rm migrate
+docker compose --profile jobs run --rm reindex --reset-postgres --reset-neo4j
 ```
 
 Lần đầu cần đủ dung lượng đĩa và thời gian tải Qwen3-14B. Theo dõi riêng bằng

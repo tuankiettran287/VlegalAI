@@ -59,8 +59,9 @@ WORKDIR /app
 COPY requirements.model-init.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.model-init.txt
 COPY scripts/download_qwen_model.py ./scripts/download_qwen_model.py
+COPY scripts/download_embedding_model.py ./scripts/download_embedding_model.py
 HEALTHCHECK NONE
-CMD ["python", "scripts/download_qwen_model.py", "--output-dir", "/models/qwen3"]
+CMD ["sh", "-c", "python scripts/download_qwen_model.py --output-dir /models/qwen3 && python scripts/download_embedding_model.py --output-dir /models/embedding"]
 
 FROM node:22-alpine AS frontend-builder
 WORKDIR /src/frontend

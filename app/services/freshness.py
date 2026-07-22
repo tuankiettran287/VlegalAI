@@ -6,10 +6,10 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from redis.asyncio import Redis
 from sqlalchemy import or_, select, text as sql_text
 
 from app.core.config import Settings
+from app.core.redis_client import create_async_redis
 from app.db import SessionFactory
 from app.models import LegalDocument
 from app.schemas import VerificationItem, VerificationReport
@@ -61,7 +61,7 @@ class LegalFreshnessService:
         self.ai = ai
         self.tavily = tavily
         self.indexer = indexer
-        self.redis = Redis.from_url(settings.redis_url, decode_responses=True)
+        self.redis = create_async_redis(settings)
         self.semaphore = asyncio.Semaphore(settings.legal_verification_concurrency)
 
     async def close(self) -> None:

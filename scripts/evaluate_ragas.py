@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.legal_graphrag import VECTOR_DIMS, hash_vector
+from app.services.embeddings import EmbeddingConfig, get_embedding_service
 from app.main import (
     backend_mode_label,
     call_groq_chat,
@@ -42,15 +42,14 @@ CONTEXT_METRICS = {"context_precision", "context_recall"}
 RESPONSE_METRICS = {"faithfulness", "answer_relevancy", "answer_correctness"}
 
 
-class LegalHashEmbeddings:
-    """LangChain-compatible embeddings backed by the project hash vector."""
+class LocalBgeEmbeddings:
+    """LangChain-compatible embeddings backed by the local BGE-M3 model."""
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [self.embed_query(text) for text in texts]
+        return get_embedding_service(EmbeddingConfig.from_env()).embed_documents(texts)
 
     def embed_query(self, text: str) -> list[float]:
-        vec = hash_vector(text or "", dims=VECTOR_DIMS)
-        return [float(value) for value in vec]
+        return get_embedding_service(EmbeddingConfig.from_env()).embed_query(text)
 
 
 def now_slug() -> str:
@@ -326,13 +325,13 @@ def resolve_evaluator_provider(value: str) -> str:
 
 
 def build_embeddings(provider: str, model: str | None) -> Any:
-    if provider == "legal_hash":
+    if provider == "local_bge":
         from langchain_core.embeddings import Embeddings
 
-        class LangChainLegalHashEmbeddings(LegalHashEmbeddings, Embeddings):
+        class LangChainLocalBgeEmbeddings(LocalBgeEmbeddings, Embeddings):
             pass
 
-        return LangChainLegalHashEmbeddings()
+        return LangChainLocalBgeEmbeddings()
     if provider == "openai":
         if not os.getenv("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY is required for --embedding-provider openai")
@@ -462,8 +461,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--judge-model", default=os.getenv("RAGAS_EVALUATOR_MODEL"))
     parser.add_argument(
         "--embedding-provider",
-        choices=["legal_hash", "openai"],
-        default=os.getenv("RAGAS_EMBEDDING_PROVIDER", "legal_hash"),
+        choices=["local_bge", "openai"],
+        default=os.getenv("RAGAS_EMBEDDING_PROVIDER", "local_bge"),
     )
     parser.add_argument("--embedding-model", default=os.getenv("RAGAS_EMBEDDING_MODEL"))
     parser.add_argument("--batch-size", type=int, default=None)

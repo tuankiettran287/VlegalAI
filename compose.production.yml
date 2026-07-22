@@ -8,7 +8,7 @@ x-app-environment: &app-environment
   COOKIE_SECURE: "true"
   OIDC_REDIRECT_URI: "https://${DOMAIN:?Set DOMAIN in .env.production}/api/auth/google/callback"
   DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}"
-  POSTGRES_VECTOR_SIZE: "1536"
+  POSTGRES_VECTOR_SIZE: "1024"
   REDIS_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0"
   CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/1"
   CELERY_RESULT_BACKEND: "redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/2"
@@ -16,6 +16,8 @@ x-app-environment: &app-environment
   NEO4J_USER: "${NEO4J_USER:-neo4j}"
   NEO4J_PASSWORD: "${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}"
   QWEN_MODEL_PATH: /models/qwen3
+  EMBEDDING_MODEL_PATH: /models/embedding
+  EMBEDDING_MODEL_REPO: BAAI/bge-m3
   LEGAL_DATA_DIR: /app/legal-data
   LEGAL_STORAGE_DIR: /app/storage/graphrag
   LEGAL_GRAPHRAG_DB: /app/storage/graphrag/legal_graphrag.sqlite
@@ -40,9 +42,13 @@ services:
       QWEN_MODEL_PATH: /models/qwen3
       QWEN_MODEL_REPO: "${QWEN_MODEL_REPO:-Qwen/Qwen3-14B}"
       QWEN_MODEL_REVISION: "${QWEN_MODEL_REVISION:-main}"
+      EMBEDDING_MODEL_PATH: /models/embedding
+      EMBEDDING_MODEL_REPO: "${EMBEDDING_MODEL_REPO:-BAAI/bge-m3}"
+      EMBEDDING_MODEL_REVISION: "${EMBEDDING_MODEL_REVISION:-main}"
     user: "0:0"
     volumes:
       - qwen_model:/models/qwen3
+      - embedding_model:/models/embedding
     restart: "no"
     security_opt:
       - no-new-privileges:true
@@ -63,6 +69,33 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  reindex:
+    image: "${VLEGAL_REINDEX_IMAGE:-vlegal-reindex:latest}"
+    build:
+      context: .
+      dockerfile: docker/reindex.Dockerfile
+    profiles: ["jobs"]
+    env_file:
+      - "${APP_ENV_FILE:-.env.production}"
+    environment:
+      <<: *app-environment
+    volumes:
+      - embedding_model:/models/embedding:ro
+      - "${LEGAL_DATA_HOST_PATH:-./legal-data}:/app/legal-data:ro"
+      - legal_storage:/app/storage
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
   api:
     image: "${VLEGAL_API_IMAGE:-vlegal-api:latest}"
     build:
@@ -75,6 +108,7 @@ services:
       <<: *app-environment
     volumes:
       - qwen_model:/models/qwen3:ro
+      - embedding_model:/models/embedding:ro
       - "${LEGAL_DATA_HOST_PATH:-./legal-data}:/app/legal-data:ro"
       - legal_storage:/app/storage
     expose:
@@ -121,6 +155,7 @@ services:
       <<: *app-environment
     volumes:
       - qwen_model:/models/qwen3:ro
+      - embedding_model:/models/embedding:ro
       - "${LEGAL_DATA_HOST_PATH:-./legal-data}:/app/legal-data:ro"
       - legal_storage:/app/storage
     depends_on:
@@ -232,6 +267,7 @@ services:
 
 volumes:
   qwen_model:
+  embedding_model:
   postgres_data:
   redis_data:
   neo4j_data:

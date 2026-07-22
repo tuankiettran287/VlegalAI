@@ -12,7 +12,8 @@ import psycopg
 from psycopg.rows import dict_row
 from sqlalchemy.engine import make_url
 
-from app.legal_graphrag import DEFAULT_DB_PATH, hash_vector, key_terms, normalize_space, strip_accents
+from app.legal_graphrag import DEFAULT_DB_PATH, blob_to_vector, key_terms, normalize_space, strip_accents
+from app.services.embeddings import EmbeddingConfig, get_embedding_service
 
 
 RELATION_TYPE_MAP = {
@@ -71,8 +72,14 @@ class ExternalGraphRAGConfig:
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
     database_url: str = "postgresql+asyncpg://vlegal:vlegal@localhost:5432/vlegal"
-    postgres_vector_size: int = 1536
+    postgres_vector_size: int = 1024
     batch_size: int = 256
+    embedding_model_path: str = "models/bge-m3"
+    embedding_model_repo: str = "BAAI/bge-m3"
+    embedding_model_revision: str = "main"
+    embedding_device: str = "auto"
+    embedding_batch_size: int = 4
+    embedding_max_sequence_length: int = 2048
 
     @classmethod
     def from_env(cls) -> "ExternalGraphRAGConfig":
@@ -85,8 +92,26 @@ class ExternalGraphRAGConfig:
                 "DATABASE_URL",
                 "postgresql+asyncpg://vlegal:vlegal@localhost:5432/vlegal",
             ),
-            postgres_vector_size=int(os.getenv("POSTGRES_VECTOR_SIZE", "1536")),
+            postgres_vector_size=int(os.getenv("POSTGRES_VECTOR_SIZE", "1024")),
             batch_size=int(os.getenv("EXTERNAL_SYNC_BATCH_SIZE", "256")),
+            embedding_model_path=os.getenv("EMBEDDING_MODEL_PATH", "models/bge-m3"),
+            embedding_model_repo=os.getenv("EMBEDDING_MODEL_REPO", "BAAI/bge-m3"),
+            embedding_model_revision=os.getenv("EMBEDDING_MODEL_REVISION", "main"),
+            embedding_device=os.getenv("EMBEDDING_DEVICE", "auto"),
+            embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "4")),
+            embedding_max_sequence_length=int(os.getenv("EMBEDDING_MAX_SEQUENCE_LENGTH", "2048")),
+        )
+
+    @property
+    def embedding_config(self) -> EmbeddingConfig:
+        return EmbeddingConfig(
+            model_path=self.embedding_model_path,
+            model_repo=self.embedding_model_repo,
+            model_revision=self.embedding_model_revision,
+            device=self.embedding_device,
+            dimensions=self.postgres_vector_size,
+            batch_size=self.embedding_batch_size,
+            max_sequence_length=self.embedding_max_sequence_length,
         )
 
     @property
@@ -125,6 +150,25 @@ def sqlite_rows(db_path: Path | str, table: str) -> list[dict[str, Any]]:
         return [dict(row) for row in conn.execute(f"SELECT * FROM {table}")]
     finally:
         conn.close()
+
+
+def validate_sqlite_embedding_metadata(db_path: Path | str, config: ExternalGraphRAGConfig) -> None:
+    try:
+        rows = sqlite_rows(db_path, "index_metadata")
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            "SQLite index contains legacy hash vectors; rebuild it with BGE-M3 before syncing."
+        ) from exc
+    metadata = {str(row["key"]): str(row["value"]) for row in rows}
+    expected = {
+        "embedding_model": config.embedding_model_repo,
+        "embedding_revision": config.embedding_model_revision,
+        "embedding_dimensions": str(config.postgres_vector_size),
+    }
+    if any(metadata.get(key) != value for key, value in expected.items()):
+        raise RuntimeError(
+            f"SQLite embedding metadata {metadata!r} does not match {expected!r}; rebuild it before syncing."
+        )
 
 
 def postgres_dsn(database_url: str) -> str:
@@ -176,6 +220,7 @@ def sync_neo4j(
 
     nodes = sqlite_rows(db_path, "nodes")
     edges = sqlite_rows(db_path, "edges")
+    validate_sqlite_embedding_metadata(db_path, config)
     chunks = sqlite_rows(db_path, "chunks")
 
     driver = neo4j_driver(config)
@@ -258,7 +303,7 @@ def vector_literal(values: Iterable[float]) -> str:
 
 
 def postgres_dense_vector(text: str, config: ExternalGraphRAGConfig) -> list[float]:
-    return list(hash_vector(text, dims=config.postgres_vector_size))
+    return get_embedding_service(config.embedding_config).embed_query(text)
 
 
 def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) -> None:
@@ -284,10 +329,34 @@ def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) 
                     law_code VARCHAR(120),
                     law_status VARCHAR(32),
                     law_version INTEGER,
+                    embedding_model VARCHAR(255) NOT NULL,
+                    embedding_revision VARCHAR(255) NOT NULL,
                     embedding vector({config.postgres_vector_size}) NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
+            )
+            cursor.execute(
+                """
+                SELECT atttypmod AS dimensions
+                FROM pg_attribute
+                WHERE attrelid = 'graphrag_chunk'::regclass
+                  AND attname = 'embedding'
+                  AND NOT attisdropped
+                """
+            )
+            vector_row = cursor.fetchone()
+            actual_dimensions = int(vector_row["dimensions"]) if vector_row else 0
+            if actual_dimensions != config.postgres_vector_size:
+                raise RuntimeError(
+                    f"graphrag_chunk.embedding is vector({actual_dimensions}), expected "
+                    f"vector({config.postgres_vector_size}); run Alembic migration 20260721_0003."
+                )
+            cursor.execute(
+                "ALTER TABLE graphrag_chunk ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(255)"
+            )
+            cursor.execute(
+                "ALTER TABLE graphrag_chunk ADD COLUMN IF NOT EXISTS embedding_revision VARCHAR(255)"
             )
             cursor.execute("CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_doc_id ON graphrag_chunk (doc_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_node_id ON graphrag_chunk (node_id)")
@@ -310,29 +379,78 @@ def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) 
                 cursor.execute("TRUNCATE TABLE graphrag_chunk")
 
 
+def validate_postgres_embeddings(connection, config: ExternalGraphRAGConfig) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT embedding_model, embedding_revision, vector_dims(embedding) AS dimensions
+            FROM graphrag_chunk
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+    if not row:
+        return
+    actual = (row["embedding_model"], row["embedding_revision"], int(row["dimensions"]))
+    expected = (
+        config.embedding_model_repo,
+        config.embedding_model_revision,
+        config.postgres_vector_size,
+    )
+    if actual != expected:
+        raise RuntimeError(
+            f"PostgreSQL embeddings {actual!r} do not match configured model {expected!r}; re-embed the corpus."
+        )
+
+
 def upsert_postgres_chunks(
     rows: Iterable[dict[str, Any]],
     config: ExternalGraphRAGConfig,
 ) -> int:
+    sources = [dict(source) for source in rows]
+    if not sources:
+        return 0
+
     prepared: list[dict[str, Any]] = []
-    for source in rows:
+    missing_indices: list[int] = []
+    missing_texts: list[str] = []
+    for source in sources:
         row = dict(source)
         vector_text = f"{row.get('title', '')}\n{row.get('path_label', '')}\n{row.get('text', '')}"
-        row["embedding"] = vector_literal(postgres_dense_vector(vector_text, config))
+        stored_vector = row.pop("vector", None)
+        if stored_vector is None:
+            missing_indices.append(len(prepared))
+            missing_texts.append(vector_text)
+            row["embedding"] = None
+        else:
+            values = list(blob_to_vector(bytes(stored_vector)))
+            if len(values) != config.postgres_vector_size:
+                raise RuntimeError(
+                    f"Precomputed vector has {len(values)} dimensions; expected {config.postgres_vector_size}. "
+                    "Rebuild the local GraphRAG index with BGE-M3."
+                )
+            row["embedding"] = vector_literal(values)
+        row["embedding_model"] = config.embedding_model_repo
+        row["embedding_revision"] = config.embedding_model_revision
         prepared.append(row)
-    if not prepared:
-        return 0
+
+    if missing_texts:
+        service = get_embedding_service(config.embedding_config)
+        embeddings = service.embed_documents(missing_texts)
+        for index, values in zip(missing_indices, embeddings, strict=True):
+            prepared[index]["embedding"] = vector_literal(values)
 
     statement = """
         INSERT INTO graphrag_chunk (
             chunk_id, doc_id, node_id, chunk_type, title, path_label, citation,
             text, token_count, ordinal, source_url, law_code, law_status,
-            law_version, embedding, updated_at
+            law_version, embedding_model, embedding_revision, embedding, updated_at
         ) VALUES (
             %(chunk_id)s, %(doc_id)s, %(node_id)s, %(chunk_type)s,
             %(title)s, %(path_label)s, %(citation)s, %(text)s,
             %(token_count)s, %(ordinal)s, %(source_url)s, %(law_code)s,
-            %(law_status)s, %(law_version)s, %(embedding)s::vector, now()
+            %(law_status)s, %(law_version)s, %(embedding_model)s,
+            %(embedding_revision)s, %(embedding)s::vector, now()
         )
         ON CONFLICT (chunk_id) DO UPDATE SET
             doc_id = EXCLUDED.doc_id,
@@ -348,6 +466,8 @@ def upsert_postgres_chunks(
             law_code = EXCLUDED.law_code,
             law_status = EXCLUDED.law_status,
             law_version = EXCLUDED.law_version,
+            embedding_model = EXCLUDED.embedding_model,
+            embedding_revision = EXCLUDED.embedding_revision,
             embedding = EXCLUDED.embedding,
             updated_at = now()
     """
@@ -421,6 +541,7 @@ def sync_postgres(
     if not config.postgres_ready:
         raise RuntimeError("DATABASE_URL is required to sync PostgreSQL.")
 
+    validate_sqlite_embedding_metadata(db_path, config)
     chunks = sqlite_rows(db_path, "chunks")
     ensure_postgres_schema(config, reset=reset)
 
@@ -443,6 +564,7 @@ def sync_postgres(
                 "law_code": None,
                 "law_status": None,
                 "law_version": None,
+                "vector": row["vector"],
             })
         total += upsert_postgres_chunks(rows, config)
 
@@ -454,17 +576,21 @@ def sync_external_graphrag(
     config: ExternalGraphRAGConfig | None = None,
     reset_neo4j: bool = False,
     reset_postgres: bool = False,
+    include_neo4j: bool = True,
+    include_postgres: bool = True,
 ) -> dict[str, Any]:
     config = config or ExternalGraphRAGConfig.from_env()
     res = {}
-    try:
-        res["neo4j"] = sync_neo4j(db_path, config, reset=reset_neo4j)
-    except Exception as exc:
-        res["neo4j"] = {"error": f"{type(exc).__name__}: {exc}"}
-    try:
-        res["postgres"] = sync_postgres(db_path, config, reset=reset_postgres)
-    except Exception as exc:
-        res["postgres"] = {"error": f"{type(exc).__name__}: {exc}"}
+    if include_neo4j:
+        try:
+            res["neo4j"] = sync_neo4j(db_path, config, reset=reset_neo4j)
+        except Exception as exc:
+            res["neo4j"] = {"error": f"{type(exc).__name__}: {exc}"}
+    if include_postgres:
+        try:
+            res["postgres"] = sync_postgres(db_path, config, reset=reset_postgres)
+        except Exception as exc:
+            res["postgres"] = {"error": f"{type(exc).__name__}: {exc}"}
     return res
 
 
@@ -474,8 +600,13 @@ class PostgresGraphRAGStore:
         if not self.config.postgres_ready:
             raise RuntimeError("PostgreSQL backend requires DATABASE_URL.")
         self.connection = postgres_connection(self.config)
-        with self.connection.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM graphrag_chunk LIMIT 1")
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM graphrag_chunk LIMIT 1")
+            validate_postgres_embeddings(self.connection, self.config)
+        except Exception:
+            self.connection.close()
+            raise
 
     def close(self) -> None:
         self.connection.close()
@@ -792,9 +923,15 @@ class Neo4jPostgresGraphRAGStore:
             )
         self.postgres = postgres_connection(self.config)
         self.driver = neo4j_driver(self.config)
-        self.driver.verify_connectivity()
-        with self.postgres.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM graphrag_chunk LIMIT 1")
+        try:
+            self.driver.verify_connectivity()
+            with self.postgres.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM graphrag_chunk LIMIT 1")
+            validate_postgres_embeddings(self.postgres, self.config)
+        except Exception:
+            self.postgres.close()
+            self.driver.close()
+            raise
 
     def close(self) -> None:
         self.postgres.close()

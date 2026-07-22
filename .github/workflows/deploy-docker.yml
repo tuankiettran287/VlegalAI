@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api, frontend, worker, beat, migrate, model-init]
+        service: [api, frontend, worker, beat, migrate, model-init, reindex]
     steps:
       - uses: actions/checkout@v4
 
@@ -90,6 +90,7 @@ jobs:
              VLEGAL_BEAT_IMAGE='$IMAGE_BASE-beat:$GITHUB_SHA' \
              VLEGAL_MIGRATE_IMAGE='$IMAGE_BASE-migrate:$GITHUB_SHA' \
              VLEGAL_MODEL_INIT_IMAGE='$IMAGE_BASE-model-init:$GITHUB_SHA' \
+             VLEGAL_REINDEX_IMAGE='$IMAGE_BASE-reindex:$GITHUB_SHA' \
              PULL_IMAGE=1 ./deploy-docker.sh"
 
       - name: Deployment not configured

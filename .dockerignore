@@ -10,10 +10,12 @@ frontend/dist
 frontend/.next
 frontend/out
 models
+tools
 storage
 Data (1)
 *.ipynb
 *.docx
 *.png
+*.pem
 .env*
 

@@ -19,6 +19,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
 COPY app ./app
+COPY scripts ./scripts
 
 RUN mkdir -p /app/storage \
     && chown -R vlegal:vlegal /app

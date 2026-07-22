@@ -1,1 +1,1 @@
-celery[redis]>=5.4.0
+celery[redis,gcpubsub]>=5.5,<6

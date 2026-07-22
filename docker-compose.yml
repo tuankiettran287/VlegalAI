@@ -2,7 +2,7 @@ name: vlegal
 
 x-app-environment: &app-environment
   DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
-  POSTGRES_VECTOR_SIZE: "1536"
+  POSTGRES_VECTOR_SIZE: "1024"
   REDIS_URL: redis://redis:6379/0
   CELERY_BROKER_URL: redis://redis:6379/1
   CELERY_RESULT_BACKEND: redis://redis:6379/2
@@ -11,6 +11,12 @@ x-app-environment: &app-environment
   NEO4J_PASSWORD: local-neo4j-password
   QWEN_MODEL_PATH: /models/qwen3
   QWEN_DEVICE: auto
+  EMBEDDING_MODEL_PATH: /models/embedding
+  EMBEDDING_MODEL_REPO: BAAI/bge-m3
+  EMBEDDING_DEVICE: auto
+  LEGAL_DATA_DIR: /app/legal-data
+  LEGAL_STORAGE_DIR: /app/storage/graphrag
+  LEGAL_GRAPHRAG_DB: /app/storage/graphrag/legal_graphrag.sqlite
 
 services:
   model-init:
@@ -25,9 +31,13 @@ services:
       QWEN_MODEL_PATH: /models/qwen3
       QWEN_MODEL_REPO: "${QWEN_MODEL_REPO:-Qwen/Qwen3-14B}"
       QWEN_MODEL_REVISION: "${QWEN_MODEL_REVISION:-main}"
+      EMBEDDING_MODEL_PATH: /models/embedding
+      EMBEDDING_MODEL_REPO: "${EMBEDDING_MODEL_REPO:-BAAI/bge-m3}"
+      EMBEDDING_MODEL_REVISION: "${EMBEDDING_MODEL_REVISION:-main}"
     user: "0:0"
     volumes:
       - qwen_model:/models/qwen3
+      - embedding_model:/models/embedding
     restart: "no"
 
   migrate:
@@ -43,6 +53,30 @@ services:
         condition: service_healthy
     restart: "no"
 
+  reindex:
+    image: "${VLEGAL_REINDEX_IMAGE:-vlegal-reindex:local}"
+    build:
+      context: .
+      dockerfile: docker/reindex.Dockerfile
+    profiles: ["jobs"]
+    env_file: .env
+    environment:
+      <<: *app-environment
+    volumes:
+      - embedding_model:/models/embedding:ro
+      - "./Data (1):/app/legal-data:ro"
+      - ./storage:/app/storage
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    restart: "no"
+
   api:
     image: "${VLEGAL_API_IMAGE:-vlegal-api:local}"
     build:
@@ -53,6 +87,9 @@ services:
       <<: *app-environment
     volumes:
       - qwen_model:/models/qwen3:ro
+      - embedding_model:/models/embedding:ro
+      - "./Data (1):/app/legal-data:ro"
+      - ./storage:/app/storage
     ports:
       - "8000:8080"
     depends_on:
@@ -91,6 +128,9 @@ services:
       <<: *app-environment
     volumes:
       - qwen_model:/models/qwen3:ro
+      - embedding_model:/models/embedding:ro
+      - "./Data (1):/app/legal-data:ro"
+      - ./storage:/app/storage
     depends_on:
       model-init:
         condition: service_completed_successfully
@@ -161,6 +201,7 @@ services:
 
 volumes:
   qwen_model:
+  embedding_model:
   postgres_data:
   redis_data:
   neo4j_data:

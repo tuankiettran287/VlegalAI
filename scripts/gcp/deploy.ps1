@@ -6,12 +6,17 @@ param(
     [string]$Tag = "",
     [string]$RunServiceAccount = "",
     [string]$ModelBucket = "",
+    [string]$EmbeddingBucket = "",
+    [string]$CorpusBucket = "",
     [string]$Network = "default",
     [string]$Subnet = "default",
+    [string]$RedisHost = "10.170.0.3",
+    [int]$RedisPort = 6379,
+    [string]$RedisCaSecret = "vlegal-redis-server-ca",
     [string]$Neo4jUri = $env:NEO4J_URI,
     [string]$Neo4jUser = "neo4j",
     [string]$FrontendUrl = "",
-    [ValidateSet("all", "model-init", "migrate", "api", "frontend", "worker", "beat")]
+    [ValidateSet("all", "model-init", "migrate", "reindex", "api", "frontend", "worker", "beat")]
     [string]$Component = "all",
     [ValidateSet("nvidia-rtx-pro-6000", "nvidia-l4")]
     [string]$GpuType = "nvidia-rtx-pro-6000",
@@ -23,7 +28,7 @@ $ErrorActionPreference = "Stop"
 if ([string]::IsNullOrWhiteSpace($ProjectId)) {
     throw "Truyền -ProjectId hoặc đặt GOOGLE_CLOUD_PROJECT."
 }
-if ([string]::IsNullOrWhiteSpace($Neo4jUri) -and $Component -in @("all", "api", "worker")) {
+if ([string]::IsNullOrWhiteSpace($Neo4jUri) -and $Component -in @("all", "reindex", "api", "worker")) {
     throw "Truyền -Neo4jUri hoặc đặt NEO4J_URI."
 }
 
@@ -40,6 +45,12 @@ if ([string]::IsNullOrWhiteSpace($RunServiceAccount)) {
 if ([string]::IsNullOrWhiteSpace($ModelBucket)) {
     $ModelBucket = "$ProjectId-vlegal-qwen3-14b"
 }
+if ([string]::IsNullOrWhiteSpace($EmbeddingBucket)) {
+    $EmbeddingBucket = "$ProjectId-vlegal-bge-m3"
+}
+if ([string]::IsNullOrWhiteSpace($CorpusBucket)) {
+    $CorpusBucket = "$ProjectId-vlegal-corpus"
+}
 
 $imageRoot = "$Region-docker.pkg.dev/$ProjectId/$Repository"
 $apiService = "vlegal-api"
@@ -48,13 +59,17 @@ $workerPool = "vlegal-worker"
 $beatPool = "vlegal-beat"
 $migrateJob = "vlegal-migrate"
 $modelJob = "vlegal-model-init"
+$reindexJob = "vlegal-reindex"
 
 $gpuCpu = if ($GpuType -eq "nvidia-l4") { "8" } else { "20" }
 $gpuMemory = if ($GpuType -eq "nvidia-l4") { "32Gi" } else { "80Gi" }
+$redisUrl = "rediss://${RedisHost}:$RedisPort/0"
+$redisCaPath = "/var/run/secrets/redis/server-ca.pem"
+$celeryBrokerUrl = "gcpubsub://projects/$ProjectId"
 
 $apiSecrets = @(
     "DATABASE_URL=vlegal-database-url:latest",
-    "REDIS_URL=vlegal-redis-url:latest",
+    "${redisCaPath}=${RedisCaSecret}:latest",
     "NEO4J_PASSWORD=vlegal-neo4j-password:latest",
     "SESSION_SECRET=vlegal-session-secret:latest",
     "MESSAGE_ENCRYPTION_KEY=vlegal-message-key:latest",
@@ -65,7 +80,7 @@ $apiSecrets = @(
 
 $workerSecrets = @(
     "DATABASE_URL=vlegal-database-url:latest",
-    "REDIS_URL=vlegal-redis-url:latest",
+    "${redisCaPath}=${RedisCaSecret}:latest",
     "NEO4J_PASSWORD=vlegal-neo4j-password:latest",
     "TAVILY_API_KEY=vlegal-tavily-key:latest"
 ) -join ","
@@ -94,8 +109,9 @@ function Deploy-ModelInit {
         "--image=$imageRoot/vlegal-model-init`:$Tag",
         "--service-account=$RunServiceAccount",
         "--cpu=4", "--memory=8Gi", "--task-timeout=3h", "--max-retries=3",
-        "--set-env-vars=QWEN_MODEL_REPO=Qwen/Qwen3-14B,QWEN_MODEL_REVISION=main,HF_HUB_OFFLINE=0,TRANSFORMERS_OFFLINE=0",
+        "--set-env-vars=QWEN_MODEL_REPO=Qwen/Qwen3-14B,QWEN_MODEL_REVISION=main,EMBEDDING_MODEL_REPO=BAAI/bge-m3,EMBEDDING_MODEL_REVISION=main,HF_HUB_OFFLINE=0,TRANSFORMERS_OFFLINE=0",
         "--add-volume=mount-path=/models/qwen3,type=cloud-storage,bucket=$ModelBucket,readonly=false,mount-options=uid=10001;gid=10001",
+        "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=false,mount-options=uid=10001;gid=10001",
         "--quiet"
     )
     if ($ExecuteJobs) {
@@ -119,6 +135,47 @@ function Deploy-Migrate {
     }
 }
 
+function Deploy-Reindex {
+    $envVars = @(
+        "APP_ENV=production",
+        "LEGAL_DATA_DIR=/app/legal-data",
+        "LEGAL_STORAGE_DIR=/tmp/graphrag",
+        "LEGAL_GRAPHRAG_DB=/tmp/graphrag/legal_graphrag.sqlite",
+        "EMBEDDING_MODEL_PATH=/models/embedding",
+        "EMBEDDING_MODEL_REPO=BAAI/bge-m3",
+        "EMBEDDING_MODEL_REVISION=main",
+        "EMBEDDING_DEVICE=cuda",
+        "EMBEDDING_BATCH_SIZE=4",
+        "EMBEDDING_MAX_SEQUENCE_LENGTH=2048",
+        "POSTGRES_VECTOR_SIZE=1024",
+        "NEO4J_URI=$Neo4jUri",
+        "NEO4J_USER=$Neo4jUser",
+        "HF_HUB_OFFLINE=1",
+        "TRANSFORMERS_OFFLINE=1"
+    ) -join ","
+
+    Invoke-Gcloud @(
+        "run", "jobs", "deploy", $reindexJob,
+        "--project=$ProjectId", "--region=$Region",
+        "--image=$imageRoot/vlegal-reindex`:$Tag",
+        "--service-account=$RunServiceAccount",
+        "--command=python",
+        "--args=scripts/sync_external_graphrag.py,--reset-neo4j,--reset-postgres",
+        "--tasks=1", "--parallelism=1", "--max-retries=1", "--task-timeout=24h",
+        "--gpu=1", "--gpu-type=nvidia-l4", "--no-gpu-zonal-redundancy",
+        "--cpu=4", "--memory=16Gi",
+        "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
+        "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=true,mount-options=uid=10001;gid=10001",
+        "--add-volume=mount-path=/app/legal-data,type=cloud-storage,bucket=$CorpusBucket,readonly=true,mount-options=uid=10001;gid=10001",
+        "--set-env-vars=$envVars",
+        "--set-secrets=DATABASE_URL=vlegal-database-url:latest,NEO4J_PASSWORD=vlegal-neo4j-password:latest",
+        "--quiet"
+    )
+    if ($ExecuteJobs) {
+        Invoke-Gcloud @("run", "jobs", "execute", $reindexJob, "--project=$ProjectId", "--region=$Region", "--wait")
+    }
+}
+
 function Deploy-Api {
     $envVars = @(
         "APP_ENV=production",
@@ -127,11 +184,21 @@ function Deploy-Api {
         "QWEN_DEVICE=cuda",
         "QWEN_DTYPE=bfloat16",
         "QWEN_MAX_CONCURRENT_GENERATIONS=1",
+        "EMBEDDING_MODEL_PATH=/models/embedding",
+        "EMBEDDING_MODEL_REPO=BAAI/bge-m3",
+        "EMBEDDING_MODEL_REVISION=main",
+        "EMBEDDING_DEVICE=cuda",
+        "EMBEDDING_BATCH_SIZE=4",
+        "EMBEDDING_MAX_SEQUENCE_LENGTH=2048",
         "WEB_CONCURRENCY=1",
         "DATABASE_POOL_SIZE=5",
         "DATABASE_MAX_OVERFLOW=5",
+        "REDIS_URL=$redisUrl",
+        "REDIS_CLUSTER_MODE=true",
+        "REDIS_IAM_AUTH=true",
+        "REDIS_CA_CERTS=$redisCaPath",
         "RETRIEVER_BACKEND=hybrid_rag",
-        "POSTGRES_VECTOR_SIZE=1536",
+        "POSTGRES_VECTOR_SIZE=1024",
         "NEO4J_URI=$Neo4jUri",
         "NEO4J_USER=$Neo4jUser"
     ) -join ","
@@ -147,6 +214,7 @@ function Deploy-Api {
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
         "--allow-unauthenticated",
         "--add-volume=mount-path=/models/qwen3,type=cloud-storage,bucket=$ModelBucket,readonly=true,mount-options=uid=10001;gid=10001",
+        "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--set-env-vars=$envVars", "--set-secrets=$apiSecrets",
         "--quiet"
     )
@@ -184,10 +252,21 @@ function Deploy-Worker {
         "QWEN_DEVICE=cuda",
         "QWEN_DTYPE=bfloat16",
         "QWEN_MAX_CONCURRENT_GENERATIONS=1",
+        "EMBEDDING_MODEL_PATH=/models/embedding",
+        "EMBEDDING_MODEL_REPO=BAAI/bge-m3",
+        "EMBEDDING_MODEL_REVISION=main",
+        "EMBEDDING_DEVICE=cuda",
+        "EMBEDDING_BATCH_SIZE=4",
+        "EMBEDDING_MAX_SEQUENCE_LENGTH=2048",
         "DATABASE_POOL_SIZE=2",
         "DATABASE_MAX_OVERFLOW=2",
+        "REDIS_URL=$redisUrl",
+        "REDIS_CLUSTER_MODE=true",
+        "REDIS_IAM_AUTH=true",
+        "REDIS_CA_CERTS=$redisCaPath",
+        "CELERY_BROKER_URL=$celeryBrokerUrl",
         "RETRIEVER_BACKEND=hybrid_rag",
-        "POSTGRES_VECTOR_SIZE=1536",
+        "POSTGRES_VECTOR_SIZE=1024",
         "NEO4J_URI=$Neo4jUri",
         "NEO4J_USER=$Neo4jUser"
     ) -join ","
@@ -200,6 +279,7 @@ function Deploy-Worker {
         "--cpu=$gpuCpu", "--memory=$gpuMemory",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
         "--add-volume=mount-path=/models/qwen3,type=cloud-storage,bucket=$ModelBucket,readonly=true,mount-options=uid=10001;gid=10001",
+        "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--set-env-vars=$envVars", "--set-secrets=$workerSecrets",
         "--quiet"
     )
@@ -212,7 +292,7 @@ function Deploy-Beat {
         "--image=$imageRoot/vlegal-beat`:$Tag", "--service-account=$RunServiceAccount",
         "--cpu=1", "--memory=512Mi",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
-        "--set-env-vars=APP_ENV=production", "--set-secrets=REDIS_URL=vlegal-redis-url:latest",
+        "--set-env-vars=APP_ENV=production,CELERY_BROKER_URL=$celeryBrokerUrl",
         "--quiet"
     )
 }
@@ -220,6 +300,7 @@ function Deploy-Beat {
 switch ($Component) {
     "model-init" { Deploy-ModelInit }
     "migrate" { Deploy-Migrate }
+    "reindex" { Deploy-Reindex }
     "api" {
         Deploy-Api
         $externalUrl = if ($FrontendUrl) { $FrontendUrl } else { Get-ServiceUrl $apiService }
@@ -236,6 +317,7 @@ switch ($Component) {
     "all" {
         Deploy-ModelInit
         Deploy-Migrate
+        Deploy-Reindex
         Deploy-Api
         $url = Deploy-Frontend
         Set-ApiExternalUrl $url
