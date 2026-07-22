@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.external_graphrag import (
+    Neo4jPostgresGraphRAGStore,
     PostgresGraphRAGStore,
     bm25_score,
     postgres_lexical_terms,
@@ -75,3 +76,27 @@ def test_postgres_store_returns_fused_reasons() -> None:
     assert rows[0]["chunk_id"] == "both"
     assert rows[0]["reasons"] == ["postgres_vector_cosine", "postgres_bm25"]
     assert {row["chunk_id"] for row in rows} == {"vector-only", "both", "bm25-only"}
+
+
+def test_neo4j_hybrid_expands_postgres_rag_seeds() -> None:
+    store = object.__new__(Neo4jPostgresGraphRAGStore)
+    seed = {
+        **_row("seed"),
+        "node_id": "seed-node",
+        "score": 2.0,
+        "reasons": ["postgres_vector_cosine", "postgres_bm25"],
+    }
+    related = {**_row("related"), "node_id": "related-node", "chunk_type": "clause"}
+    store._postgres_candidates = lambda query, limit: [seed]
+    store._expand_node_scores = lambda node_scores: {
+        "seed-node": node_scores["seed-node"],
+        "related-node": 1.7,
+    }
+    store._chunks_for_nodes = lambda node_ids: [related]
+
+    rows = store.retrieve("nghia vu thue", top_k=3)
+
+    assert rows[0]["chunk_id"] == "seed"
+    assert rows[0]["reasons"] == ["postgres_vector_cosine", "postgres_bm25"]
+    assert rows[1]["chunk_id"] == "related"
+    assert rows[1]["reasons"] == ["neo4j_graph"]

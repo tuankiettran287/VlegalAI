@@ -1121,20 +1121,18 @@ class Neo4jPostgresGraphRAGStore:
             raise RuntimeError(
                 "Hybrid backend requires NEO4J_PASSWORD and DATABASE_URL."
             )
-        self.postgres = postgres_connection(self.config)
+        self.rag = PostgresGraphRAGStore(self.config)
+        self.postgres = self.rag.connection
         self.driver = neo4j_driver(self.config)
         try:
             self.driver.verify_connectivity()
-            with self.postgres.cursor() as cursor:
-                cursor.execute("SELECT 1 FROM graphrag_chunk LIMIT 1")
-            validate_postgres_embeddings(self.postgres, self.config)
         except Exception:
-            self.postgres.close()
+            self.rag.close()
             self.driver.close()
             raise
 
     def close(self) -> None:
-        self.postgres.close()
+        self.rag.close()
         self.driver.close()
 
     def stats(self) -> dict[str, Any]:
@@ -1168,19 +1166,23 @@ class Neo4jPostgresGraphRAGStore:
                 ORDER BY count DESC
                 """
             ).data()
-        with self.postgres.cursor() as cursor:
-            cursor.execute("SELECT count(*) AS count FROM graphrag_chunk")
-            postgres_count = (cursor.fetchone() or {"count": 0})["count"]
+        rag_stats = self.rag.stats()
         return {
-            "backend": "neo4j+postgres",
+            "backend": "postgres_hybrid+neo4j_graphrag",
             "documents": row["documents"] if row else 0,
             "nodes": row["nodes"] if row else 0,
             "edges": row["edges"] if row else 0,
-            "chunks": postgres_count,
+            "chunks": rag_stats["chunks"],
             "neo4j_chunks": row["chunks"] if row else 0,
             "relations": {item["relation"]: item["count"] for item in rel_rows},
             "node_types": {item["node_type"]: item["count"] for item in node_type_rows},
             "neo4j_uri": self.config.neo4j_uri,
+            "retrieval": {
+                "dense": "cosine",
+                "lexical": "bm25",
+                "fusion": "rrf",
+                "graph": "neo4j",
+            },
         }
 
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
@@ -1193,51 +1195,41 @@ class Neo4jPostgresGraphRAGStore:
 
         scores: dict[str, float] = {}
         rows_by_chunk: dict[str, dict[str, Any]] = {}
+        reasons_by_chunk: dict[str, list[str]] = {}
         node_scores: dict[str, float] = {}
-        query_ascii = strip_accents(query).lower()
-        terms = key_terms(query)
 
-        for rank, row in enumerate(candidates, start=1):
+        for row in candidates:
             chunk_id = row["chunk_id"]
-            haystack = strip_accents(f"{row.get('title', '')} {row.get('citation', '')} {row.get('text', '')[:700]}").lower()
-            score = float(row.get("_score", 0.0)) * (1.0 / max(1.0, rank ** 0.35))
-            if terms:
-                matched = sum(1 for term in terms if term in haystack)
-                score += (matched / min(len(terms), 10)) * 0.9
-            if "duoc" in query_ascii and "khong duoc" not in query_ascii and "khong duoc" in haystack:
-                score -= 0.35
-            if "khong duoc" in query_ascii and "khong duoc" in haystack:
-                score += 0.5
-            if (
-                "nguoi su dung lao dong" in query_ascii
-                and "don phuong" in query_ascii
-                and "cham dut" in query_ascii
-                and "quyen don phuong cham dut hop dong lao dong cua nguoi su dung lao dong" in haystack
-            ):
-                score += 1.15
-
+            score = float(row.get("score", 0.0))
             scores[chunk_id] = max(score, scores.get(chunk_id, -999.0))
             rows_by_chunk[chunk_id] = row
+            reasons_by_chunk[chunk_id] = list(dict.fromkeys(row.get("reasons", [])))
             node_id = row.get("node_id")
             if node_id:
                 node_scores[node_id] = max(node_scores.get(node_id, 0.0), score)
 
         expanded_scores = self._expand_node_scores(node_scores)
+        graph_node_ids = set(expanded_scores) - set(node_scores)
         expanded_rows = self._chunks_for_nodes(expanded_scores.keys())
         for row in expanded_rows:
             chunk_id = row["chunk_id"]
             score = expanded_scores.get(row["node_id"], 0.0)
             if row["chunk_type"] == "article":
                 score += 0.08
+            reasons = reasons_by_chunk.get(chunk_id, [])
+            if row["node_id"] in graph_node_ids:
+                reasons = list(dict.fromkeys([*reasons, "neo4j_graph"]))
             if score > scores.get(chunk_id, -999.0):
                 scores[chunk_id] = score
                 rows_by_chunk[chunk_id] = row
+            if reasons:
+                reasons_by_chunk[chunk_id] = reasons
 
         selected = []
         for chunk_id, score in sorted(scores.items(), key=lambda item: item[1], reverse=True):
             row = dict(rows_by_chunk[chunk_id])
             row["score"] = round(score, 4)
-            row["reasons"] = row.get("reasons") or ["postgres_vector", "neo4j"]
+            row["reasons"] = reasons_by_chunk.get(chunk_id) or row.get("reasons") or ["neo4j_graph"]
             selected.append(row)
             if len(selected) >= top_k:
                 break
@@ -1246,23 +1238,7 @@ class Neo4jPostgresGraphRAGStore:
         return selected
 
     def _postgres_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
-        query_vector = vector_literal(postgres_dense_vector(query, self.config))
-        with self.postgres.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
-                       citation, text, token_count, ordinal, source_url,
-                       1 - (embedding <=> %s::vector) AS _score
-                FROM graphrag_chunk
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (query_vector, query_vector, limit),
-            )
-            rows = [dict(row) for row in cursor.fetchall()]
-        for row in rows:
-            row["reasons"] = ["postgres_vector"]
-        return rows
+        return self.rag.retrieve(query, limit)
 
     def _expand_node_scores(self, node_scores: dict[str, float]) -> dict[str, float]:
         if not node_scores:
