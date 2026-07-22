@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+import math
 import os
 import re
 import sqlite3
@@ -64,6 +66,18 @@ GRAPH_EXPAND_RELS = [
 ]
 GRAPH_REVERSE_RELS = ["GUIDES", "AMENDS", "REPLACES"]
 
+POSTGRES_LEXICAL_TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", re.UNICODE)
+POSTGRES_TEXT_SEARCH_EXPRESSION = (
+    "to_tsvector('simple', coalesce(title, '') || ' ' || "
+    "coalesce(citation, '') || ' ' || coalesce(text, ''))"
+)
+POSTGRES_LEXICAL_STOP_WORDS = {
+    "theo", "quy", "định", "dinh", "cho", "tôi", "toi", "hỏi", "hoi",
+    "như", "nhu", "nào", "nao", "về", "ve", "và", "va", "là", "la",
+    "của", "cua", "được", "duoc", "không", "khong", "trong", "những",
+    "nhung", "gì", "gi", "các", "cac", "một", "mot", "số", "so",
+}
+
 
 @dataclass(frozen=True)
 class ExternalGraphRAGConfig:
@@ -80,6 +94,11 @@ class ExternalGraphRAGConfig:
     embedding_device: str = "auto"
     embedding_batch_size: int = 4
     embedding_max_sequence_length: int = 2048
+    hybrid_vector_weight: float = 0.55
+    hybrid_bm25_weight: float = 0.45
+    hybrid_rrf_k: int = 60
+    bm25_k1: float = 1.5
+    bm25_b: float = 0.75
 
     @classmethod
     def from_env(cls) -> "ExternalGraphRAGConfig":
@@ -100,6 +119,11 @@ class ExternalGraphRAGConfig:
             embedding_device=os.getenv("EMBEDDING_DEVICE", "auto"),
             embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "4")),
             embedding_max_sequence_length=int(os.getenv("EMBEDDING_MAX_SEQUENCE_LENGTH", "2048")),
+            hybrid_vector_weight=float(os.getenv("HYBRID_VECTOR_WEIGHT", "0.55")),
+            hybrid_bm25_weight=float(os.getenv("HYBRID_BM25_WEIGHT", "0.45")),
+            hybrid_rrf_k=int(os.getenv("HYBRID_RRF_K", "60")),
+            bm25_k1=float(os.getenv("BM25_K1", "1.5")),
+            bm25_b=float(os.getenv("BM25_B", "0.75")),
         )
 
     @property
@@ -508,6 +532,71 @@ def score_chunk_payload(
     return score
 
 
+def postgres_lexical_terms(query: str, limit: int = 18) -> list[str]:
+    """Return PostgreSQL `simple` dictionary terms while retaining Vietnamese accents."""
+    terms: list[str] = []
+    for token in POSTGRES_LEXICAL_TOKEN_RE.findall(query.lower()):
+        if len(token) < 2 and not token.isdigit():
+            continue
+        if token in POSTGRES_LEXICAL_STOP_WORDS or strip_accents(token) in POSTGRES_LEXICAL_STOP_WORDS:
+            continue
+        terms.append(token)
+    return list(dict.fromkeys(terms))[:limit]
+
+
+def postgres_or_tsquery(terms: Iterable[str]) -> str:
+    """Build a safe OR tsquery from terms already restricted by the lexical regex."""
+    return " | ".join(f"'{term.replace(chr(39), chr(39) * 2)}'" for term in terms)
+
+
+def bm25_score(
+    row: dict[str, Any],
+    terms: Iterable[str],
+    document_frequencies: dict[str, int],
+    total_documents: int,
+    average_document_length: float,
+    *,
+    k1: float = 1.5,
+    b: float = 0.75,
+) -> float:
+    """Compute Okapi BM25 over the same title/citation/text fields as the GIN index."""
+    if total_documents <= 0:
+        return 0.0
+    text = f"{row.get('title', '')} {row.get('citation', '')} {row.get('text', '')}".lower()
+    frequencies = Counter(POSTGRES_LEXICAL_TOKEN_RE.findall(text))
+    document_length = max(int(row.get("token_count") or 0), 1)
+    average_length = max(float(average_document_length), 1.0)
+    score = 0.0
+    for term in dict.fromkeys(terms):
+        term_frequency = frequencies.get(term, 0)
+        if term_frequency <= 0:
+            continue
+        document_frequency = min(max(int(document_frequencies.get(term, 0)), 0), total_documents)
+        inverse_document_frequency = math.log1p(
+            (total_documents - document_frequency + 0.5) / (document_frequency + 0.5)
+        )
+        denominator = term_frequency + k1 * (
+            1.0 - b + b * document_length / average_length
+        )
+        score += inverse_document_frequency * (
+            term_frequency * (k1 + 1.0) / max(denominator, 1e-9)
+        )
+    return score
+
+
+def reciprocal_rank_fusion(
+    rankings: Iterable[tuple[Iterable[str], float]],
+    rank_constant: int = 60,
+) -> dict[str, float]:
+    """Fuse independent rankings with weighted Reciprocal Rank Fusion."""
+    k = max(int(rank_constant), 1)
+    scores: dict[str, float] = {}
+    for identifiers, weight in rankings:
+        for rank, identifier in enumerate(dict.fromkeys(identifiers), start=1):
+            scores[identifier] = scores.get(identifier, 0.0) + float(weight) * (k + 1) / (k + rank)
+    return scores
+
+
 def lucene_escape(term: str) -> str:
     return re.sub(r'([+\-&|!(){}\[\]^"~*?:\\/])', r"\\\1", term)
 
@@ -600,6 +689,7 @@ class PostgresGraphRAGStore:
         if not self.config.postgres_ready:
             raise RuntimeError("PostgreSQL backend requires DATABASE_URL.")
         self.connection = postgres_connection(self.config)
+        self._bm25_corpus_statistics: tuple[int, float] | None = None
         try:
             with self.connection.cursor() as cursor:
                 cursor.execute("SELECT 1 FROM graphrag_chunk LIMIT 1")
@@ -616,44 +706,154 @@ class PostgresGraphRAGStore:
             cursor.execute("SELECT count(*) AS chunks, count(DISTINCT doc_id) AS documents FROM graphrag_chunk")
             counts = cursor.fetchone() or {"chunks": 0, "documents": 0}
         return {
-            "backend": "postgres",
+            "backend": "postgres_hybrid",
             "documents": counts["documents"],
             "nodes": 0,
             "edges": 0,
             "chunks": counts["chunks"],
             "relations": {},
+            "retrieval": {"dense": "cosine", "lexical": "bm25", "fusion": "rrf"},
         }
 
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         query = normalize_space(query)
         if not query:
             return []
-        query_vector = vector_literal(postgres_dense_vector(query, self.config))
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
-                       citation, text, token_count, ordinal, source_url,
-                       1 - (embedding <=> %s::vector) AS _score
-                FROM graphrag_chunk
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (query_vector, query_vector, max(24, top_k * 4)),
-            )
-            candidates = cursor.fetchall()
+        candidate_limit = max(64, top_k * 8)
+        vector_candidates = self._vector_candidates(query, candidate_limit)
+        bm25_candidates = self._bm25_candidates(query, candidate_limit)
+        if not vector_candidates and not bm25_candidates:
+            return []
+
+        vector_weight = max(float(self.config.hybrid_vector_weight), 0.0)
+        bm25_weight = max(float(self.config.hybrid_bm25_weight), 0.0)
+        total_weight = vector_weight + bm25_weight
+        if total_weight <= 0:
+            vector_weight = bm25_weight = 0.5
+        else:
+            vector_weight /= total_weight
+            bm25_weight /= total_weight
+
+        vector_ids = [row["chunk_id"] for row in vector_candidates]
+        bm25_ids = [row["chunk_id"] for row in bm25_candidates]
+        fused_scores = reciprocal_rank_fusion(
+            [(vector_ids, vector_weight), (bm25_ids, bm25_weight)],
+            self.config.hybrid_rrf_k,
+        )
+        rows_by_id = {row["chunk_id"]: dict(row) for row in vector_candidates}
+        for row in bm25_candidates:
+            rows_by_id.setdefault(row["chunk_id"], dict(row))
+        vector_id_set = set(vector_ids)
+        bm25_id_set = set(bm25_ids)
+
         rows = []
-        for rank, source in enumerate(candidates, start=1):
-            row = dict(source)
-            row["score"] = score_chunk_payload(row, query, float(row.pop("_score", 0.0)), rank)
-            row["reasons"] = ["postgres_vector"]
+        ranked_ids = sorted(fused_scores, key=lambda chunk_id: (-fused_scores[chunk_id], chunk_id))
+        for rank, chunk_id in enumerate(ranked_ids, start=1):
+            row = rows_by_id[chunk_id]
+            row.pop("_vector_score", None)
+            row.pop("_bm25_score", None)
+            row.pop("_fts_score", None)
+            row["score"] = score_chunk_payload(row, query, fused_scores[chunk_id], rank)
+            reasons = []
+            if chunk_id in vector_id_set:
+                reasons.append("postgres_vector_cosine")
+            if chunk_id in bm25_id_set:
+                reasons.append("postgres_bm25")
+            row["reasons"] = reasons
             rows.append(row)
+
         rows.sort(key=lambda row: row["score"], reverse=True)
         selected = rows[:top_k]
         for idx, row in enumerate(selected, start=1):
             row["source_id"] = f"S{idx}"
             row["score"] = round(float(row["score"]), 4)
         return selected
+
+    def _vector_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
+        query_vector = vector_literal(postgres_dense_vector(query, self.config))
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
+                       citation, text, token_count, ordinal, source_url,
+                       1 - (embedding <=> %s::vector) AS _vector_score
+                FROM graphrag_chunk
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (query_vector, query_vector, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def _bm25_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
+        terms = postgres_lexical_terms(query)
+        tsquery = postgres_or_tsquery(terms)
+        if not tsquery:
+            return []
+
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                WITH query AS (SELECT to_tsquery('simple', %s) AS value)
+                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
+                       citation, text, token_count, ordinal, source_url,
+                       ts_rank_cd({POSTGRES_TEXT_SEARCH_EXPRESSION}, query.value, 32) AS _fts_score
+                FROM graphrag_chunk, query
+                WHERE {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ query.value
+                ORDER BY _fts_score DESC, chunk_id
+                LIMIT %s
+                """,
+                (tsquery, limit),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            if not rows:
+                return []
+            cursor.execute(
+                f"""
+                SELECT term, (
+                    SELECT count(*)
+                    FROM graphrag_chunk
+                    WHERE {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ plainto_tsquery('simple', term)
+                ) AS document_frequency
+                FROM unnest(%s::text[]) AS terms(term)
+                """,
+                (terms,),
+            )
+            document_frequencies = {
+                str(row["term"]): int(row["document_frequency"])
+                for row in cursor.fetchall()
+            }
+
+        total_documents, average_document_length = self._corpus_statistics()
+        for row in rows:
+            row["_bm25_score"] = bm25_score(
+                row,
+                terms,
+                document_frequencies,
+                total_documents,
+                average_document_length,
+                k1=self.config.bm25_k1,
+                b=self.config.bm25_b,
+            )
+        rows.sort(key=lambda row: (-float(row["_bm25_score"]), row["chunk_id"]))
+        return rows
+
+    def _corpus_statistics(self) -> tuple[int, float]:
+        if self._bm25_corpus_statistics is None:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*) AS documents,
+                           coalesce(avg(greatest(token_count, 1)), 1.0) AS average_length
+                    FROM graphrag_chunk
+                    """
+                )
+                row = cursor.fetchone() or {"documents": 0, "average_length": 1.0}
+            self._bm25_corpus_statistics = (
+                int(row["documents"]),
+                float(row["average_length"]),
+            )
+        return self._bm25_corpus_statistics
 
 
 class Neo4jGraphRAGStore:

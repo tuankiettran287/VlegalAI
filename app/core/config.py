@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
     postgres_vector_size: int = Field(default=1024, ge=1, le=2000)
+    hybrid_vector_weight: float = Field(default=0.55, ge=0)
+    hybrid_bm25_weight: float = Field(default=0.45, ge=0)
+    hybrid_rrf_k: int = Field(default=60, ge=1)
+    bm25_k1: float = Field(default=1.5, gt=0)
+    bm25_b: float = Field(default=0.75, ge=0, le=1)
 
     legal_data_dir: str = str(PROJECT_ROOT / "Data (1)")
     legal_storage_dir: str = str(PROJECT_ROOT / "storage" / "graphrag")

@@ -84,8 +84,14 @@ class LocalEmbeddingService:
                     trust_remote_code=False,
                     local_files_only=True,
                 )
+                if device == "cuda":
+                    model.half()
                 model.max_seq_length = self.config.max_sequence_length
-                dimensions = int(model.get_sentence_embedding_dimension() or 0)
+                get_dimensions = (
+                    getattr(model, "get_embedding_dimension", None)
+                    or model.get_sentence_embedding_dimension
+                )
+                dimensions = int(get_dimensions() or 0)
                 if dimensions != self.config.dimensions:
                     raise EmbeddingModelError(
                         f"Embedding model produces {dimensions} dimensions, but "

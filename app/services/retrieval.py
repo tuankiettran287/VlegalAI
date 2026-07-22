@@ -42,6 +42,11 @@ def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
         embedding_device=settings.embedding_device,
         embedding_batch_size=settings.embedding_batch_size,
         embedding_max_sequence_length=settings.embedding_max_sequence_length,
+        hybrid_vector_weight=settings.hybrid_vector_weight,
+        hybrid_bm25_weight=settings.hybrid_bm25_weight,
+        hybrid_rrf_k=settings.hybrid_rrf_k,
+        bm25_k1=settings.bm25_k1,
+        bm25_b=settings.bm25_b,
     )
 
 

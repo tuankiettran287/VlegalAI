@@ -1,11 +1,12 @@
 # Environment variables and local secrets
-.env
+
 .env.*
 !.env.example
 !.env.production.example
 env.json
 
 *.key
+
 *.p12
 *.pfx
 
