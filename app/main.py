@@ -92,7 +92,9 @@ async def tavily_error(_: Request, exc: TavilyError) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc), "code": "FRESHNESS_CHECK_UNAVAILABLE"})
 
 
+from app.auth import router as auth_router
 app.include_router(api_router, prefix=settings.api_prefix)
+app.include_router(auth_router, prefix="/api")
 
 @app.get("/", include_in_schema=False)
 async def root() -> dict[str, str]:
