@@ -16,8 +16,8 @@ Dockerfile và một image riêng.
 | `vlegal-model-init` | Cloud Run Job | tải Qwen3 và BGE-M3 vào hai bucket Cloud Storage |
 | `vlegal-reindex` | Cloud Run Job GPU | embedding lại corpus và đồng bộ Neo4j/pgvector |
 
-PostgreSQL/pgvector nên chạy trên Cloud SQL, Redis trên Memorystore và Neo4j
-trên Compute Engine hoặc GKE. Không chạy ba database này bằng Cloud Run vì Cloud
+PostgreSQL/pgvector nên chạy trên Cloud SQL và Neo4j
+trên Compute Engine hoặc GKE. Không chạy hai database này bằng Cloud Run vì Cloud
 Run không cung cấp persistent block storage/TCP endpoint phù hợp cho chúng.
 
 Frontend gọi API qua chính origin frontend (`/api`). Nginx chuyển tiếp request
@@ -65,9 +65,6 @@ $EMBEDDING_BUCKET = "$PROJECT_ID-vlegal-bge-m3"
 $CORPUS_BUCKET = "$PROJECT_ID-vlegal-corpus"
 $NETWORK = "default"
 $SUBNET = "default"
-$REDIS_HOST = "10.170.0.3"
-$REDIS_PORT = 6379
-$REDIS_CA_SECRET = "vlegal-redis-server-ca"
 $NEO4J_URI = "neo4j+s://your-neo4j-host:7687"
 
 gcloud auth login
@@ -88,8 +85,6 @@ gcloud services enable `
   storage.googleapis.com `
   compute.googleapis.com `
   sqladmin.googleapis.com `
-  redis.googleapis.com `
-  pubsub.googleapis.com `
   servicenetworking.googleapis.com
 
 gcloud artifacts repositories create $AR_REPO `
@@ -103,15 +98,6 @@ gcloud iam service-accounts create $RUN_SA_NAME `
 gcloud projects add-iam-policy-binding $PROJECT_ID `
   --member="serviceAccount:$RUN_SA" `
   --role="roles/secretmanager.secretAccessor"
-
-gcloud projects add-iam-policy-binding $PROJECT_ID `
-  --member="serviceAccount:$RUN_SA" `
-  --role="roles/redis.dbConnectionUser"
-
-# Celery dùng Pub/Sub làm broker vì Redis Cluster không phải Celery transport.
-gcloud projects add-iam-policy-binding $PROJECT_ID `
-  --member="serviceAccount:$RUN_SA" `
-  --role="roles/pubsub.editor"
 
 gcloud storage buckets create "gs://$MODEL_BUCKET" `
   --location=$REGION `
@@ -150,35 +136,17 @@ Chuẩn bị các endpoint trước khi deploy:
 
 ```text
 DATABASE_URL=postgresql+asyncpg://vlegal:<password>@<cloud-sql-private-ip>:5432/vlegal
-REDIS_URL=rediss://10.170.0.3:6379/0
-REDIS_CLUSTER_MODE=true
-REDIS_IAM_AUTH=true
-REDIS_CA_CERTS=/var/run/secrets/redis/server-ca.pem
 NEO4J_URI=neo4j+s://<neo4j-host>:7687
 ```
 
-Redis này là Memorystore for Redis Cluster qua PSC, bật IAM Auth và TLS. API và
-worker dùng Redis Cluster client cho rate limit/cache/lock. Celery dùng Google
-Pub/Sub làm broker vì Redis Cluster chỉ hỗ trợ database `0` và Celery không có
-Redis Cluster transport.
-
-Upload CA đã tải từ Memorystore vào Secret Manager. File `server-ca.pem` bị bỏ
-qua bởi Git và Docker build; Cloud Run mount certificate thành file lúc chạy:
-
-```powershell
-gcloud secrets create $REDIS_CA_SECRET `
-  --replication-policy=automatic `
-  --data-file=server-ca.pem
-
-# Nếu secret đã tồn tại, chỉ thêm version mới:
-gcloud secrets versions add $REDIS_CA_SECRET --data-file=server-ca.pem
-```
+PostgreSQL là nguồn runtime duy nhất cho dữ liệu ứng dụng, rate limit, advisory
+lock và Celery SQLAlchemy transport/result backend. Tất cả service và Worker Pool
+phải được cấp quyền kết nối cùng Cloud SQL instance.
 
 Tạo các secret dưới đây trong Secret Manager và thêm ít nhất một version:
 
 ```text
 vlegal-database-url
-vlegal-redis-server-ca
 vlegal-neo4j-password
 vlegal-session-secret
 vlegal-message-key
@@ -277,7 +245,6 @@ filesystem tạm của job; dữ liệu lâu dài được ghi vào Cloud SQL/pg
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
   -ModelBucket $MODEL_BUCKET -EmbeddingBucket $EMBEDDING_BUCKET `
   -Network $NETWORK -Subnet $SUBNET `
-  -RedisHost $REDIS_HOST -RedisPort $REDIS_PORT -RedisCaSecret $REDIS_CA_SECRET `
   -Neo4jUri $NEO4J_URI -Component api
 ```
 
@@ -303,7 +270,6 @@ của API. Không có bước cấu hình domain.
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
   -ModelBucket $MODEL_BUCKET -EmbeddingBucket $EMBEDDING_BUCKET `
   -Network $NETWORK -Subnet $SUBNET `
-  -RedisHost $REDIS_HOST -RedisPort $REDIS_PORT -RedisCaSecret $REDIS_CA_SECRET `
   -Neo4jUri $NEO4J_URI -Component worker
 ```
 
@@ -330,7 +296,6 @@ Sau khi dữ liệu, bucket và secrets đã sẵn sàng:
   -RunServiceAccount $RUN_SA -ModelBucket $MODEL_BUCKET `
   -EmbeddingBucket $EMBEDDING_BUCKET -CorpusBucket $CORPUS_BUCKET `
   -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
-  -RedisHost $REDIS_HOST -RedisPort $REDIS_PORT -RedisCaSecret $REDIS_CA_SECRET `
   -Component all -ExecuteJobs
 ```
 
@@ -380,7 +345,7 @@ docker build -f docker/reindex.Dockerfile -t vlegal-reindex:local .
 Khởi động hạ tầng local trước:
 
 ```powershell
-docker compose up -d postgres redis neo4j
+docker compose up -d postgres neo4j
 ```
 
 Chạy từng service/job độc lập qua Compose:

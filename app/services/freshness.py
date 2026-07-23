@@ -9,7 +9,6 @@ from typing import Any
 from sqlalchemy import or_, select, text as sql_text
 
 from app.core.config import Settings
-from app.core.redis_client import create_async_redis
 from app.db import SessionFactory
 from app.models import LegalDocument
 from app.schemas import VerificationItem, VerificationReport
@@ -61,11 +60,7 @@ class LegalFreshnessService:
         self.ai = ai
         self.tavily = tavily
         self.indexer = indexer
-        self.redis = create_async_redis(settings)
         self.semaphore = asyncio.Semaphore(settings.legal_verification_concurrency)
-
-    async def close(self) -> None:
-        await self.redis.aclose()
 
     async def verify_sources(self, sources: list[dict[str, Any]]) -> tuple[VerificationReport, bool]:
         identities: list[tuple[str, str, str | None]] = []
@@ -123,32 +118,37 @@ class LegalFreshnessService:
                     return self._item(document, False), False
 
             lock_key = f"vlegal:freshness:{code}"
-            lock_token = f"{datetime.now(UTC).timestamp()}"
-            acquired = False
-            try:
-                acquired = bool(
-                    await self.redis.set(lock_key, lock_token, ex=self.settings.freshness_lock_ttl_seconds, nx=True)
-                )
-            except Exception:
-                acquired = True
-            if not acquired:
-                for _ in range(20):
-                    await asyncio.sleep(0.25)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self.settings.freshness_lock_wait_seconds
+            async with SessionFactory() as lock_db:
+                acquired = False
+                while not acquired:
+                    acquired = bool(
+                        await lock_db.scalar(
+                            sql_text("SELECT pg_try_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                            {"lock_key": lock_key},
+                        )
+                    )
+                    if acquired:
+                        break
                     async with SessionFactory() as db:
                         cached = await db.scalar(select(LegalDocument).where(LegalDocument.code == code))
                         if cached and cached.verified_at and cached.verified_at >= cutoff:
                             return self._item(cached, False), False
+                    if loop.time() >= deadline:
+                        raise FreshnessUnavailable(f"Quá thời gian chờ khóa kiểm tra hiệu lực cho {code}")
+                    await asyncio.sleep(0.5)
 
-            try:
-                return await self._search_verify_and_update(code, title, external_doc_id)
-            finally:
-                if acquired:
-                    try:
-                        current = await self.redis.get(lock_key)
-                        if current == lock_token:
-                            await self.redis.delete(lock_key)
-                    except Exception:
-                        pass
+                try:
+                    # Recheck after acquiring the lock because another replica
+                    # may have refreshed this document while we were waiting.
+                    async with SessionFactory() as db:
+                        cached = await db.scalar(select(LegalDocument).where(LegalDocument.code == code))
+                        if cached and cached.verified_at and cached.verified_at >= cutoff:
+                            return self._item(cached, False), False
+                    return await self._search_verify_and_update(code, title, external_doc_id)
+                finally:
+                    await lock_db.rollback()
 
     async def _search_verify_and_update(
         self, code: str, title: str, external_doc_id: str | None
@@ -199,7 +199,6 @@ source_url phải là URL chính thức trực tiếp tốt nhất. Không suy �
         changed = False
 
         async with SessionFactory() as db:
-            await db.execute(sql_text("SELECT pg_advisory_xact_lock(hashtext(:code))"), {"code": code})
             conditions = [LegalDocument.code == code]
             if external_doc_id:
                 conditions.append(LegalDocument.external_doc_id == external_doc_id)

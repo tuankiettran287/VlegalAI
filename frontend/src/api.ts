@@ -110,6 +110,9 @@ export type ChatResponse = {
   sources: Source[];
   verification: VerificationReport;
   temporary: boolean;
+  cache_hit: boolean;
+  cache_similarity: number | null;
+  cache_mode: "miss" | "exact" | "semantic_draft";
 };
 
 export function askLegalQuestion(

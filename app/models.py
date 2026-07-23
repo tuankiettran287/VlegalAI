@@ -4,7 +4,20 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -63,6 +76,9 @@ class Conversation(TimestampMixin, Base):
     messages: Mapped[list[ChatMessage]] = relationship(
         back_populates="conversation", cascade="all, delete-orphan", order_by="ChatMessage.created_at"
     )
+    summary: Mapped[ConversationSummary | None] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class ChatMessage(Base):
@@ -81,6 +97,91 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
+
+class ConversationSummary(TimestampMixin, Base):
+    __tablename__ = "conversation_summary"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            name="uq_conversation_summary_conversation",
+        ),
+        CheckConstraint(
+            "source_message_count > 0",
+            name="ck_conversation_summary_message_count",
+        ),
+        Index(
+            "ix_conversation_summary_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"m": 16, "ef_construction": 64},
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversation.id", ondelete="CASCADE"))
+    summary_ciphertext: Mapped[str] = mapped_column(Text)
+    summary_hash: Mapped[str] = mapped_column(String(64), index=True)
+    source_message_count: Mapped[int] = mapped_column(Integer)
+    embedding_model: Mapped[str] = mapped_column(String(255))
+    embedding_revision: Mapped[str] = mapped_column(String(255))
+    embedding: Mapped[list[float]] = mapped_column(Vector(1024))
+
+    conversation: Mapped[Conversation] = relationship(back_populates="summary")
+
+
+class LegalAnswerCache(TimestampMixin, Base):
+    __tablename__ = "legal_answer_cache"
+    __table_args__ = (
+        CheckConstraint("hit_count >= 0", name="ck_legal_answer_cache_hit_count"),
+        Index("ix_legal_answer_cache_expires_at", "expires_at"),
+        Index(
+            "ix_legal_answer_cache_embedding_hnsw",
+            "query_embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"query_embedding": "vector_cosine_ops"},
+            postgresql_with={"m": 16, "ef_construction": 64},
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    query_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    query_ciphertext: Mapped[str] = mapped_column(Text)
+    answer_ciphertext: Mapped[str] = mapped_column(Text)
+    answer_hash: Mapped[str] = mapped_column(String(64), index=True)
+    query_embedding: Mapped[list[float]] = mapped_column(Vector(1024))
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    verification: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    law_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    model_name: Mapped[str] = mapped_column(String(255))
+    prompt_version: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    hit_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    last_hit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GuestRateLimit(Base):
+    __tablename__ = "guest_rate_limit"
+    __table_args__ = (
+        CheckConstraint(
+            "window_kind IN ('MINUTE', 'HOUR')",
+            name="ck_guest_rate_limit_window_kind",
+        ),
+        CheckConstraint(
+            "request_count > 0",
+            name="ck_guest_rate_limit_request_count",
+        ),
+        Index("ix_guest_rate_limit_window_start", "window_start"),
+    )
+
+    subject_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_kind: Mapped[str] = mapped_column(String(8), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    request_count: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class LegalDocument(TimestampMixin, Base):

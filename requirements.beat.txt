@@ -1,1 +1,2 @@
-celery[redis,gcpubsub]>=5.5,<6
+celery[sqlalchemy]>=5.5,<6
+psycopg[binary]>=3.2.3

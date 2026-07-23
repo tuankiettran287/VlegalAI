@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import delete, func
+from sqlalchemy.dialects.postgresql import insert
 
 from app.core.config import Settings
-from app.core.redis_client import create_async_redis
+from app.db import SessionFactory
+from app.models import GuestRateLimit
 
 
 class GuestRateLimitExceeded(RuntimeError):
@@ -16,37 +20,59 @@ class GuestRateLimitUnavailable(RuntimeError):
 
 
 class GuestRateLimiter:
-    """Distributed fixed-window limiter for anonymous AI requests."""
+    """PostgreSQL-backed fixed-window limiter for anonymous AI requests."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.redis = create_async_redis(settings)
-
-    async def close(self) -> None:
-        await self.redis.aclose()
 
     async def check(self, subject: str) -> None:
         now = datetime.now(UTC)
-        # The hash tag keeps both counters in one Redis Cluster slot. Hashing
-        # also prevents braces in an untrusted subject from changing the slot.
-        subject_slot = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:32]
-        minute_key = f"guest-chat:{{{subject_slot}}}:minute:{now:%Y%m%d%H%M}"
-        hour_key = f"guest-chat:{{{subject_slot}}}:hour:{now:%Y%m%d%H}"
+        subject_hash = hashlib.sha256(subject.encode("utf-8")).hexdigest()
+        minute_start = now.replace(second=0, microsecond=0)
+        hour_start = minute_start.replace(minute=0)
+        counts: dict[str, int] = {}
         try:
-            async with self.redis.pipeline(transaction=not self.settings.redis_cluster_mode) as pipeline:
-                pipeline.incr(minute_key)
-                pipeline.expire(minute_key, 90)
-                pipeline.incr(hour_key)
-                pipeline.expire(hour_key, 3700)
-                minute_count, _, hour_count, _ = await pipeline.execute()
+            async with SessionFactory() as db:
+                for window_kind, window_start in (
+                    ("MINUTE", minute_start),
+                    ("HOUR", hour_start),
+                ):
+                    statement = (
+                        insert(GuestRateLimit)
+                        .values(
+                            subject_hash=subject_hash,
+                            window_kind=window_kind,
+                            window_start=window_start,
+                            request_count=1,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=[
+                                GuestRateLimit.subject_hash,
+                                GuestRateLimit.window_kind,
+                                GuestRateLimit.window_start,
+                            ],
+                            set_={
+                                "request_count": GuestRateLimit.request_count + 1,
+                                "updated_at": func.now(),
+                            },
+                        )
+                        .returning(GuestRateLimit.request_count)
+                    )
+                    counts[window_kind] = int(await db.scalar(statement))
+                await db.execute(
+                    delete(GuestRateLimit).where(
+                        GuestRateLimit.window_start < hour_start - timedelta(hours=1),
+                    )
+                )
+                await db.commit()
         except Exception as exc:
             raise GuestRateLimitUnavailable(
                 "Không thể xác minh hạn mức chat tạm thời; vui lòng đăng nhập Google hoặc thử lại sau"
             ) from exc
 
-        if int(minute_count) > self.settings.guest_chat_requests_per_minute:
+        if counts["MINUTE"] > self.settings.guest_chat_requests_per_minute:
             raise GuestRateLimitExceeded("Bạn gửi câu hỏi quá nhanh; vui lòng chờ một phút rồi thử lại")
-        if int(hour_count) > self.settings.guest_chat_requests_per_hour:
+        if counts["HOUR"] > self.settings.guest_chat_requests_per_hour:
             raise GuestRateLimitExceeded(
                 "Phiên khách đã đạt hạn mức theo giờ; đăng nhập Google để tiếp tục và lưu lịch sử"
             )

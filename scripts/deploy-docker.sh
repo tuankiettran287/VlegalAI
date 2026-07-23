@@ -44,7 +44,7 @@ else
   "${compose[@]}" build --pull model-init migrate reindex api frontend worker beat
 fi
 
-"${compose[@]}" up -d --wait --wait-timeout 300 postgres redis neo4j
+"${compose[@]}" up -d --wait --wait-timeout 300 postgres neo4j
 "${compose[@]}" up --no-deps --abort-on-container-exit --exit-code-from model-init model-init
 "${compose[@]}" run --rm --no-deps migrate
 "${compose[@]}" up -d --wait --wait-timeout 300 --remove-orphans api frontend worker beat caddy

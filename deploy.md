@@ -2,7 +2,7 @@
 
 Production chạy trên một máy Linux/VPS bằng `compose.production.yml`. Caddy nhận
 traffic ở cổng 80/443 và tự cấp HTTPS; chỉ Caddy được public. Frontend, API,
-worker, beat, PostgreSQL/pgvector, Redis và Neo4j giao tiếp trong mạng Docker. Dữ liệu được giữ
+worker, beat, PostgreSQL/pgvector và Neo4j giao tiếp trong mạng Docker. Dữ liệu được giữ
 trong named volumes. Service `model-init` tải checkpoint Qwen từ Hugging Face vào
 volume `qwen_model`; API và worker mount volume này ở chế độ read-only.
 
@@ -12,7 +12,7 @@ volume `qwen_model`; API và worker mount volume này ở chế độ read-only.
 - Domain đã có bản ghi A/AAAA trỏ về IP máy chủ.
 - Firewall mở TCP 80/443 và UDP 443; SSH chỉ mở cho IP quản trị.
 - Đủ RAM/VRAM và dung lượng đĩa cho Qwen3-14B cùng các data store.
-- Không cài PostgreSQL, Redis hoặc Neo4j trực tiếp trên host.
+- Không cài PostgreSQL hoặc Neo4j trực tiếp trên host.
 
 Tạo thư mục triển khai:
 
@@ -32,7 +32,7 @@ cp .env.production.example .env.production
 chmod 600 .env.production
 ```
 
-Tạo secret URL-safe. Mật khẩu PostgreSQL và Redis dùng chuỗi hex để có thể đưa
+Tạo secret URL-safe. Mật khẩu PostgreSQL dùng chuỗi hex để có thể đưa
 thẳng vào connection URL:
 
 ```bash
@@ -45,7 +45,7 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 Điền `.env.production`, tối thiểu:
 
 - `DOMAIN`, `ACME_EMAIL`.
-- `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `NEO4J_PASSWORD`.
+- `POSTGRES_PASSWORD`, `NEO4J_PASSWORD`.
 - `SESSION_SECRET`, `MESSAGE_ENCRYPTION_KEY`.
 - `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `TAVILY_API_KEY`.
 - `QWEN_MODEL_REPO`, `QWEN_MODEL_REVISION`; thêm `HF_TOKEN` nếu repository model

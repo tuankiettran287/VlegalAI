@@ -14,10 +14,12 @@ from app.api import router as api_router
 from app.core.config import get_settings
 from app.services.ai import QwenError, QwenService
 from app.services.articles import ArticleResearchService
+from app.services.conversation_memory import ConversationMemoryService
 from app.services.freshness import LegalFreshnessService
 from app.services.guest_limit import GuestRateLimiter
 from app.services.indexer import LegalIndexer
 from app.services.retrieval import RetrievalService
+from app.services.semantic_cache import SemanticAnswerCacheService
 from app.services.tavily import TavilyError, TavilyService
 
 
@@ -39,11 +41,11 @@ async def lifespan(app: FastAPI):
     app.state.retrieval = retrieval
     app.state.freshness = freshness
     app.state.guest_limiter = guest_limiter
+    app.state.conversation_memory = ConversationMemoryService(settings, ai)
+    app.state.semantic_answer_cache = SemanticAnswerCacheService(settings)
     app.state.article_research = ArticleResearchService(tavily, ai)
     app.state.request_slots = asyncio.Semaphore(max(32, settings.database_pool_size * 4))
     yield
-    await freshness.close()
-    await guest_limiter.close()
     await retrieval.close()
     await ai.close()
 
