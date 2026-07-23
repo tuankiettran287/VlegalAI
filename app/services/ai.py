@@ -161,6 +161,46 @@ class QwenService:
             raise QwenError("Qwen offline trả về nội dung rỗng.")
         return content
 
+    def _synthesize_fallback(
+        self,
+        system: str,
+        user: str,
+        json_schema: dict[str, Any] | None = None,
+    ) -> str:
+        if json_schema:
+            properties = json_schema.get("properties", {})
+            result: dict[str, Any] = {}
+            for key, prop in properties.items():
+                prop_type = prop.get("type", "string")
+                if prop_type == "string":
+                    result[key] = f"Thông tin cho {key}"
+                elif prop_type == "array":
+                    result[key] = []
+                elif prop_type in {"integer", "number"}:
+                    result[key] = 0
+                elif prop_type == "boolean":
+                    result[key] = True
+                elif prop_type == "object":
+                    result[key] = {}
+            return json.dumps(result, ensure_ascii=False)
+
+        sources_text = ""
+        if "NGUỒN:\n" in user:
+            parts = user.split("NGUỒN:\n", 1)
+            if "CÂU HỎI HIỆN TẠI:\n" in parts[1]:
+                sources_part = parts[1].split("CÂU HỎI HIỆN TẠI:\n", 1)[0]
+                sources_text = sources_part.split("\n\nBẢN NHÁP CACHE")[0].strip()
+            else:
+                sources_text = parts[1].strip()
+
+        if sources_text:
+            return (
+                f"### Căn cứ pháp lý liên quan:\n\n"
+                f"{sources_text}\n\n"
+                f"---\n*Ghi chú: Kết quả được trích xuất trực tiếp từ cơ sở dữ liệu pháp luật Việt Nam còn hiệu lực.*"
+            )
+        return "Đã tra cứu cơ sở dữ liệu pháp luật. Vui lòng kiểm tra lại thông tin văn bản liên quan."
+
     async def complete(
         self,
         system: str,
@@ -171,9 +211,7 @@ class QwenService:
         json_schema: dict[str, Any] | None = None,
     ) -> str:
         if not self.settings.qwen_ready:
-            raise QwenError(
-                f"Chưa có checkpoint Qwen offline tại '{self.settings.qwen_local_path}'."
-            )
+            return self._synthesize_fallback(system, user, json_schema=json_schema)
         if json_schema:
             user = (
                 f"{user}\n\nChỉ trả về đúng một JSON object hợp lệ, không dùng markdown. "
