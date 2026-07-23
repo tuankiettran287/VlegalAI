@@ -201,6 +201,50 @@ class QwenService:
             )
         return "Đã tra cứu cơ sở dữ liệu pháp luật. Vui lòng kiểm tra lại thông tin văn bản liên quan."
 
+    async def _call_gemini_api(
+        self,
+        system: str,
+        user: str,
+        api_key: str,
+        model_name: str = "gemini-1.5-flash",
+        json_schema: dict[str, Any] | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 2400,
+    ) -> str:
+        import httpx
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        payload_data: dict[str, Any] = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": f"HƯỚNG DẪN HỆ THỐNG / QUY ĐỊNH BẮT BUỘC:\n{system}\n\nNỘI DUNG / CÂU HỎI:\n{user}"}
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+            },
+        }
+        if json_schema:
+            payload_data["generationConfig"]["responseMimeType"] = "application/json"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, json=payload_data)
+            if resp.status_code == 200:
+                data = resp.json()
+                try:
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            return parts[0].get("text", "").strip()
+                except Exception:
+                    pass
+        return ""
+
     async def complete(
         self,
         system: str,
@@ -210,6 +254,23 @@ class QwenService:
         max_tokens: int = 2400,
         json_schema: dict[str, Any] | None = None,
     ) -> str:
+        api_key = self.settings.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
+        if api_key:
+            try:
+                answer = await self._call_gemini_api(
+                    system,
+                    user,
+                    api_key=api_key,
+                    model_name=self.settings.gemini_model,
+                    json_schema=json_schema,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                if answer:
+                    return answer
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Gemini API call failed, falling back: %s", exc)
+
         if not self.settings.qwen_ready:
             return self._synthesize_fallback(system, user, json_schema=json_schema)
         if json_schema:

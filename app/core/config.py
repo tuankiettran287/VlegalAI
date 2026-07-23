@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=4, ge=1, le=128)
     embedding_max_sequence_length: int = Field(default=2048, ge=128, le=8192)
 
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-1.5-flash"
     tavily_api_key: str = ""
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"
     tavily_timeout_seconds: int = 30
