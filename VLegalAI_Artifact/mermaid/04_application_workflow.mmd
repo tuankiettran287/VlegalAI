@@ -1,0 +1,33 @@
+graph TD
+  START["▶ Open VLegal AI"] --> AUTH{"Google session available?"}
+
+  AUTH -->|No| GUEST["▦ Guest Workspace<br/>temporary chat only"]
+  GUEST --> GSTORE["◫ Keep completed messages<br/>in browser sessionStorage"]
+  GSTORE --> GCHAT["⚖ Ask a legal question<br/>send recent browser history"]
+  GCHAT --> GLIMIT["⏱ Distributed guest rate limit<br/>hashed guest + IP window"]
+  GLIMIT --> LEGALFLOW["⌕ HybridRAG + freshness check"]
+  LEGALFLOW --> GRESPONSE["✓ Temporary grounded answer<br/>no conversation rows written"]
+
+  AUTH -->|Yes| OIDC["G Google OIDC<br/>Authorization Code + PKCE"]
+  OIDC --> ACCOUNT["◆ Upsert user + SSO identity<br/>issue HttpOnly session cookie"]
+  ACCOUNT --> HUB{"Choose a workspace"}
+
+  HUB -->|Legal research| ACHAT["⚖ Saved Chat"]
+  ACHAT --> HISTORY["◫ Load encrypted history<br/>summary + recent messages"]
+  HISTORY --> LEGALFLOW
+  LEGALFLOW --> PERSIST["✓ Encrypt and persist answer<br/>refresh long-term summary"]
+
+  HUB -->|Contracts| CONTRACT["▦ Draft · Review · Compare"]
+  CONTRACT --> LEGALFLOW
+  CONTRACT --> ARTIFACT["◆ Save encrypted artifact"]
+
+  HUB -->|Articles| ARTICLE["⌕ Web research + Qwen synthesis"]
+  ARTICLE --> ASAVE{"Reviewer / Admin saves?"}
+  ASAVE -->|Yes| ARTICLEDB["◆ Save article and web sources"]
+  ASAVE -->|No| APREVIEW["✓ Return research preview"]
+
+  HUB -->|Signature preparation| SIGN["✦ Prepare signing packet"]
+  SIGN --> SIGNDB["◆ Encrypt document<br/>save signers + audit log"]
+
+  HUB -->|History and documents| CRUD["⇄ List · Read · Update · Delete<br/>owned conversations and artifacts"]
+

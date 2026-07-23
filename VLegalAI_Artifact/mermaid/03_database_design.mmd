@@ -1,0 +1,47 @@
+graph TD
+  API["⚖ FastAPI / SQLAlchemy"]
+  WORKER["⚙ Celery Worker + Beat"]
+  BROWSER["▦ Browser sessionStorage<br/>guest messages only"]
+
+  subgraph POSTGRES["PostgreSQL 16 + pgvector — System of Record"]
+    IDENTITY["◆ Identity<br/>app_user · sso_identity"]
+    CHAT["◫ Chat and Memory<br/>conversation · chat_message<br/>conversation_summary vector(1024)"]
+    LEGAL["⚖ Legal Registry<br/>legal_document · legal_chunk"]
+    RETRIEVAL["⌕ Retrieval Projection<br/>graphrag_chunk<br/>HNSW cosine · GIN text search"]
+    PRODUCTS["▦ Product Content<br/>artifact · article<br/>signature_packet · user_feedback"]
+    RUNTIME["◷ Runtime Coordination<br/>guest_rate_limit · advisory locks<br/>Celery broker/result tables"]
+    CACHE["↻ Semantic Answer Cache<br/>legal_answer_cache vector(1024)"]
+  end
+
+  subgraph GRAPH["Neo4j 5.26 — Graph Projection"]
+    GNODE["⊕ LegalNode<br/>unique node_id"]
+    GCHUNK["◫ LegalChunk<br/>unique chunk_id"]
+    GRELS["⇄ Relationships<br/>CHUNK_OF · BELONGS_TO<br/>CITES · GUIDES · AMENDS · REPLACES<br/>semantic / process / risk relations"]
+    GCHUNK -->|CHUNK_OF| GNODE
+    GNODE --> GRELS
+  end
+
+  subgraph BUILD["Build Artifacts — Not the Production System of Record"]
+    SQLITE[("≡ legal_graphrag.sqlite<br/>docs · nodes · edges · chunks · FTS5")]
+    JSONL["≡ documents / nodes / edges / chunks JSONL"]
+  end
+
+  API --> IDENTITY
+  API --> CHAT
+  API --> LEGAL
+  API --> RETRIEVAL
+  API --> PRODUCTS
+  API --> RUNTIME
+  API --> CACHE
+  API --> GRAPH
+  WORKER --> RUNTIME
+  WORKER --> LEGAL
+  WORKER --> RETRIEVAL
+  WORKER --> GRAPH
+  SQLITE --> RETRIEVAL
+  SQLITE --> GRAPH
+  SQLITE --> JSONL
+
+  CHAT -->|"AES-256-GCM fields"| PROTECT["✓ Application-layer Protection<br/>encrypted messages · summaries · artifacts<br/>signature documents · feedback · cache text"]
+  RETRIEVAL -->|"chunk_id · node_id · doc_id"| GRAPH
+  BROWSER -.->|"history sent per request; not persisted"| API

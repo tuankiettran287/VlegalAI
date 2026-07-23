@@ -1,0 +1,42 @@
+graph TD
+  REQUEST["▶ POST /api/chat"] --> IDENTITY{"Authenticated session?"}
+
+  IDENTITY -->|No| GUEST["◷ Validate guest token<br/>increment minute + hour counters"]
+  GUEST --> GHISTORY["▦ Accept temporary browser history"]
+
+  IDENTITY -->|Yes| OWNED["◆ Resolve owned conversation<br/>or create a new one"]
+  OWNED --> LOADMEM["◫ Decrypt summary + last 12 messages"]
+  LOADMEM --> SAVEUSER["✓ Encrypt and commit USER message"]
+
+  GHISTORY --> CACHEGATE{"Public context-free legal query?"}
+  SAVEUSER --> CACHEGATE
+  CACHEGATE -->|Yes| CACHELOOKUP["⌁ Exact hash lookup<br/>then pgvector semantic lookup ≥ 0.96"]
+  CACHEGATE -->|No| RETRIEVE["⌕ RetrievalService"]
+  CACHELOOKUP -->|"valid exact hit"| RECHECK["⚖ Recheck law status + fingerprint"]
+  CACHELOOKUP -->|"semantic hit"| DRAFT["◫ Keep cached answer as draft"]
+  CACHELOOKUP -->|Miss| RETRIEVE
+  RECHECK -->|"current + unchanged + exact"| CACHEDANSWER["✓ Return cached answer"]
+  RECHECK -->|"semantic or invalid"| RETRIEVE
+  DRAFT --> RETRIEVE
+
+  RETRIEVE --> HYBRID["⌕ PostgreSQL dense + BM25 + RRF<br/>then Neo4j graph expansion"]
+  HYBRID --> FRESH["⚖ FreshnessService<br/>TTL cache or Tavily + Qwen verdict"]
+  FRESH --> UPDATED{"Index updated?"}
+  UPDATED -->|Yes| RERETRIEVE["↻ Retrieve and verify again"]
+  RERETRIEVE --> FILTER
+  UPDATED -->|No| FILTER["◆ Remove expired / replaced / unknown laws"]
+  FILTER --> CONTEXT["≡ Build grounded prompt<br/>summary · recent history · verification<br/>sources · current question · optional cache draft"]
+  CONTEXT --> QWEN["◉ Local Qwen3-14B generation<br/>citations [S1], [S2], ..."]
+
+  QWEN --> SAVERESP{"Authenticated?"}
+  CACHEDANSWER --> SAVERESP
+  SAVERESP -->|Yes| ASSISTANT["✓ Encrypt assistant message<br/>store sources + verification"]
+  ASSISTANT --> MEMORY["◉ Refresh encrypted rolling summary<br/>and BGE-M3 embedding"]
+  SAVERESP -->|No| TEMP["▦ Mark response temporary"]
+
+  QWEN --> CACHESTORE{"Eligible and all laws current?"}
+  CACHESTORE -->|Yes| UPSERTCACHE["↻ Encrypt and upsert semantic cache<br/>with law fingerprint + TTL"]
+  CACHESTORE -->|No| RESPONSE["✓ ChatResponse"]
+  MEMORY --> RESPONSE
+  TEMP --> RESPONSE
+  UPSERTCACHE --> RESPONSE

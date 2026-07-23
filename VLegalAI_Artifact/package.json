@@ -1,0 +1,17 @@
+{
+  "name": "vlegalai-architecture-kit",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render": "node tools/render_schematic_diagrams.mjs",
+    "render:schematic": "node tools/render_schematic_diagrams.mjs",
+    "render:mermaid": "node tools/render_diagrams.mjs"
+  },
+  "dependencies": {
+    "@iconify-json/logos": "1.2.10",
+    "@iconify-json/lucide": "1.2.78",
+    "@iconify-json/simple-icons": "1.2.71",
+    "@resvg/resvg-js": "2.6.2",
+    "beautiful-mermaid": "1.1.3"
+  }
+}

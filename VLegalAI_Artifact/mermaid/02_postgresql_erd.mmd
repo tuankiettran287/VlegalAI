@@ -1,0 +1,158 @@
+erDiagram
+  APP_USER ||--o{ SSO_IDENTITY : owns
+  APP_USER ||--o{ CONVERSATION : owns
+  CONVERSATION ||--o{ CHAT_MESSAGE : contains
+  CONVERSATION ||--o| CONVERSATION_SUMMARY : has
+  APP_USER ||--o{ ARTIFACT : owns
+  APP_USER o|--o{ ARTICLE : authors
+  APP_USER ||--o{ SIGNATURE_PACKET : prepares
+  APP_USER o|--o{ USER_FEEDBACK : submits
+  LEGAL_DOCUMENT ||--o{ LEGAL_CHUNK : versions
+
+  APP_USER {
+    uuid id PK
+    varchar320 email UK
+    varchar180 display_name
+    varchar32 role
+    boolean is_active
+    timestamptz last_login_at
+  }
+
+  SSO_IDENTITY {
+    uuid id PK
+    uuid user_id FK
+    varchar500 issuer
+    varchar500 subject
+    varchar80 provider
+    jsonb claims
+  }
+
+  CONVERSATION {
+    uuid id PK
+    uuid user_id FK
+    varchar220 title
+    varchar24 status
+    varchar32 retrieval_mode
+    timestamptz updated_at
+  }
+
+  CHAT_MESSAGE {
+    uuid id PK
+    uuid conversation_id FK
+    varchar16 role
+    text content_ciphertext
+    varchar64 content_hash
+    jsonb sources
+    jsonb verification
+    integer token_count
+  }
+
+  CONVERSATION_SUMMARY {
+    uuid id PK
+    uuid conversation_id FK
+    text summary_ciphertext
+    varchar64 summary_hash
+    integer source_message_count
+    varchar255 embedding_model
+    vector1024 embedding
+  }
+
+  LEGAL_DOCUMENT {
+    uuid id PK
+    varchar220 external_doc_id UK
+    varchar120 code
+    text title
+    varchar32 status
+    varchar64 checksum
+    integer version
+    timestamptz verified_at
+    jsonb verification_payload
+  }
+
+  LEGAL_CHUNK {
+    uuid id PK
+    uuid document_id FK
+    varchar255 external_chunk_id UK
+    varchar255 node_id
+    varchar32 chunk_type
+    text citation
+    text text
+    varchar64 text_hash
+    integer ordinal
+    integer version
+  }
+
+  GRAPHRAG_CHUNK {
+    varchar255 chunk_id PK
+    varchar255 doc_id
+    varchar255 node_id
+    varchar32 chunk_type
+    text title
+    text citation
+    text text
+    integer token_count
+    varchar120 law_code
+    integer law_version
+    varchar255 embedding_model
+    vector1024 embedding
+  }
+
+  LEGAL_ANSWER_CACHE {
+    uuid id PK
+    varchar64 query_hash UK
+    text query_ciphertext
+    text answer_ciphertext
+    vector1024 query_embedding
+    jsonb sources
+    jsonb verification
+    varchar64 law_fingerprint
+    timestamptz expires_at
+    bigint hit_count
+  }
+
+  GUEST_RATE_LIMIT {
+    varchar64 subject_hash PK
+    varchar8 window_kind PK
+    timestamptz window_start PK
+    integer request_count
+  }
+
+  ARTIFACT {
+    uuid id PK
+    uuid user_id FK
+    varchar32 kind
+    varchar220 title
+    text content_ciphertext
+    jsonb metadata
+    varchar24 status
+  }
+
+  ARTICLE {
+    uuid id PK
+    uuid author_id FK
+    varchar240 slug UK
+    text title
+    text content
+    varchar24 status
+    jsonb web_sources
+    timestamptz published_at
+  }
+
+  SIGNATURE_PACKET {
+    uuid id PK
+    uuid user_id FK
+    varchar220 title
+    text document_ciphertext
+    varchar64 document_hash
+    jsonb signers
+    jsonb audit_log
+    varchar24 status
+  }
+
+  USER_FEEDBACK {
+    uuid id PK
+    uuid user_id FK
+    text message_ciphertext
+    varchar160 page
+    timestamptz created_at
+  }

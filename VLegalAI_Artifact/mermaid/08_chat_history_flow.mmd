@@ -1,0 +1,39 @@
+graph TD
+  START["▶ User sends a message"] --> MODE{"Google-authenticated?"}
+
+  subgraph GUEST["Guest Memory — Browser Only"]
+    GREAD["▦ Read completed messages<br/>from sessionStorage"]
+    GCOMPACT["⚙ Remove pending/error items<br/>compact on quota failure"]
+    GSEND["⇧ Send message + history array<br/>conversation_id = null"]
+    GRATE["◷ PostgreSQL rate-limit counters<br/>hashed guest ID + IP"]
+    GRESP["⇩ Receive temporary response"]
+    GWRITE["▦ Append response to sessionStorage"]
+    GREAD --> GCOMPACT --> GSEND --> GRATE --> GRESP --> GWRITE
+  end
+
+  subgraph AUTH["Authenticated Memory — PostgreSQL"]
+    CONV["◆ Resolve or create conversation"]
+    SUMMARYREAD["◫ Decrypt conversation_summary"]
+    RECENT["◫ Load and decrypt last 12 messages<br/>prompt uses the latest 8"]
+    USERWRITE["✓ Encrypt USER content<br/>store content_hash · commit"]
+    ANSWER["◉ Retrieve · verify · generate answer"]
+    ASSISTWRITE["✓ Encrypt ASSISTANT content<br/>store sources + verification · commit"]
+    LOCK["◆ PostgreSQL advisory transaction lock<br/>per conversation"]
+    UNSUM["◫ Read messages after source_message_count"]
+    ROLLING["◉ Qwen rolling summary<br/>batches of 12 by default"]
+    EMBED["⌁ BGE-M3 summary embedding<br/>normalized vector(1024)"]
+    UPSERT["✓ Encrypt summary + hash<br/>upsert one row per conversation"]
+
+    CONV --> SUMMARYREAD
+    CONV --> RECENT
+    SUMMARYREAD --> USERWRITE
+    RECENT --> USERWRITE
+    USERWRITE --> ANSWER --> ASSISTWRITE
+    ASSISTWRITE --> LOCK --> UNSUM --> ROLLING --> EMBED --> UPSERT
+    UPSERT -.->|"long-term context on next turn"| SUMMARYREAD
+  end
+
+  MODE -->|No| GREAD
+  MODE -->|Yes| CONV
+  GWRITE --> GNOTE["No conversation, message, or summary rows are written"]
+  ASSISTWRITE --> ANOTE["Full transcript is durable even if summary refresh fails"]

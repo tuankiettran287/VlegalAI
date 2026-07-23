@@ -1,0 +1,54 @@
+graph TD
+  subgraph SOURCES["Write Sources"]
+    GOOGLE["G Google callback"]
+    AUTHCHAT["⚖ Authenticated /api/chat"]
+    GUESTCHAT["▦ Guest /api/chat"]
+    CONTRACT["▦ Contract endpoints"]
+    ARTICLEAPI["⌕ Article endpoints"]
+    SIGNAPI["✦ Signature endpoint"]
+    FEEDBACKAPI["◫ Feedback endpoint"]
+    INDEXER["↻ Freshness indexer / reindex job"]
+    SCHED["◷ Celery Beat + Worker"]
+  end
+
+  subgraph TX["Application Transformations"]
+    UPSERTUSER["◆ Resolve or create identity"]
+    ENCRYPT["✓ AES-256-GCM encrypt<br/>plus SHA-256 integrity hash"]
+    CHATTX["⇄ Chat transactions<br/>user commit → retrieval → assistant commit"]
+    SUMMARY["◉ Rolling Qwen summary<br/>BGE-M3 vector(1024)"]
+    RATELIMIT["◷ Hash guest + IP<br/>atomic window upsert"]
+    LEGALWRITE["⚙ Version · checksum · chunk"]
+    VECTORWRITE["⌁ Embed + vector upsert"]
+    GRAPHWRITE["⊕ MERGE graph nodes / edges"]
+  end
+
+  subgraph PG["PostgreSQL Writes"]
+    AUTHDB[("app_user<br/>sso_identity")]
+    CHATDB[("conversation<br/>chat_message")]
+    MEMORYDB[("conversation_summary")]
+    CACHEDB[("legal_answer_cache")]
+    PRODUCTDB[("artifact · article<br/>signature_packet · user_feedback")]
+    LEGALDB[("legal_document<br/>legal_chunk")]
+    VECTORDB[("graphrag_chunk")]
+    LIMITDB[("guest_rate_limit")]
+    CELERYDB[("Celery broker/result tables")]
+  end
+
+  NEO[("⊕ Neo4j<br/>LegalNode · LegalChunk · relationships")]
+  SESSION["▦ Browser sessionStorage<br/>guest transcript"]
+
+  GOOGLE --> UPSERTUSER --> AUTHDB
+  AUTHCHAT --> CHATTX --> ENCRYPT --> CHATDB
+  CHATTX --> SUMMARY --> ENCRYPT --> MEMORYDB
+  AUTHCHAT -->|"eligible public question"| ENCRYPT --> CACHEDB
+  GUESTCHAT --> RATELIMIT --> LIMITDB
+  GUESTCHAT --> SESSION
+  CONTRACT --> ENCRYPT --> PRODUCTDB
+  ARTICLEAPI -->|"editorial text remains plaintext"| PRODUCTDB
+  SIGNAPI --> ENCRYPT --> PRODUCTDB
+  FEEDBACKAPI --> ENCRYPT --> PRODUCTDB
+  INDEXER --> LEGALWRITE --> LEGALDB
+  LEGALWRITE --> VECTORWRITE --> VECTORDB
+  LEGALWRITE --> GRAPHWRITE --> NEO
+  SCHED --> CELERYDB
+  SCHED --> INDEXER

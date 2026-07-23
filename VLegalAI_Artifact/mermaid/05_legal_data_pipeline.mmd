@@ -1,0 +1,42 @@
+graph TD
+  subgraph BOOTSTRAP["Bootstrap / Reindex Pipeline"]
+    DOCX["▦ Curated DOCX Corpus<br/>Data (1)"]
+    PARSE["⚙ Parse Vietnamese legal hierarchy<br/>document · chapter · section<br/>article · clause · point"]
+    SEMANTIC["⊕ Extract multi-layer graph<br/>structure · terminology · domain<br/>temporal · process · lifecycle<br/>risk · precedent"]
+    CHUNK["◫ Build chunks<br/>document_intro · structure · article<br/>clause · point · sliding · semantic"]
+    EMBED["⌁ BGE-M3 document embeddings<br/>normalized vector(1024)"]
+    STAGE[("≡ SQLite + FTS5<br/>plus JSONL exports")]
+    DOCX --> PARSE --> SEMANTIC --> CHUNK --> EMBED --> STAGE
+  end
+
+  subgraph SYNC["Projection Sync"]
+    PGV[("▣ PostgreSQL graphrag_chunk<br/>upsert chunk + model metadata<br/>HNSW + GIN")]
+    NEO[("⊕ Neo4j<br/>MERGE LegalNode / LegalChunk<br/>MERGE typed relationships")]
+    STAGE --> PGV
+    STAGE --> NEO
+  end
+
+  subgraph INCREMENTAL["Freshness-Driven Incremental Pipeline"]
+    TRIGGER["◷ Query-time check or nightly Celery job"]
+    RETRIEVE["⌕ Retrieve candidate legal sources"]
+    TTL{"verified_at within TTL?"}
+    SEARCH["⌕ Tavily search<br/>official domains only"]
+    VERDICT["◉ Qwen3 status verdict<br/>in force · amended · expired · replaced"]
+    CHANGE{"New or changed source?"}
+    DOWNLOAD["⇩ Download official PDF / DOCX / HTML<br/>fallback to Tavily raw content"]
+    CLEAN["⚙ Clean text · checksum · version"]
+    SPLIT["◫ Split by Article / Clause<br/>or overlapping windows"]
+    APPDB[("▣ legal_document + legal_chunk")]
+    REEMBED["⌁ BGE-M3 embed + upsert<br/>graphrag_chunk"]
+    GRAPHMERGE["⊕ MERGE graph projection<br/>BELONGS_TO · CHUNK_OF · REPLACES"]
+    RERUN["↻ Invalidate retriever handle<br/>retrieve and verify again"]
+
+    TRIGGER --> RETRIEVE --> TTL
+    TTL -->|Yes| DONE["✓ Reuse verified metadata"]
+    TTL -->|No| SEARCH --> VERDICT --> CHANGE
+    CHANGE -->|No content change| META["◆ Update status · source URL<br/>verified_at · evidence JSON"]
+    CHANGE -->|Changed / replacement| DOWNLOAD --> CLEAN --> SPLIT --> APPDB
+    APPDB --> REEMBED --> PGV
+    APPDB --> GRAPHMERGE --> NEO
+    GRAPHMERGE --> RERUN
+  end

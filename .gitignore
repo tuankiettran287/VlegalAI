@@ -1,6 +1,6 @@
 # Environment variables and local secrets
 
-.env.*
+
 !.env.example
 !.env.production.example
 env.json

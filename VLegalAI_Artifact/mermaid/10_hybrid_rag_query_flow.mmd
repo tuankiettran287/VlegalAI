@@ -1,0 +1,38 @@
+graph TD
+  QUERY["▶ Legal question"] --> NORMALIZE["⚙ Normalize whitespace<br/>extract lexical terms"]
+  NORMALIZE --> EMBED["⌁ BGE-M3 query embedding<br/>normalized vector(1024)"]
+
+  subgraph POSTGRES["Stage 1 — PostgreSQL Candidate Retrieval"]
+    DENSE["⌕ Dense ranking<br/>HNSW cosine distance<br/>candidate_limit = max(64, top_k × 8)"]
+    LEX["≡ Lexical ranking<br/>GIN-filtered simple tsquery<br/>Okapi BM25 k1=1.5 · b=0.75"]
+    RRF["⇄ Weighted Reciprocal Rank Fusion<br/>dense 0.55 · BM25 0.45 · k=60"]
+    HEURISTIC["◆ score_chunk_payload<br/>rank decay · term coverage<br/>negation / article boosts"]
+    EMBED --> DENSE
+    NORMALIZE --> LEX
+    DENSE --> RRF
+    LEX --> RRF
+    RRF --> HEURISTIC
+  end
+
+  HEURISTIC --> SEEDS["◫ PostgreSQL candidate chunks<br/>seed score by node_id"]
+
+  subgraph GRAPH["Stage 2 — Neo4j Graph Expansion"]
+    ANCESTOR["⊕ Ancestors<br/>BELONGS_TO depth 1..4<br/>depth-decayed weights"]
+    OUTGOING["⇢ Outgoing relations<br/>CITES · GUIDES · AMENDS · REPLACES<br/>semantic · process · risk · precedent"]
+    INCOMING["⇠ Reverse expansion<br/>GUIDES · AMENDS · REPLACES"]
+    FETCH["◫ Fetch :LegalChunk through CHUNK_OF<br/>prefer article · clause · point"]
+    SEEDS --> ANCESTOR
+    SEEDS --> OUTGOING
+    SEEDS --> INCOMING
+    ANCESTOR --> FETCH
+    OUTGOING --> FETCH
+    INCOMING --> FETCH
+  end
+
+  FETCH --> MERGE["⇄ Merge by chunk_id<br/>keep maximum score · add article boost 0.08<br/>preserve reasons"]
+  SEEDS --> MERGE
+  MERGE --> TOPK["✓ Sort descending · select top_k<br/>assign source IDs S1..Sn"]
+  TOPK --> SERIALIZE["≡ Serialize citation · text · doc_id<br/>node_id · source_url · score"]
+  SERIALIZE --> FRESH["⚖ Mandatory freshness verification<br/>filter expired / replaced / unknown laws"]
+  FRESH --> CONTEXT["◉ Grounded context for Qwen3"]
+

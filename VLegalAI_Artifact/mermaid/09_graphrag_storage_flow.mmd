@@ -1,0 +1,44 @@
+graph TD
+  SOURCE["▦ Legal source text<br/>bootstrap DOCX or verified official document"] --> PARSER["⚙ Structure and semantic parser"]
+
+  PARSER --> DOC["◆ Document metadata<br/>doc_id · code · title · version"]
+  PARSER --> NODES["⊕ Legal nodes<br/>document · chapter · section · article<br/>clause · point · semantic entities"]
+  PARSER --> EDGES["⇄ Typed edges<br/>BELONGS_TO · CITES · GUIDES<br/>AMENDS · REPLACES + domain relations"]
+  PARSER --> CHUNKS["◫ Retrieval chunks<br/>chunk_id · node_id · doc_id · citation · text"]
+  CHUNKS --> EMBED["⌁ BGE-M3 vector(1024)<br/>title + path_label + text"]
+
+  subgraph STAGING["Bootstrap Staging"]
+    SQLITE[("≡ SQLite<br/>docs · nodes · edges · chunks · FTS5")]
+    JSONL["≡ JSONL Exports<br/>documents · nodes · edges · chunks"]
+  end
+
+  DOC --> SQLITE
+  NODES --> SQLITE
+  EDGES --> SQLITE
+  EMBED --> SQLITE
+  SQLITE --> JSONL
+
+  subgraph POSTGRES["PostgreSQL / pgvector"]
+    REGISTRY[("legal_document<br/>status · checksum · verified_at · version")]
+    VERSIONED[("legal_chunk<br/>versioned application chunks")]
+    PROJECTION[("graphrag_chunk<br/>retrieval payload + vector(1024)<br/>HNSW cosine + GIN lexical index")]
+    REGISTRY -->|document_id FK| VERSIONED
+  end
+
+  subgraph NEO4J["Neo4j Graph Projection"]
+    LEGALNODE[("⊕ :LegalNode<br/>unique node_id")]
+    LEGALCHUNK[("◫ :LegalChunk<br/>unique chunk_id")]
+    RELS["⇄ Dynamic typed relationships<br/>edge_id + evidence"]
+    LEGALCHUNK -->|CHUNK_OF| LEGALNODE
+    LEGALNODE --> RELS
+  end
+
+  DOC --> REGISTRY
+  CHUNKS --> VERSIONED
+  EMBED --> PROJECTION
+  SQLITE -->|"bulk sync"| PROJECTION
+  SQLITE -->|"bulk sync"| NEO4J
+  VERSIONED -.->|"external_chunk_id = chunk_id"| PROJECTION
+  PROJECTION -.->|"node_id / chunk_id / doc_id"| NEO4J
+  EDGES --> RELS
+

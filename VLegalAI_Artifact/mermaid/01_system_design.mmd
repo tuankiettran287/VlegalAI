@@ -1,0 +1,65 @@
+graph TD
+  subgraph CLIENT["Client and Edge"]
+    USER["▶ Citizen / Legal Professional"]
+    BROWSER["▦ React + TypeScript SPA<br/>guest sessionStorage"]
+    CADDY["☁ Caddy Edge<br/>TLS · security headers · routing"]
+    USER --> BROWSER --> CADDY
+  end
+
+  subgraph APP["Application Runtime"]
+    FRONTEND["▦ Frontend Container<br/>static SPA + API proxy"]
+    API["⚖ FastAPI Service<br/>auth · chat · contracts · CRUD"]
+    WORKER["⚙ Celery Worker<br/>legal corpus verification"]
+    BEAT["◷ Celery Beat<br/>24-hour schedule"]
+    REINDEX["↻ Reindex Job<br/>bootstrap GraphRAG"]
+    MIGRATE["◆ Alembic Migrate Job"]
+    CADDY --> FRONTEND
+    CADDY -->|/api/*| API
+    FRONTEND --> API
+    BEAT --> WORKER
+  end
+
+  subgraph LOCAL_AI["Local AI Runtime"]
+    QWEN["◉ Qwen3-14B<br/>generation · classification · summaries"]
+    BGE["⌁ BGE-M3<br/>normalized 1024-d embeddings"]
+    MODELINIT["⇩ Model Init Job<br/>downloads pinned checkpoints"]
+    MODELVOL["▣ Read-only Model Volumes"]
+    MODELINIT --> MODELVOL
+    MODELVOL --> QWEN
+    MODELVOL --> BGE
+  end
+
+  subgraph DATA["Durable Data Layer"]
+    PG[("▣ PostgreSQL 16 + pgvector<br/>system of record · vectors · Celery")]
+    NEO[("⊕ Neo4j 5.26<br/>legal graph projection")]
+    STAGING[("≡ SQLite + JSONL<br/>build artifact / local fallback")]
+    VOLUMES["▣ Docker Volumes<br/>Postgres · Neo4j · legal storage"]
+    PG --> VOLUMES
+    NEO --> VOLUMES
+    STAGING --> VOLUMES
+  end
+
+  subgraph EXTERNAL["Controlled External Services"]
+    GOOGLE["G Google OIDC<br/>Authorization Code + PKCE"]
+    TAVILY["⌕ Tavily Search<br/>official-domain freshness evidence"]
+    OFFICIAL["⚖ Official Legal Sources<br/>PDF · DOCX · HTML"]
+    HF["☁ Hugging Face<br/>model download during init only"]
+  end
+
+  API --> QWEN
+  API --> BGE
+  API --> PG
+  API --> NEO
+  API --> GOOGLE
+  API --> TAVILY
+  TAVILY --> OFFICIAL
+  WORKER --> QWEN
+  WORKER --> PG
+  WORKER --> NEO
+  WORKER --> TAVILY
+  REINDEX --> BGE
+  REINDEX --> STAGING
+  STAGING --> PG
+  STAGING --> NEO
+  MIGRATE --> PG
+  MODELINIT --> HF

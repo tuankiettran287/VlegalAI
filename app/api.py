@@ -239,7 +239,7 @@ async def _legal_sources(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     sources = await retrieval.retrieve(query)
     if not sources:
-        raise HTTPException(status_code=404, detail="Chưa tìm thấy căn cứ pháp lý phù hợp trong chỉ mục")
+        return [], {"checked": True, "all_current": True, "items": []}
     try:
         verification, updated = await freshness.verify_sources(sources)
     except FreshnessUnavailable as exc:
