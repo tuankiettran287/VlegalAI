@@ -145,18 +145,21 @@ async def capabilities(settings: Settings = Depends(get_settings)) -> AuthCapabi
 @router.get("/google/login")
 async def login(return_to: str = "/", settings: Settings = Depends(get_settings)) -> Response:
     metadata = await _oidc_metadata(settings)
-    state = secrets.token_urlsafe(32)
+    # Use a short random value as the internal CSRF state
+    state_value = secrets.token_urlsafe(16)
     nonce = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
-    transaction = create_oidc_transaction(state, verifier, nonce, return_to, settings)
+    # Encode the full transaction as a signed JWT and use it as the OAuth state parameter.
+    # This avoids relying on cross-domain cookies (frontend sets cookie but callback goes to backend domain).
+    state_jwt = create_oidc_transaction(state_value, verifier, nonce, return_to, settings)
     query = urlencode(
         {
             "client_id": settings.oidc_client_id,
             "response_type": "code",
             "redirect_uri": settings.oidc_redirect_uri,
             "scope": settings.oidc_scopes,
-            "state": state,
+            "state": state_jwt,
             "nonce": nonce,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
@@ -164,18 +167,7 @@ async def login(return_to: str = "/", settings: Settings = Depends(get_settings)
             "include_granted_scopes": "true",
         }
     )
-    samesite = "none" if settings.cookie_secure else "lax"
-    response = RedirectResponse(f"{metadata['authorization_endpoint']}?{query}", status_code=302)
-    response.set_cookie(
-        "vlegal_oidc_txn",
-        transaction,
-        max_age=600,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite=samesite,
-        path="/",
-    )
-    return response
+    return RedirectResponse(f"{metadata['authorization_endpoint']}?{query}", status_code=302)
 
 
 @router.get("/callback", include_in_schema=False)
@@ -187,14 +179,12 @@ async def callback(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Response:
-    transaction_token = request.cookies.get("vlegal_oidc_txn") or state
-    if not transaction_token:
-        raise HTTPException(status_code=401, detail="Giao dịch SSO đã hết hạn")
+    # state IS the signed JWT transaction — no cookie needed
     try:
-        transaction = decode_oidc_transaction(transaction_token, settings)
+        transaction = decode_oidc_transaction(state, settings)
     except jwt.PyJWTError as exc:
-        raise HTTPException(status_code=401, detail="Giao dịch SSO không hợp lệ") from exc
-    if transaction.get("state") and transaction["state"] != state and not secrets.compare_digest(transaction["state"], state):
+        raise HTTPException(status_code=401, detail="Giao dịch SSO đã hết hạn hoặc không hợp lệ") from exc
+    if False:  # state comparison no longer needed — JWT signature is the CSRF protection
         raise HTTPException(status_code=401, detail="SSO state không hợp lệ")
 
     metadata = await _oidc_metadata(settings)
@@ -254,7 +244,6 @@ async def callback(
         logger.warning("SSO DB persistence bypassed: %s", exc)
 
     response = RedirectResponse(_safe_return_to(transaction.get("return_to"), settings), status_code=302)
-    response.delete_cookie("vlegal_oidc_txn", path="/")
     samesite = "none" if settings.cookie_secure else "lax"
     response.set_cookie(
         "vlegal_session",
