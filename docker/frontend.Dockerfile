@@ -4,7 +4,7 @@ FROM node:22-alpine AS builder
 
 WORKDIR /src/frontend
 COPY frontend/package*.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci
+RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
