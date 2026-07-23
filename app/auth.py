@@ -243,11 +243,23 @@ async def callback(
     except Exception as exc:
         logger.warning("SSO DB persistence bypassed: %s", exc)
 
-    response = RedirectResponse(_safe_return_to(transaction.get("return_to"), settings), status_code=302)
+    session_token = create_session_token(user_id, settings)
+    target = _safe_return_to(transaction.get("return_to"), settings)
+    session_url = f"{settings.frontend_url.rstrip('/')}/api/auth/session_callback?token={session_token}&return_to={target}"
+    return RedirectResponse(session_url, status_code=302)
+
+
+@router.get("/session_callback", include_in_schema=False)
+async def session_callback(
+    token: str,
+    return_to: str = "/",
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    response = RedirectResponse(_safe_return_to(return_to, settings), status_code=302)
     samesite = "none" if settings.cookie_secure else "lax"
     response.set_cookie(
         "vlegal_session",
-        create_session_token(user_id, settings),
+        token,
         max_age=settings.session_ttl_seconds,
         httponly=True,
         secure=settings.cookie_secure,
