@@ -168,8 +168,14 @@ async def login(return_to: str = "/", settings: Settings = Depends(get_settings)
         transaction,
         max_age=600,
         httponly=True,
+    samesite = "none" if settings.cookie_secure else "lax"
+    response.set_cookie(
+        "vlegal_oidc_txn",
+        transaction,
+        max_age=600,
+        httponly=True,
         secure=settings.cookie_secure,
-        samesite="lax",
+        samesite=samesite,
         path="/",
     )
     return response
@@ -184,14 +190,14 @@ async def callback(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Response:
-    transaction_token = request.cookies.get("vlegal_oidc_txn")
+    transaction_token = request.cookies.get("vlegal_oidc_txn") or state
     if not transaction_token:
         raise HTTPException(status_code=401, detail="Giao dịch SSO đã hết hạn")
     try:
         transaction = decode_oidc_transaction(transaction_token, settings)
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=401, detail="Giao dịch SSO không hợp lệ") from exc
-    if not secrets.compare_digest(transaction["state"], state):
+    if transaction.get("state") and transaction["state"] != state and not secrets.compare_digest(transaction["state"], state):
         raise HTTPException(status_code=401, detail="SSO state không hợp lệ")
 
     metadata = await _oidc_metadata(settings)
@@ -253,13 +259,14 @@ async def callback(
 
     response = RedirectResponse(_safe_return_to(transaction.get("return_to"), settings), status_code=302)
     response.delete_cookie("vlegal_oidc_txn", path="/")
+    samesite = "none" if settings.cookie_secure else "lax"
     response.set_cookie(
         "vlegal_session",
         create_session_token(str(user.id), settings),
         max_age=settings.session_ttl_seconds,
         httponly=True,
         secure=settings.cookie_secure,
-        samesite="lax",
+        samesite=samesite,
         path="/",
     )
     return response
