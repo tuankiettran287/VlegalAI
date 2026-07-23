@@ -73,11 +73,17 @@ class RetrievalService:
             elif backend == "graphrag":
                 self._store = await run_in_threadpool(Neo4jGraphRAGStore, config)
             else:
-                self._store = await run_in_threadpool(
-                    GraphRAGStore,
-                    self.settings.legal_graphrag_db,
-                    _embedding_config(self.settings),
-                )
+                try:
+                    self._store = await run_in_threadpool(
+                        GraphRAGStore,
+                        self.settings.legal_graphrag_db,
+                        _embedding_config(self.settings),
+                    )
+                except (FileNotFoundError, RuntimeError):
+                    if config.postgres_ready:
+                        self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
+                    else:
+                        raise
         return self._store
 
     async def retrieve(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
