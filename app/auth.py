@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import secrets
 import uuid
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ from app.db import get_db
 from app.models import SsoIdentity, User
 from app.schemas import AuthCapabilities, UserOut
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 bearer = HTTPBearer(auto_error=False)
@@ -162,13 +164,8 @@ async def login(return_to: str = "/", settings: Settings = Depends(get_settings)
             "include_granted_scopes": "true",
         }
     )
-    response = RedirectResponse(f"{metadata['authorization_endpoint']}?{query}", status_code=302)
-    response.set_cookie(
-        "vlegal_oidc_txn",
-        transaction,
-        max_age=600,
-        httponly=True,
     samesite = "none" if settings.cookie_secure else "lax"
+    response = RedirectResponse(f"{metadata['authorization_endpoint']}?{query}", status_code=302)
     response.set_cookie(
         "vlegal_oidc_txn",
         transaction,
@@ -215,6 +212,9 @@ async def callback(
         )
         token_response.raise_for_status()
         tokens = token_response.json()
+
+    claims = await _decode_id_token(tokens["id_token"], metadata, transaction["nonce"], settings)
+
     subject = str(claims["sub"])
     issuer = str(claims.get("iss") or settings.oidc_issuer).rstrip("/")
     user_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(claims.get("email") or subject)))
