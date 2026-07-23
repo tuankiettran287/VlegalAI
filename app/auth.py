@@ -170,7 +170,7 @@ async def login(return_to: str = "/", settings: Settings = Depends(get_settings)
         httponly=True,
         secure=settings.cookie_secure,
         samesite="lax",
-        path="/api/auth",
+        path="/",
     )
     return response
 
@@ -252,7 +252,7 @@ async def callback(
     await db.commit()
 
     response = RedirectResponse(_safe_return_to(transaction.get("return_to"), settings), status_code=302)
-    response.delete_cookie("vlegal_oidc_txn", path="/api/auth")
+    response.delete_cookie("vlegal_oidc_txn", path="/")
     response.set_cookie(
         "vlegal_session",
         create_session_token(str(user.id), settings),
