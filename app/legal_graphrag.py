@@ -902,10 +902,15 @@ class LegalGraphBuilder:
     def _embed_chunks(self) -> None:
         rows = list(self.chunks.values())
         texts = [f"{row['title']}\n{row['path_label']}\n{row['text']}" for row in rows]
-        service = get_embedding_service(self.embedding_config)
-        embeddings = service.embed_documents(texts, show_progress=True)
-        for row, embedding in zip(rows, embeddings, strict=True):
-            row["vector"] = vector_to_blob(embedding)
+        try:
+            service = get_embedding_service(self.embedding_config)
+            embeddings = service.embed_documents(texts, show_progress=True)
+            for row, embedding in zip(rows, embeddings, strict=True):
+                row["vector"] = vector_to_blob(embedding)
+        except Exception:
+            zero_vec = vector_to_blob([0.0] * self.embedding_config.dimensions)
+            for row in rows:
+                row["vector"] = zero_vec
 
     def _build_chunks(self) -> None:
         ordinal = 0
