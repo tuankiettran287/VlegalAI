@@ -38,8 +38,21 @@ thái từng văn bản, URL chính thức và việc chỉ mục có vừa đư
 - `Caddyfile`: reverse proxy, HTTPS tự động và security headers.
 
 Nội dung hội thoại, tài liệu hợp đồng, feedback và văn bản trong gói ký được mã
-hóa AES-256-GCM trước khi lưu PostgreSQL. Dữ liệu PostgreSQL, Redis, Neo4j,
-Caddy và chỉ mục pháp lý được lưu trong Docker volumes.
+hóa AES-256-GCM trước khi lưu PostgreSQL. PostgreSQL cũng lưu rate limit, cung
+cấp distributed advisory lock và làm Celery broker/result backend. Dữ liệu
+PostgreSQL, Neo4j, Caddy và chỉ mục pháp lý được lưu trong Docker volumes.
+
+Sau mỗi lượt hỏi đáp đã đăng nhập, Qwen tạo một bản tóm tắt hội thoại lũy tiến.
+Summary được mã hóa trước khi lưu; BGE-M3 đồng thời tạo embedding chuẩn hóa 1024
+chiều và lưu vào `conversation_summary.embedding` trên pgvector. Lượt chat sau
+dùng summary làm bộ nhớ dài hạn và các message gần nhất làm ngữ cảnh ngắn hạn.
+
+Các câu hỏi pháp lý công khai, không có lịch sử phiên hoặc dấu hiệu dữ liệu cá
+nhân, được đưa vào semantic answer cache dùng chung. Trước khi tái sử dụng câu
+trả lời, hệ thống tìm tương đồng bằng pgvector rồi kiểm tra lại trạng thái và
+fingerprint nguồn luật. Query trùng chuẩn hóa được trả trực tiếp; query chỉ tương
+tự dùng cache làm bản nháp nhưng vẫn retrieval và sinh câu trả lời đã điều chỉnh.
+Câu hỏi có ngữ cảnh riêng luôn sinh câu trả lời mới.
 
 ## Cấu hình
 
@@ -47,7 +60,7 @@ Cho môi trường local, sao chép `.env.example` thành `.env`. Production dù
 `.env.production.example` làm mẫu và lưu secret trong `.env.production`. Các biến
 bắt buộc cho luồng production:
 
-- `DATABASE_URL`, `REDIS_URL`
+- `DATABASE_URL`
 - `SESSION_SECRET`, `MESSAGE_ENCRYPTION_KEY`
 - `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
 - `QWEN_MODEL_PATH`, `QWEN_DEVICE`, `QWEN_DTYPE`, `TAVILY_API_KEY`
@@ -77,14 +90,15 @@ của frontend và đăng ký chính xác redirect URI
 `*.run.app`, không bắt buộc có domain riêng. `OIDC_ISSUER` luôn là
 `https://accounts.google.com`.
 
-Guest chat được giới hạn phân tán qua Redis bằng
+Guest chat được giới hạn phân tán qua PostgreSQL bằng
 `GUEST_CHAT_REQUESTS_PER_MINUTE` và `GUEST_CHAT_REQUESTS_PER_HOUR` để hạn chế
 lạm dụng Qwen/Tavily khi API chạy nhiều replica.
 
 ## Database và API
 
-Migration đầu tiên tạo user/SSO identity, conversation/message, artifact, legal
-document/chunk, article, signature packet và feedback. API chính:
+Các migration tạo user/SSO identity, conversation/message, summary embedding,
+artifact, legal document/chunk, article, signature packet, feedback và rate
+limit PostgreSQL. API chính:
 
 - `GET /api/auth/google/login`, `GET /api/auth/google/callback`, `GET /api/auth/me`
 - CRUD `/api/conversations` và `/api/artifacts`
@@ -98,7 +112,8 @@ document/chunk, article, signature packet và feedback. API chính:
 
 Thư mục `docker/` có Dockerfile riêng cho `api`, `frontend`, `worker`, `beat`,
 `migrate`, `model-init` và `reindex`; Compose build thành bảy image độc lập. PostgreSQL dùng
-image có extension `pgvector`, Neo4j lưu graph, Redis làm cache/Celery broker.
+image có extension `pgvector`, lưu dữ liệu ứng dụng, rate limit, lock và hàng đợi
+Celery; Neo4j lưu graph.
 Migration phải thành công trước khi API và worker khởi động.
 
 Chạy local toàn bộ stack, gồm cả bước tải model:
@@ -126,7 +141,7 @@ Xem [hướng dẫn deploy Docker](deploy.md) và workflow
 Nếu triển khai lên Google Cloud Run, xem [hướng dẫn Cloud Run](deploy-gcp-cloud-run.md).
 API/frontend là hai service riêng dùng URL `run.app`; worker/beat là Worker Pool,
 model/migration là Job. Model dùng Cloud Storage volume, PostgreSQL chuyển sang
-Cloud SQL, Redis sang Memorystore và Neo4j chạy trên GCE/GKE hoặc Neo4j Aura.
+Cloud SQL và Neo4j chạy trên GCE/GKE hoặc Neo4j Aura.
 
 > VLegal AI hỗ trợ nghiên cứu và nghiệp vụ, không thay thế ý kiến của luật sư
 > đối với vụ việc hoặc giao dịch cụ thể.

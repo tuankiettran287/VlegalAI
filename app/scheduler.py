@@ -4,12 +4,14 @@ import os
 
 from celery import Celery
 
+from app.core.celery import postgres_celery_urls
 
-redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-broker_url = os.getenv("CELERY_BROKER_URL", redis_url.replace("/0", "/1"))
-result_backend = os.getenv("CELERY_RESULT_BACKEND")
-if result_backend is None and broker_url.startswith(("redis://", "rediss://")):
-    result_backend = redis_url.replace("/0", "/2")
+
+database_url = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal",
+)
+broker_url, result_backend = postgres_celery_urls(database_url)
 celery_app = Celery(
     "vlegal-scheduler",
     broker=broker_url,

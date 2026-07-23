@@ -10,9 +10,6 @@ param(
     [string]$CorpusBucket = "",
     [string]$Network = "default",
     [string]$Subnet = "default",
-    [string]$RedisHost = "10.170.0.3",
-    [int]$RedisPort = 6379,
-    [string]$RedisCaSecret = "vlegal-redis-server-ca",
     [string]$Neo4jUri = $env:NEO4J_URI,
     [string]$Neo4jUser = "neo4j",
     [string]$FrontendUrl = "",
@@ -63,13 +60,8 @@ $reindexJob = "vlegal-reindex"
 
 $gpuCpu = if ($GpuType -eq "nvidia-l4") { "8" } else { "20" }
 $gpuMemory = if ($GpuType -eq "nvidia-l4") { "32Gi" } else { "80Gi" }
-$redisUrl = "rediss://${RedisHost}:$RedisPort/0"
-$redisCaPath = "/var/run/secrets/redis/server-ca.pem"
-$celeryBrokerUrl = "gcpubsub://projects/$ProjectId"
-
 $apiSecrets = @(
     "DATABASE_URL=vlegal-database-url:latest",
-    "${redisCaPath}=${RedisCaSecret}:latest",
     "NEO4J_PASSWORD=vlegal-neo4j-password:latest",
     "SESSION_SECRET=vlegal-session-secret:latest",
     "MESSAGE_ENCRYPTION_KEY=vlegal-message-key:latest",
@@ -80,7 +72,6 @@ $apiSecrets = @(
 
 $workerSecrets = @(
     "DATABASE_URL=vlegal-database-url:latest",
-    "${redisCaPath}=${RedisCaSecret}:latest",
     "NEO4J_PASSWORD=vlegal-neo4j-password:latest",
     "TAVILY_API_KEY=vlegal-tavily-key:latest"
 ) -join ","
@@ -193,10 +184,6 @@ function Deploy-Api {
         "WEB_CONCURRENCY=1",
         "DATABASE_POOL_SIZE=5",
         "DATABASE_MAX_OVERFLOW=5",
-        "REDIS_URL=$redisUrl",
-        "REDIS_CLUSTER_MODE=true",
-        "REDIS_IAM_AUTH=true",
-        "REDIS_CA_CERTS=$redisCaPath",
         "RETRIEVER_BACKEND=hybrid_rag",
         "POSTGRES_VECTOR_SIZE=1024",
         "NEO4J_URI=$Neo4jUri",
@@ -260,11 +247,6 @@ function Deploy-Worker {
         "EMBEDDING_MAX_SEQUENCE_LENGTH=2048",
         "DATABASE_POOL_SIZE=2",
         "DATABASE_MAX_OVERFLOW=2",
-        "REDIS_URL=$redisUrl",
-        "REDIS_CLUSTER_MODE=true",
-        "REDIS_IAM_AUTH=true",
-        "REDIS_CA_CERTS=$redisCaPath",
-        "CELERY_BROKER_URL=$celeryBrokerUrl",
         "RETRIEVER_BACKEND=hybrid_rag",
         "POSTGRES_VECTOR_SIZE=1024",
         "NEO4J_URI=$Neo4jUri",
@@ -292,7 +274,8 @@ function Deploy-Beat {
         "--image=$imageRoot/vlegal-beat`:$Tag", "--service-account=$RunServiceAccount",
         "--cpu=1", "--memory=512Mi",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
-        "--set-env-vars=APP_ENV=production,CELERY_BROKER_URL=$celeryBrokerUrl",
+        "--set-env-vars=APP_ENV=production",
+        "--set-secrets=DATABASE_URL=vlegal-database-url:latest",
         "--quiet"
     )
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import logging
 import re
 import uuid
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from app.models import (
     Artifact,
     ChatMessage,
     Conversation,
+    LegalAnswerCache,
     LegalDocument,
     SignaturePacket,
     User,
@@ -48,13 +50,20 @@ from app.schemas import (
 )
 from app.services.ai import CONTRACT_SYSTEM_PROMPT, LEGAL_SYSTEM_PROMPT, QwenError, QwenService
 from app.services.articles import ArticleResearchService
+from app.services.conversation_memory import ConversationMemoryService
 from app.services.freshness import FreshnessUnavailable, LegalFreshnessService
 from app.services.guest_limit import GuestRateLimitExceeded, GuestRateLimitUnavailable, GuestRateLimiter
 from app.services.retrieval import RetrievalService, build_context
+from app.services.semantic_cache import (
+    CacheLookup,
+    SemanticAnswerCacheService,
+    legal_fingerprint,
+)
 
 
 router = APIRouter()
 router.include_router(auth_router)
+logger = logging.getLogger(__name__)
 
 
 CONTRACT_TEMPLATES = [
@@ -139,6 +148,14 @@ def article_research_service(request: Request) -> ArticleResearchService:
 
 def guest_rate_limiter(request: Request) -> GuestRateLimiter:
     return request.app.state.guest_limiter
+
+
+def conversation_memory_service(request: Request) -> ConversationMemoryService:
+    return request.app.state.conversation_memory
+
+
+def semantic_answer_cache_service(request: Request) -> SemanticAnswerCacheService:
+    return request.app.state.semantic_answer_cache
 
 
 def _hash_content(value: str) -> str:
@@ -265,6 +282,28 @@ def _chat_history_prompt(turns: list[tuple[str, str]]) -> str:
     return "\n".join(f"{labels.get(role, role)}: {content[:2000]}" for role, content in turns[-8:])
 
 
+async def _load_postgres_chat_history(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    settings: Settings,
+    *,
+    limit: int = 12,
+) -> list[tuple[str, str]]:
+    """Load persisted history from PostgreSQL in chronological order."""
+    stored_messages = (
+        await db.scalars(
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == conversation_id)
+            .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+            .limit(limit)
+        )
+    ).all()
+    return [
+        (message.role, decrypt_text(message.content_ciphertext, settings))
+        for message in reversed(stored_messages)
+    ]
+
+
 @router.get("/health/live", tags=["health"])
 async def liveness() -> dict[str, str]:
     return {"status": "ok"}
@@ -272,15 +311,10 @@ async def liveness() -> dict[str, str]:
 
 @router.get("/health/ready", tags=["health"])
 async def readiness(
-    request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, str]:
     await db.scalar(select(func.now()))
-    try:
-        await request.app.state.guest_limiter.redis.ping()
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail="Redis is not available") from exc
     if not settings.qwen_ready:
         raise HTTPException(
             status_code=503,
@@ -307,6 +341,18 @@ async def stats(
         "chunks": int(raw.get("chunks", 0) or 0),
         "conversations": int(await db.scalar(select(func.count(Conversation.id))) or 0),
         "artifacts": int(await db.scalar(select(func.count(Artifact.id))) or 0),
+        "answer_cache_entries": int(
+            await db.scalar(
+                select(func.count(LegalAnswerCache.id)).where(
+                    LegalAnswerCache.expires_at > datetime.now(UTC)
+                )
+            )
+            or 0
+        ),
+        "answer_cache_hits": int(
+            await db.scalar(select(func.coalesce(func.sum(LegalAnswerCache.hit_count), 0)))
+            or 0
+        ),
         "retrieval_policy": "Tự động áp dụng toàn bộ kho luật; kiểm tra hiệu lực trước mỗi câu trả lời",
     }
 
@@ -437,9 +483,14 @@ async def chat(
     freshness: LegalFreshnessService = Depends(freshness_service),
     ai: QwenService = Depends(ai_service),
     limiter: GuestRateLimiter = Depends(guest_rate_limiter),
+    memory: ConversationMemoryService = Depends(conversation_memory_service),
+    answer_cache: SemanticAnswerCacheService = Depends(semantic_answer_cache_service),
 ) -> ChatResponse:
     conversation: Conversation | None = None
-    history_turns = [(turn.role, turn.content) for turn in payload.history]
+    summary_context = ""
+    # Client-provided history is only for an anonymous, temporary browser
+    # session. Authenticated history always comes from PostgreSQL below.
+    history_turns = [] if user else [(turn.role, turn.content) for turn in payload.history]
     if not user:
         try:
             await limiter.check(_guest_rate_subject(request, response, settings))
@@ -450,18 +501,8 @@ async def chat(
     if user:
         if payload.conversation_id:
             conversation = await _owned_conversation(db, payload.conversation_id, user)
-            stored_history = (
-                await db.scalars(
-                    select(ChatMessage)
-                    .where(ChatMessage.conversation_id == conversation.id)
-                    .order_by(ChatMessage.created_at.desc())
-                    .limit(12)
-                )
-            ).all()
-            history_turns = [
-                (message.role, decrypt_text(message.content_ciphertext, settings))
-                for message in reversed(stored_history)
-            ]
+            summary_context = await memory.get_summary(db, conversation.id)
+            history_turns = await _load_postgres_chat_history(db, conversation.id, settings)
         else:
             conversation = Conversation(
                 user_id=user.id,
@@ -484,14 +525,86 @@ async def chat(
             detail="Đăng nhập bằng Google để tiếp tục một cuộc trò chuyện đã lưu",
         )
 
-    sources, verification = await _legal_sources(payload.message, retrieval, freshness)
-    answer = await ai.complete(
-        LEGAL_SYSTEM_PROMPT,
-        f"LỊCH SỬ HỘI THOẠI:\n{_chat_history_prompt(history_turns)}\n\n"
-        f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-        f"NGUỒN:\n{build_context(sources)}\n\nCÂU HỎI HIỆN TẠI:\n{payload.message}",
-        max_tokens=2200,
+    cache_lookup: CacheLookup | None = None
+    cache_hit = False
+    cache_similarity: float | None = None
+    cache_mode = "miss"
+    cached_draft = ""
+    answer = ""
+    sources: list[dict[str, Any]] = []
+    verification: dict[str, Any] = {}
+    cache_eligible = answer_cache.eligible(
+        payload.message,
+        has_conversation_context=bool(history_turns or summary_context),
     )
+    if cache_eligible:
+        try:
+            cache_lookup = await answer_cache.lookup(payload.message)
+        except Exception:
+            logger.exception("Cannot query semantic answer cache")
+
+    if cache_lookup and cache_lookup.hit:
+        cached = cache_lookup.hit
+        try:
+            current_report, index_updated = await freshness.verify_sources(cached.sources)
+            current_verification = current_report.model_dump(mode="json")
+            fingerprint_matches = (
+                legal_fingerprint(cached.sources, current_verification)
+                == cached.law_fingerprint
+            )
+            if (
+                current_report.checked
+                and current_report.all_current
+                and not index_updated
+                and fingerprint_matches
+            ):
+                sources = cached.sources
+                verification = current_verification
+                cache_similarity = cached.similarity
+                if cached.exact_match:
+                    answer = cached.answer
+                    cache_hit = True
+                    cache_mode = "exact"
+                else:
+                    cached_draft = cached.answer
+                    cache_mode = "semantic_draft"
+                try:
+                    await answer_cache.record_hit(cached.id)
+                except Exception:
+                    logger.exception("Cannot update semantic answer cache hit counter")
+            else:
+                await answer_cache.invalidate(cached.id)
+        except Exception:
+            logger.exception("Cannot validate semantic answer cache entry %s", cached.id)
+            try:
+                await answer_cache.invalidate(cached.id)
+            except Exception:
+                logger.exception("Cannot invalidate semantic answer cache entry %s", cached.id)
+
+    if not cache_hit:
+        sources, verification = await _legal_sources(payload.message, retrieval, freshness)
+        answer = await ai.complete(
+            LEGAL_SYSTEM_PROMPT,
+            f"BỘ NHỚ TÓM TẮT:\n{summary_context or '(Chưa có tóm tắt)'}\n\n"
+            f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
+            f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
+            f"NGUỒN:\n{build_context(sources)}\n\nCÂU HỎI HIỆN TẠI:\n{payload.message}"
+            f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
+            f"{cached_draft or '(Không có)'}\n"
+            "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
+            "không được sao chép các kết luận không còn phù hợp.",
+            max_tokens=2200,
+        )
+        if cache_lookup and verification.get("checked") and verification.get("all_current"):
+            try:
+                await answer_cache.store(
+                    cache_lookup,
+                    answer,
+                    sources,
+                    verification,
+                )
+            except Exception:
+                logger.exception("Cannot store semantic answer cache entry")
     message_id = uuid.uuid4()
     if conversation:
         assistant_message = ChatMessage(
@@ -507,6 +620,12 @@ async def chat(
         await db.commit()
         await db.refresh(assistant_message)
         message_id = assistant_message.id
+        try:
+            await memory.refresh(conversation.id)
+        except Exception:
+            # The full encrypted transcript is already durable. A later turn
+            # retries every message after source_message_count automatically.
+            logger.exception("Cannot refresh conversation summary for %s", conversation.id)
     return ChatResponse(
         conversation_id=conversation.id if conversation else None,
         message_id=message_id,
@@ -514,6 +633,9 @@ async def chat(
         sources=sources,
         verification=verification,
         temporary=conversation is None,
+        cache_hit=cache_hit,
+        cache_similarity=cache_similarity,
+        cache_mode=cache_mode,
     )
 
 

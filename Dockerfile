@@ -36,6 +36,8 @@ WORKDIR /app
 COPY requirements.beat.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.beat.txt
 COPY app/__init__.py ./app/__init__.py
+COPY app/core/__init__.py ./app/core/__init__.py
+COPY app/core/celery.py ./app/core/celery.py
 COPY app/scheduler.py ./app/scheduler.py
 HEALTHCHECK NONE
 CMD ["celery", "-A", "app.scheduler.celery_app", "beat", "--loglevel=INFO"]

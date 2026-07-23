@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import os
 
 from celery import Celery
 from sqlalchemy import select
 
+from app.core.celery import postgres_celery_urls
 from app.core.config import get_settings
 from app.db import SessionFactory
 from app.models import LegalDocument
@@ -16,10 +16,7 @@ from app.services.tavily import TavilyService
 
 
 settings = get_settings()
-broker_url = os.getenv("CELERY_BROKER_URL", settings.redis_url.replace("/0", "/1"))
-result_backend = os.getenv("CELERY_RESULT_BACKEND")
-if result_backend is None and broker_url.startswith(("redis://", "rediss://")):
-    result_backend = settings.redis_url.replace("/0", "/2")
+broker_url, result_backend = postgres_celery_urls(settings.database_url)
 celery_app = Celery(
     "vlegal",
     broker=broker_url,
@@ -67,7 +64,6 @@ async def _verify_corpus() -> dict[str, int]:
             except Exception:
                 failed += 1
     finally:
-        await freshness.close()
         await ai.close()
     return {"checked": checked, "updated": updated, "failed": failed}
 

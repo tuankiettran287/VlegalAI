@@ -37,16 +37,17 @@ class Settings(BaseSettings):
     database_pool_size: int = 20
     database_max_overflow: int = 40
     database_pool_timeout: int = 30
-    redis_url: str = "redis://redis:6379/0"
-    redis_cluster_mode: bool = False
-    redis_iam_auth: bool = False
-    redis_ca_certs: str = ""
-
     session_secret: str = "replace-with-at-least-32-random-characters"
     session_ttl_seconds: int = 8 * 60 * 60
     cookie_secure: bool = False
     guest_chat_requests_per_minute: int = 4
     guest_chat_requests_per_hour: int = 30
+    conversation_summary_batch_size: int = Field(default=12, ge=2, le=40)
+    conversation_summary_max_tokens: int = Field(default=900, ge=128, le=2400)
+    semantic_answer_cache_enabled: bool = True
+    semantic_answer_cache_similarity: float = Field(default=0.96, ge=0.8, le=1)
+    semantic_answer_cache_ttl_hours: int = Field(default=24, ge=1, le=168)
+    semantic_answer_cache_max_query_chars: int = Field(default=1500, ge=100, le=5000)
     oidc_issuer: str = "https://accounts.google.com"
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
@@ -61,7 +62,7 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 10
     legal_freshness_ttl_hours: int = 24
     legal_verification_concurrency: int = 4
-    freshness_lock_ttl_seconds: int = 120
+    freshness_lock_wait_seconds: int = Field(default=120, ge=1, le=600)
     require_freshness_check: bool = True
     max_laws_verified_per_request: int = 16
 

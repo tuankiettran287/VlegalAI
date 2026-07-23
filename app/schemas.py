@@ -90,7 +90,11 @@ class ChatTurn(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=2, max_length=5000)
     conversation_id: uuid.UUID | None = None
-    history: list[ChatTurn] = Field(default_factory=list, max_length=12)
+    history: list[ChatTurn] = Field(
+        default_factory=list,
+        max_length=12,
+        description="Temporary guest history only; authenticated history is loaded from PostgreSQL.",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -100,6 +104,9 @@ class ChatResponse(BaseModel):
     sources: list[SourceOut]
     verification: VerificationReport
     temporary: bool = False
+    cache_hit: bool = False
+    cache_similarity: float | None = None
+    cache_mode: Literal["miss", "exact", "semantic_draft"] = "miss"
 
 
 class DraftContractRequest(BaseModel):

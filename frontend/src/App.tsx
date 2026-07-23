@@ -375,7 +375,11 @@ function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: b
         .filter((message) => !message.pending)
         .slice(-12)
         .map(({ role, content }) => ({ role, content: content.slice(0, 4000) }));
-      const data = await askLegalQuestion(trimmed, authenticated ? conversationId : null, history);
+      const data = await askLegalQuestion(
+        trimmed,
+        authenticated ? conversationId : null,
+        authenticated ? [] : history,
+      );
       setConversationId(data.conversation_id || null);
       setMessages((current) =>
         current.map((message) =>
