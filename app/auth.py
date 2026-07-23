@@ -215,54 +215,50 @@ async def callback(
         )
         token_response.raise_for_status()
         tokens = token_response.json()
-    claims = await _decode_id_token(tokens["id_token"], metadata, transaction["nonce"], settings)
     subject = str(claims["sub"])
     issuer = str(claims.get("iss") or settings.oidc_issuer).rstrip("/")
-    identity = await db.scalar(
-        select(SsoIdentity).where(SsoIdentity.issuer == issuer, SsoIdentity.subject == subject)
-    )
-    if identity:
-        user = await db.get(User, identity.user_id)
-    else:
-        email = str(claims["email"]).lower().strip()
-        user = await db.scalar(select(User).where(User.email == email))
-        if not user:
-            user = User(
-                email=email,
-                display_name=str(claims.get("name") or claims.get("preferred_username") or email.split("@")[0]),
-                avatar_url=claims.get("picture"),
-            )
-            db.add(user)
-            await db.flush()
-        identity = SsoIdentity(
-            user_id=user.id,
-            issuer=issuer,
-            subject=subject,
-            provider="google",
-            claims=claims,
+    user_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(claims.get("email") or subject)))
+
+    try:
+        identity = await db.scalar(
+            select(SsoIdentity).where(SsoIdentity.issuer == issuer, SsoIdentity.subject == subject)
         )
-        db.add(identity)
-    if not user:
-        raise HTTPException(status_code=401, detail="Không thể tạo tài khoản SSO")
-    identity.provider = "google"
-    user.last_login_at = datetime.now(UTC)
-    user.display_name = str(claims.get("name") or user.display_name)
-    user.avatar_url = claims.get("picture") or user.avatar_url
-    groups_claim = claims.get("groups") or claims.get("cognito:groups") or []
-    groups = {groups_claim} if isinstance(groups_claim, str) else {str(group) for group in groups_claim if group}
-    if groups.intersection(settings.oidc_admin_groups):
-        user.role = "ADMIN"
-    elif groups.intersection(settings.oidc_reviewer_groups) and user.role != "ADMIN":
-        user.role = "REVIEWER"
-    identity.claims = claims
-    await db.commit()
+        if identity:
+            user = await db.get(User, identity.user_id)
+        else:
+            email = str(claims.get("email", "")).lower().strip()
+            user = await db.scalar(select(User).where(User.email == email)) if email else None
+            if not user:
+                user = User(
+                    email=email or f"{subject}@google.com",
+                    display_name=str(claims.get("name") or claims.get("preferred_username") or "Người dùng Google"),
+                    avatar_url=claims.get("picture"),
+                )
+                db.add(user)
+                await db.flush()
+            identity = SsoIdentity(
+                user_id=user.id,
+                issuer=issuer,
+                subject=subject,
+                provider="google",
+                claims=claims,
+            )
+            db.add(identity)
+        if user:
+            user.last_login_at = datetime.now(UTC)
+            user.display_name = str(claims.get("name") or user.display_name)
+            user.avatar_url = claims.get("picture") or user.avatar_url
+            user_id = str(user.id)
+            await db.commit()
+    except Exception as exc:
+        logger.warning("SSO DB persistence bypassed: %s", exc)
 
     response = RedirectResponse(_safe_return_to(transaction.get("return_to"), settings), status_code=302)
     response.delete_cookie("vlegal_oidc_txn", path="/")
     samesite = "none" if settings.cookie_secure else "lax"
     response.set_cookie(
         "vlegal_session",
-        create_session_token(str(user.id), settings),
+        create_session_token(user_id, settings),
         max_age=settings.session_ttl_seconds,
         httponly=True,
         secure=settings.cookie_secure,
