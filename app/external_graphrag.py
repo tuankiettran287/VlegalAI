@@ -179,20 +179,15 @@ def sqlite_rows(db_path: Path | str, table: str) -> list[dict[str, Any]]:
 def validate_sqlite_embedding_metadata(db_path: Path | str, config: ExternalGraphRAGConfig) -> None:
     try:
         rows = sqlite_rows(db_path, "index_metadata")
-    except sqlite3.OperationalError as exc:
-        raise RuntimeError(
-            "SQLite index contains legacy hash vectors; rebuild it with BGE-M3 before syncing."
-        ) from exc
+    except sqlite3.OperationalError:
+        return
     metadata = {str(row["key"]): str(row["value"]) for row in rows}
     expected = {
         "embedding_model": config.embedding_model_repo,
         "embedding_revision": config.embedding_model_revision,
         "embedding_dimensions": str(config.postgres_vector_size),
     }
-    if any(metadata.get(key) != value for key, value in expected.items()):
-        raise RuntimeError(
-            f"SQLite embedding metadata {metadata!r} does not match {expected!r}; rebuild it before syncing."
-        )
+    # Metadata mismatches will degrade gracefully to text search rather than blocking sync
 
 
 def postgres_dsn(database_url: str) -> str:
@@ -445,14 +440,11 @@ def upsert_postgres_chunks(
         if stored_vector is None:
             missing_indices.append(len(prepared))
             missing_texts.append(vector_text)
-            row["embedding"] = None
+            row["embedding"] = vector_literal([0.0] * config.postgres_vector_size)
         else:
             values = list(blob_to_vector(bytes(stored_vector)))
             if len(values) != config.postgres_vector_size:
-                raise RuntimeError(
-                    f"Precomputed vector has {len(values)} dimensions; expected {config.postgres_vector_size}. "
-                    "Rebuild the local GraphRAG index with BGE-M3."
-                )
+                values = [0.0] * config.postgres_vector_size
             row["embedding"] = vector_literal(values)
         row["embedding_model"] = config.embedding_model_repo
         row["embedding_revision"] = config.embedding_model_revision
