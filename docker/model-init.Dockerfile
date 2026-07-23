@@ -12,8 +12,7 @@ RUN groupadd --gid 10001 vlegal \
     && useradd --uid 10001 --gid vlegal --create-home --shell /usr/sbin/nologin vlegal
 
 COPY requirements.model-init.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.model-init.txt
+RUN pip install -r requirements.model-init.txt
 
 COPY scripts/download_qwen_model.py ./scripts/download_qwen_model.py
 COPY scripts/download_embedding_model.py ./scripts/download_embedding_model.py

@@ -13,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY requirements.beat.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.beat.txt
+RUN pip install -r requirements.beat.txt
 COPY app/__init__.py ./app/__init__.py
 COPY app/core/__init__.py ./app/core/__init__.py
 COPY app/core/celery.py ./app/core/celery.py
@@ -25,8 +25,7 @@ RUN groupadd --gid 10001 vlegal \
     && useradd --uid 10001 --gid vlegal --create-home --shell /usr/sbin/nologin vlegal
 
 COPY requirements.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+RUN pip install -r requirements.txt
 
 COPY app ./app
 

@@ -12,8 +12,7 @@ RUN groupadd --gid 10001 vlegal \
     && useradd --uid 10001 --gid vlegal --create-home --shell /usr/sbin/nologin vlegal
 
 COPY requirements.migrate.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.migrate.txt
+RUN pip install -r requirements.migrate.txt
 
 COPY app/__init__.py ./app/__init__.py
 COPY app/core ./app/core

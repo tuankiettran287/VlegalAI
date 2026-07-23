@@ -19,8 +19,7 @@ RUN groupadd --gid 10001 vlegal \
     && useradd --uid 10001 --gid vlegal --create-home --shell /usr/sbin/nologin vlegal
 
 COPY requirements.reindex.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.reindex.txt
+RUN pip install -r requirements.reindex.txt
 
 COPY app ./app
 COPY scripts/sync_external_graphrag.py ./scripts/sync_external_graphrag.py
