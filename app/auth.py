@@ -256,7 +256,7 @@ async def session_callback(
     settings: Settings = Depends(get_settings),
 ) -> Response:
     response = RedirectResponse(_safe_return_to(return_to, settings), status_code=302)
-    samesite = "none" if settings.cookie_secure else "lax"
+    samesite = "lax"
     response.set_cookie(
         "vlegal_session",
         token,

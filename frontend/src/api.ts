@@ -24,10 +24,14 @@ export class ApiError extends Error {
 const configuredApiOrigin = (import.meta.env.VITE_API_URL || "").trim().replace(/\/$/, "");
 
 function apiUrl(path: string) {
-  if (configuredApiOrigin) return `${configuredApiOrigin}${path}`;
   if (import.meta.env.DEV && typeof window !== "undefined") {
     return `${window.location.protocol}//${window.location.hostname}:8000${path}`;
   }
+  // In production browser, use relative path (/api/...) so Nginx proxy preserves session cookies seamlessly
+  if (typeof window !== "undefined" && window.location.origin) {
+    return path;
+  }
+  if (configuredApiOrigin) return `${configuredApiOrigin}${path}`;
   return path;
 }
 
