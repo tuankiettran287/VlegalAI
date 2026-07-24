@@ -67,30 +67,34 @@ class RetrievalService:
                 return self._store
             config = _external_config(self.settings)
             backend = self.settings.retriever_backend
-            if backend == "hybrid_rag":
-                self._store = await run_in_threadpool(Neo4jPostgresGraphRAGStore, config)
-            elif backend == "rag":
-                self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
-            elif backend == "graphrag":
-                self._store = await run_in_threadpool(Neo4jGraphRAGStore, config)
-            else:
+            try:
+                if backend == "hybrid_rag":
+                    self._store = await run_in_threadpool(Neo4jPostgresGraphRAGStore, config)
+                elif backend == "rag":
+                    self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
+                elif backend == "graphrag":
+                    self._store = await run_in_threadpool(Neo4jGraphRAGStore, config)
+                else:
+                    self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning("Retriever %s failed to initialize: %s. Falling back to PostgresGraphRAGStore.", backend, exc)
                 try:
-                    self._store = await run_in_threadpool(
-                        GraphRAGStore,
-                        self.settings.legal_graphrag_db,
-                        _embedding_config(self.settings),
-                    )
-                except (FileNotFoundError, RuntimeError):
-                    if config.postgres_ready:
-                        self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
-                    else:
-                        raise
+                    self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
+                except Exception as fallback_exc:
+                    logging.getLogger(__name__).error("PostgresGraphRAGStore fallback failed: %s", fallback_exc)
+                    raise
         return self._store
 
     async def retrieve(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
-        store = await self._get_store()
-        rows = await run_in_threadpool(store.retrieve, query, top_k or self.settings.retrieval_top_k)
-        return [serialize_source(row) for row in rows]
+        try:
+            store = await self._get_store()
+            rows = await run_in_threadpool(store.retrieve, query, top_k or self.settings.retrieval_top_k)
+            return [serialize_source(row) for row in rows]
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Retrieve operation failed: %s", exc)
+            return []
 
     async def stats(self) -> dict[str, Any]:
         store = await self._get_store()

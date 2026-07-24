@@ -61,9 +61,7 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
             : response.status >= 500
               ? "Tính năng này đang tạm gián đoạn. Vui lòng thử lại sau."
               : "Yêu cầu chưa thể hoàn tất. Vui lòng kiểm tra và thử lại.";
-    const safeDetail = [400, 409, 422].includes(response.status)
-      ? data.detail || data.message
-      : undefined;
+    const safeDetail = data.detail || data.message;
     throw new ApiError(typeof safeDetail === "string" ? safeDetail : fallback, response.status, data.code);
   }
   return data as T;
