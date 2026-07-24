@@ -8,6 +8,7 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import get_settings
+from app.core.database import asyncpg_database_url
 from app.models import Base
 
 
@@ -16,7 +17,10 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 # Alembic stores this value in ConfigParser, where a literal percent sign in
 # URL-encoded IAM usernames (for example, ``%40``) must be escaped.
-config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
+database_url = asyncpg_database_url(get_settings().database_url).render_as_string(
+    hide_password=False
+)
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 target_metadata = Base.metadata
 
 

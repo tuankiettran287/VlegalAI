@@ -1,0 +1,81 @@
+# Build/tag manifest for Google Artifact Registry.
+#
+# Required:
+#   GCP_PROJECT_ID
+# Optional:
+#   GCP_REGION          defaults to asia-southeast1
+#   GCP_REPOSITORY      defaults to vlegal
+#   IMAGE_TAG           defaults to latest
+#
+# This file intentionally contains no runtime environment, secrets, ports or
+# volumes. Cloud Run runtime configuration is applied by scripts/gcp/deploy.ps1
+# through Secret Manager, Cloud Storage volumes, Direct VPC egress and GPU flags.
+
+name: vlegal-gcp
+
+x-image-prefix: &image-prefix
+  pull_policy: build
+
+services:
+  api:
+    <<: *image-prefix
+    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-api:${IMAGE_TAG:-latest}"
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+      platforms:
+        - linux/amd64
+
+  frontend:
+    <<: *image-prefix
+    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-frontend:${IMAGE_TAG:-latest}"
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      platforms:
+        - linux/amd64
+
+  worker:
+    <<: *image-prefix
+    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-worker:${IMAGE_TAG:-latest}"
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+      platforms:
+        - linux/amd64
+
+  beat:
+    <<: *image-prefix
+    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-beat:${IMAGE_TAG:-latest}"
+    build:
+      context: .
+      dockerfile: docker/beat.Dockerfile
+      platforms:
+        - linux/amd64
+
+  migrate:
+    <<: *image-prefix
+    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-migrate:${IMAGE_TAG:-latest}"
+    build:
+      context: .
+      dockerfile: docker/migrate.Dockerfile
+      platforms:
+        - linux/amd64
+
+  model-init:
+    <<: *image-prefix
+    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-model-init:${IMAGE_TAG:-latest}"
+    build:
+      context: .
+      dockerfile: docker/model-init.Dockerfile
+      platforms:
+        - linux/amd64
+
+  reindex:
+    <<: *image-prefix
+    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-reindex:${IMAGE_TAG:-latest}"
+    build:
+      context: .
+      dockerfile: docker/reindex.Dockerfile
+      platforms:
+        - linux/amd64

@@ -5,12 +5,13 @@ from collections.abc import AsyncIterator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
+from app.core.database import asyncpg_database_url
 
 
 settings = get_settings()
 
 engine = create_async_engine(
-    settings.database_url,
+    asyncpg_database_url(settings.database_url),
     pool_pre_ping=True,
     pool_recycle=1800,
     pool_size=settings.database_pool_size,
@@ -28,4 +29,3 @@ async def get_db() -> AsyncIterator[AsyncSession]:
         except Exception:
             await session.rollback()
             raise
-

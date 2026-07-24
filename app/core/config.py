@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -51,7 +52,7 @@ class Settings(BaseSettings):
     oidc_issuer: str = "https://accounts.google.com"
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
-    oidc_redirect_uri: str = "http://localhost:8000/api/auth/google/callback"
+    oidc_redirect_uri: str = ""
     oidc_scopes: str = "openid email profile"
     oidc_admin_groups: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["vlegal-admins"])
     oidc_reviewer_groups: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["vlegal-reviewers"])
@@ -59,24 +60,35 @@ class Settings(BaseSettings):
     message_encryption_key: str = ""
 
     retriever_backend: Literal["rag", "graphrag", "hybrid_rag", "local_graphrag"] = "hybrid_rag"
-    retrieval_top_k: int = 10
-    legal_freshness_ttl_hours: int = 24
-    legal_verification_concurrency: int = 4
+    retrieval_top_k: int = Field(default=10, ge=1, le=64)
+    legal_freshness_ttl_hours: int = Field(default=24, ge=0, le=168)
+    legal_verification_concurrency: int = Field(default=4, ge=1, le=32)
     freshness_lock_wait_seconds: int = Field(default=120, ge=1, le=600)
     require_freshness_check: bool = True
-    max_laws_verified_per_request: int = 16
+    legal_search_require_both: bool = True
+    legal_verdict_min_confidence: float = Field(default=0.75, ge=0.5, le=1)
+    max_laws_verified_per_request: int = Field(default=16, ge=1, le=64)
+    google_search_max_results: int = Field(default=10, ge=1, le=20)
 
-    # Qwen runs in-process from a checkpoint that already exists on disk.
-    # No prompt or legal document is sent to an external model API.
-    qwen_model_path: str = str(PROJECT_ROOT / "models" / "Qwen3-14B")
-    qwen_model: str = "Qwen3-14B"
-    qwen_device: Literal["auto", "cuda", "cpu", "mps"] = "auto"
-    qwen_dtype: Literal["auto", "bfloat16", "float16", "float32"] = "auto"
-    qwen_max_input_tokens: int = Field(default=24_576, ge=512)
-    qwen_max_new_tokens: int = Field(default=5_120, ge=64)
-    qwen_max_concurrent_generations: int = Field(default=1, ge=1, le=8)
-    qwen_top_p: float = Field(default=0.9, gt=0, le=1)
-    qwen_trust_remote_code: bool = False
+    # Text generation uses Vertex AI with the service-account credential in
+    # env.json. The credential path can be overridden for container/secret
+    # mounts without exposing any key to the frontend.
+    gemini_credentials_path: str = str(PROJECT_ROOT / "env.json")
+    gemini_use_adc: bool = False
+    gemini_project_id: str = ""
+    gemini_location: str = "global"
+    gemini_model: str = "gemini-3.5-flash"
+    gemini_timeout_seconds: int = Field(default=120, ge=5, le=600)
+    gemini_max_retries: int = Field(default=3, ge=1, le=3)
+    gemini_max_concurrent_generations: int = Field(default=8, ge=1, le=64)
+    gemini_google_search_max_output_tokens: int = Field(
+        default=16_384,
+        ge=1_024,
+        le=65_535,
+    )
+    gemini_thinking_budget: int = Field(default=0, ge=0, le=24_576)
+    gemini_thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
+    gemini_data_policy: Literal["redact", "deny", "allow"] = "redact"
 
     # BGE-M3 runs locally and creates normalized semantic embeddings for every
     # legal chunk. Runtime services never send legal text to an embedding API.
@@ -125,7 +137,15 @@ class Settings(BaseSettings):
     @classmethod
     def split_csv(cls, value: object) -> object:
         if isinstance(value, str):
-            return [part.strip() for part in value.split(",") if part.strip()]
+            normalized = value.strip()
+            if normalized.startswith("["):
+                try:
+                    decoded = json.loads(normalized)
+                except json.JSONDecodeError:
+                    decoded = None
+                if isinstance(decoded, list):
+                    return [str(part).strip() for part in decoded if str(part).strip()]
+            return [part.strip() for part in normalized.split(",") if part.strip()]
         return value
 
     @field_validator("official_legal_domains", mode="after")
@@ -165,19 +185,49 @@ class Settings(BaseSettings):
 
     @property
     def oidc_ready(self) -> bool:
-        return bool(self.oidc_issuer and self.oidc_client_id and self.oidc_client_secret and self.oidc_redirect_uri)
+        return bool(
+            self.oidc_issuer
+            and self.oidc_client_id
+            and self.oidc_client_secret
+            and self.oidc_callback_url
+        )
 
     @property
-    def qwen_ready(self) -> bool:
-        model_path = Path(self.qwen_model_path).expanduser()
-        if not model_path.is_absolute():
-            model_path = PROJECT_ROOT / model_path
-        return model_path.is_dir() and (model_path / "config.json").is_file()
+    def oidc_callback_url(self) -> str:
+        configured = self.oidc_redirect_uri.strip()
+        if configured:
+            return configured
+        api_prefix = self.api_prefix.strip("/")
+        return f"{self.public_url.rstrip('/')}/{api_prefix}/auth/google/callback"
 
     @property
-    def qwen_local_path(self) -> Path:
-        model_path = Path(self.qwen_model_path).expanduser()
-        return model_path if model_path.is_absolute() else PROJECT_ROOT / model_path
+    def gemini_credentials_local_path(self) -> Path:
+        credentials_path = Path(self.gemini_credentials_path).expanduser()
+        return credentials_path if credentials_path.is_absolute() else PROJECT_ROOT / credentials_path
+
+    @property
+    def gemini_ready(self) -> bool:
+        if not self.gemini_model.strip():
+            return False
+        credentials_path = self.gemini_credentials_local_path
+        if credentials_path.is_file():
+            try:
+                payload = json.loads(credentials_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                return False
+            if not isinstance(payload, dict) or payload.get("type") != "service_account":
+                return False
+            required_fields = ("client_email", "private_key", "token_uri")
+            if not all(
+                isinstance(payload.get(field), str) and payload[field].strip()
+                for field in required_fields
+            ):
+                return False
+            return bool(
+                self.gemini_project_id.strip()
+                or str(payload.get("project_id") or "").strip()
+            )
+        return self.gemini_use_adc
 
     @property
     def embedding_local_path(self) -> Path:
@@ -187,10 +237,17 @@ class Settings(BaseSettings):
     @property
     def embedding_ready(self) -> bool:
         model_path = self.embedding_local_path
-        return (
-            model_path.is_dir()
-            and (model_path / "config.json").is_file()
-            and (model_path / "modules.json").is_file()
+        if not model_path.is_dir():
+            return False
+        required_files = (
+            "config.json",
+            "modules.json",
+            "tokenizer_config.json",
+        )
+        if not all((model_path / name).is_file() for name in required_files):
+            return False
+        return any(model_path.rglob("*.safetensors")) or any(
+            model_path.rglob("pytorch_model*.bin")
         )
 
     @property

@@ -12,8 +12,8 @@ Luồng tuần tự/ song song của một câu hỏi:
 POST /api/chat — async def                                      app/api.py:418-430
 ├─ optional_user
 │  └─ có token: PostgreSQL db.get(User, user_id)                app/auth.py:80-100
-├─ khách: Redis transactional rate-limit pipeline               app/api.py:433-439
-│                                                               app/services/guest_limit.py:28-38
+├─ khách: PostgreSQL fixed-window rate-limit UPSERT              app/api.py:433-439
+│                                                               app/services/guest_limit.py
 ├─ người dùng đăng nhập: ghi USER message + COMMIT PostgreSQL    app/api.py:440-470
 ├─ await _legal_sources(...)                                    app/api.py:477
 │  ├─ await retrieval.retrieve(query)                           app/api.py:223
@@ -28,7 +28,7 @@ POST /api/chat — async def                                      app/api.py:418
 │  └─ await freshness.verify_sources(sources)                   app/api.py:227
 │     ├─ các luật chạy gather, giới hạn concurrency=4           app/services/freshness.py:65,87
 │     ├─ PostgreSQL cache hit nếu verified_at trong TTL          app/services/freshness.py:112-123
-│     ├─ Redis distributed lock                                 app/services/freshness.py:125-150
+│     ├─ PostgreSQL advisory transaction lock                    app/services/freshness.py
 │     └─ cache miss:
 │        ├─ await Tavily search                                  app/services/freshness.py:153-162
 │        │  └─ HTTP POST thật                                   app/services/tavily.py:46
@@ -43,9 +43,9 @@ POST /api/chat — async def                                      app/api.py:418
 Kết luận sync/async:
 
 - Qdrant và Neo4j dùng SDK đồng bộ: `QdrantClient` và `GraphDatabase.driver` tại `app/external_graphrag.py:11-12,137-145`. Không có `AsyncQdrantClient`/`AsyncGraphDatabase`. Tuy nhiên endpoint không gọi trực tiếp chúng trên event loop: constructor, `retrieve`, `stats`, `close` đều được bọc `run_in_threadpool` tại `app/services/retrieval.py:40-69`. Vì vậy không phát hiện blocking vendor SDK trực tiếp trên event loop ở request retrieval hiện tại.
-- Tavily dùng `httpx.AsyncClient` và `await` thật (`app/services/tavily.py:20,46,60`). Redis dùng `redis.asyncio.Redis` (`app/services/freshness.py:9,64`; `app/services/guest_limit.py:5,23`). PostgreSQL dùng SQLAlchemy `AsyncSession`/`asyncpg` (`app/db.py:5,12-25`).
+- Tavily dùng `httpx.AsyncClient` và `await` thật (`app/services/tavily.py:20,46,60`). PostgreSQL dùng SQLAlchemy `AsyncSession`/`asyncpg` (`app/db.py:5,12-25`) cho dữ liệu, rate limit và advisory transaction lock.
 - Qwen production trong repo không gọi SageMaker. Nó nạp checkpoint local và chạy `model.generate` trong `asyncio.to_thread` (`app/services/ai.py:159,195-201`). `rg` không tìm thấy `boto3`, `sagemaker`, `invoke_endpoint` hay endpoint name trong `app/`, `scripts/`, `infra/`. Đây là khác biệt quan trọng so với mô tả đầu vào.
-- Redis DB 0 dùng cho guest rate-limit và freshness lock; không chứa freshness result. Freshness result/TTL nằm trong bảng PostgreSQL `LegalDocument`. Celery dùng Redis DB 1/2 làm broker/result và beat chạy `vlegal.verify_legal_corpus` mỗi 24 giờ (`app/worker.py:19-37,41-73`). API không gọi `.delay()`/`send_task()`; worker là đường định kỳ bổ sung, không thay thế freshness cache-miss đồng bộ trong `/api/chat`.
+- Guest rate-limit, freshness lock và freshness result/TTL đều nằm trong PostgreSQL. Celery dùng broker/result backend SQLAlchemy trên cùng PostgreSQL và beat chạy `vlegal.verify_legal_corpus` mỗi 24 giờ (`app/worker.py`; `app/core/celery.py`). API không gọi `.delay()`/`send_task()`; worker là đường định kỳ bổ sung, không thay thế freshness cache-miss đồng bộ trong `/api/chat`.
 
 Môi trường thực tế:
 
@@ -88,7 +88,7 @@ Generation diagnostic, không dùng cho SLA:
 | Vector hóa SQLite scan bằng ma trận NumPy, stable sort | Có | vector 0,585303 s; local retrieval 0,771853 s | vector 0,003834 s; local retrieval 0,193429 s | vector 99,34%; end-to-end retrieval 74,94% | Thêm dependency NumPy và buffer vector liên tục trong RAM. Đã kiểm chứng output parity tuyệt đối trên 20 câu: cùng Hit@10=0,800000, MRR=0,380833 và cùng SHA-256 thứ tự nguồn `e2679d983a896e4aa53fe9d261e4d54e5b0d00fba56bbe81d0354b3882f29988`. |
 | Tái sử dụng một `httpx.AsyncClient` cho Tavily thay vì mở TLS/client mỗi call | Có | cache-miss Tavily 11,245813 s; p95 20,033492 s | 1,634874 s; p95 6,048549 s | median 85,46%; p95 69,81% | Network/API variance lớn và n=10; không quy toàn bộ chênh lệch cho pooling. Search vẫn `advanced`, cùng official domains, `include_raw_content=True`; không giảm độ đúng đắn. Phải đóng client ở lifespan/worker. |
 
-Không chuyển Qdrant/Neo4j sang async SDK: endpoint đã cô lập sync SDK bằng threadpool; Qdrant chỉ 11,897 ms median ở baseline cũ, còn toàn bộ Docker `graphrag`/`hybrid_rag` chỉ 57,358/62,152 ms median. Không tinh chỉnh top-k/rerank vì thay đổi candidate set có rủi ro chất lượng không cần thiết. Redis/PostgreSQL nay đã chạy qua Docker, nhưng freshness result vẫn chưa warm được do verdict Ollama timeout; vì vậy không có số cache-hit thật để biện minh thêm result cache.
+Không chuyển Qdrant/Neo4j sang async SDK: endpoint đã cô lập sync SDK bằng threadpool; Qdrant chỉ 11,897 ms median ở baseline cũ, còn toàn bộ Docker `graphrag`/`hybrid_rag` chỉ 57,358/62,152 ms median. Không tinh chỉnh top-k/rerank vì thay đổi candidate set có rủi ro chất lượng không cần thiết. PostgreSQL nay đã chạy qua Docker, nhưng freshness result vẫn chưa warm được do verdict Ollama timeout; vì vậy không có số cache-hit thật để biện minh thêm result cache.
 
 TTL 24 giờ hiện tại cân bằng hợp lý: văn bản pháp luật không thường thay đổi theo phút, nightly worker có thể prewarm, còn rút ngắn TTL làm tăng cache miss/Tavily; kéo dài hơn 24 giờ tăng rủi ro trả lời theo trạng thái hiệu lực cũ. Với văn bản vừa có dấu hiệu `AMENDED/REPLACED`, logic vẫn index lại và re-retrieve trong cùng request (`app/services/freshness.py:219-235`; `app/api.py:230-232`).
 
@@ -103,7 +103,7 @@ Raw after nằm tại `storage/audit/latency_runs/optimized_post/raw.csv`; cùng
 | hybrid_rag | 0,062152 s (0,097134 s) | 0,062433 s (0,095742 s) | Ổn định trong jitter; không có thay đổi retrieval code |
 | local_graphrag | 0,771853 s (0,993839 s) | 0,193429 s (0,244325 s) | Có; median giảm 74,94%, p95 giảm 75,41%, chất lượng/order không đổi |
 
-Freshness cache-miss Tavily sau tối ưu là 1,634874 s median, p95 6,048549 s (`n=10`). Nó được tách khỏi bảng retrieval vì cache hit không gọi Tavily và vì full freshness còn PostgreSQL + Redis lock + verdict LLM + có thể index lại.
+Freshness cache-miss Tavily sau tối ưu là 1,634874 s median, p95 6,048549 s (`n=10`). Nó được tách khỏi bảng retrieval vì cache hit không gọi Tavily và vì full freshness còn PostgreSQL advisory lock + verdict LLM + có thể index lại.
 
 ## 5. Còn thiếu gì để kết luận mục tiêu tổng thể dưới 3–4 giây
 
@@ -113,8 +113,8 @@ Chưa thể kết luận đạt SLA full-question cho `rag`, `graphrag` hoặc `
 2. Tavily cache miss sau pooling có median 1,635 s nhưng p95 6,049 s, tự nó có thể vượt SLA trước generation. Cache hit 24 giờ có thể tránh call này; PostgreSQL nay đã chạy, nhưng warm không ghi được row do verdict Ollama timeout nên vẫn chưa có số cache-hit end-to-end thật.
 3. Qwen3/SageMaker là ẩn số. Repo không có SageMaker provider/cấu hình/payload contract; `LLM_PROVIDER=qwen3_sagemaker` hiện không phải giá trị được implement. Không thể chỉ “thêm credential” rồi chạy lại cho tới khi code provider thật được cung cấp. Khi có provider, phải chạy lại profiler `n>=10` với cùng seed/questions, đo riêng freshness verdict generation và answer generation.
 4. Ollama local không thay thế số thật: smoke 16 token đã 5,653 s và full prompt timeout >300 s. Đây là **mock qua Ollama qwen3.6, không đại diện cho Qwen3/SageMaker thật**.
-5. Blocker Docker/Neo4j/Redis/PostgreSQL đã được gỡ: bốn service thật trong compose (`postgres`, `redis`, `neo4j`, `qdrant`; `docker-compose.yml:70,84,95,109`) đều chạy; PostgreSQL migrate đủ 11 bảng, Neo4j/Qdrant đã sync corpus. `SHOW INDEXES`/`SHOW CONSTRAINTS` xác nhận các index/constraint ứng dụng đều `ONLINE`. Không sửa Cypher và không chạy tối ưu bằng `PROFILE`, vì toàn retrieval Neo4j đã chỉ 48,002 ms median/74,761 ms p95 ở lượt hậu kiểm; đây không phải bottleneck có ý nghĩa so với freshness/generation.
-6. DB audit/auth latency chưa đo: request đăng nhập có PostgreSQL commits trước retrieval và sau generation (`app/api.py:470,497`); request khách có Redis rate-limit (`app/api.py:435`; `app/services/guest_limit.py:33-38`).
+5. Blocker Docker/Neo4j/PostgreSQL đã được gỡ: các datastore cần thiết cho lượt đo đều chạy; PostgreSQL migrate đủ 11 bảng, Neo4j/Qdrant đã sync corpus. `SHOW INDEXES`/`SHOW CONSTRAINTS` xác nhận các index/constraint ứng dụng đều `ONLINE`. Không sửa Cypher và không chạy tối ưu bằng `PROFILE`, vì toàn retrieval Neo4j đã chỉ 48,002 ms median/74,761 ms p95 ở lượt hậu kiểm; đây không phải bottleneck có ý nghĩa so với freshness/generation.
+6. DB audit/auth latency chưa đo: request đăng nhập có PostgreSQL commits trước retrieval và sau generation (`app/api.py:470,497`); request khách có PostgreSQL rate-limit (`app/api.py`; `app/services/guest_limit.py`).
 
 Streaming: repo không có SageMaker streaming config để xác nhận hỗ trợ. Local Qwen dùng blocking `model.generate`, Ollama mock đang `stream=False`. Khi endpoint thật hỗ trợ response stream, thiết kế nên giữ retrieval + freshness hoàn tất trước, sau đó trả `StreamingResponse` và forward token/chunk; đo time-to-first-token riêng. Đây chỉ cải thiện latency cảm nhận, không giảm latency tới token cuối và không được ghi là đạt SLA trước khi đo endpoint thật.
 
@@ -169,7 +169,7 @@ Kết luận: cache chưa được warm. Không chạy/ghi nhãn `warm_cache_pos
 | Tổng median component `rag retrieval + Tavily` | 11,268735 s | 1,657163 s | N/A |
 | Tổng median component `local retrieval + Tavily` | 12,017666 s | 1,828303 s | N/A |
 
-Hai dòng “tổng component” chỉ là phép cộng hai median đo riêng để nhìn quy mô; không phải median end-to-end, không gồm PostgreSQL/Redis lock, verdict LLM, index update hay answer generation. Do đó chưa có con số latency kỳ vọng hợp lệ cho buổi demo warm-cache, và cũng chưa có số để tuyên bố tỷ lệ hit gần 100%. Kịch bản xấu nhất đã đo được chỉ là Tavily cache-miss: median 1,634874 s, p95 6,048549 s sau tối ưu; full request còn có các phần chưa đo.
+Hai dòng “tổng component” chỉ là phép cộng hai median đo riêng để nhìn quy mô; không phải median end-to-end, không gồm PostgreSQL advisory lock, verdict LLM, index update hay answer generation. Do đó chưa có con số latency kỳ vọng hợp lệ cho buổi demo warm-cache, và cũng chưa có số để tuyên bố tỷ lệ hit gần 100%. Kịch bản xấu nhất đã đo được chỉ là Tavily cache-miss: median 1,634874 s, p95 6,048549 s sau tối ưu; full request còn có các phần chưa đo.
 
 ### Hướng dẫn vận hành trước demo
 
@@ -177,7 +177,6 @@ Sau khi có provider LLM đủ nhanh/ổn định để verdict freshness hoàn 
 
 ```powershell
 $env:DATABASE_URL='postgresql+asyncpg://vlegal:vlegal@127.0.0.1:5432/vlegal'
-$env:REDIS_URL='redis://127.0.0.1:6379/0'
 $env:LLM_PROVIDER='ollama_mock'
 python scripts/warm_freshness_cache.py --env-file .env --batch-size 4 --strict
 ```
@@ -190,14 +189,13 @@ Mọi thay đổi và artifact trong mục này chỉ nằm local. Không commit
 
 ## 8. Đo bổ sung sau khi Docker Desktop và WSL2 sẵn sàng
 
-Ngày 18/07/2026, Docker Desktop báo Engine running; đo trực tiếp xác nhận Docker Engine `29.6.1`, Compose `5.3.0`. Đúng bốn service trong `docker-compose.yml` được dựng: `postgres:16-alpine`, `redis:7.4-alpine`, `neo4j:5.26-community`, `qdrant/qdrant:v1.15.3`. File override local-only `docker-compose.audit.yml` chỉ publish các cổng lên `127.0.0.1` để profiler host truy cập; không mở datastore ra LAN.
+Ngày 18/07/2026, Docker Desktop báo Engine running; đo trực tiếp xác nhận Docker Engine `29.6.1`, Compose `5.3.0`. Các datastore phục vụ lượt đo gồm PostgreSQL, Neo4j và Qdrant. File override local-only `docker-compose.audit.yml` chỉ publish các cổng lên `127.0.0.1` để profiler host truy cập; không mở datastore ra LAN.
 
 Trạng thái dữ liệu sau sync thật bằng `scripts/sync_external_graphrag.py --skip-sqlite-build --reset-neo4j --reset-qdrant`:
 
 - PostgreSQL: revision `20260714_0001`, 11 bảng public.
 - Neo4j: 49.187 node tổng, gồm 23.633 `LegalNode` và 25.554 `LegalChunk`; 76.648 relationship. Full-text index `legal_chunk_fulltext`, các range index và hai uniqueness constraint đều `ONLINE`.
 - Qdrant collection `vlegal_legal_chunks`: exact count 25.554 point.
-- Redis: `PONG`; `used_memory_human=988,12 KiB`, `maxmemory=0` tại lúc kiểm tra, nên chưa có dấu hiệu áp lực bộ nhớ.
 
 Baseline external modes dùng 20 câu, seed `20260718`, 10 lần/câu/mode, `top_k=10`, một warm-up ngoài số đo (`n=200/mode`). Raw data: `storage/audit/latency_runs/docker_external_baseline_pre/raw.csv`. Lượt hậu kiểm đủ bốn mode dùng cấu hình giống hệt; raw data: `storage/audit/latency_runs/docker_all_modes_post/raw.csv`.
 
@@ -216,6 +214,6 @@ Baseline external modes dùng 20 câu, seed `20260718`, 10 lần/câu/mode, `top
 
 `graphrag` baseline đầu tiên là 0,057358 s median/0,104101 s p95; lượt hậu kiểm là 0,048002 s/0,074761 s. Không có thay đổi Cypher giữa hai lượt, nên chênh lệch này được xem là warm-cache/jitter và không ghi thành phần trăm tối ưu code. `hybrid_rag` tương ứng 0,062152 s/0,097134 s và 0,062433 s/0,095742 s, gần như không đổi.
 
-Kết luận cập nhật: cả bốn mode retrieval đều dưới 0,22 s ở p95 trên máy audit; phần retrieval không còn là trở ngại cho SLA tổng 3–4 s. Freshness warm-cache và answer generation vẫn là khoảng trống: Docker giải quyết PostgreSQL/Redis nhưng không làm Ollama qwen3.6 xử lý bundle freshness 54.133 ký tự nhanh hơn. Database Docker mới vẫn có `legal_document total=0, verified=0, fresh=0`; do đó các kết luận N/A cho `warm_cache_post` ở mục 7 vẫn giữ nguyên và không được thay bằng số retrieval.
+Kết luận cập nhật: cả bốn mode retrieval đều dưới 0,22 s ở p95 trên máy audit; phần retrieval không còn là trở ngại cho SLA tổng 3–4 s. Freshness warm-cache và answer generation vẫn là khoảng trống: Docker giải quyết PostgreSQL nhưng không làm Ollama qwen3.6 xử lý bundle freshness 54.133 ký tự nhanh hơn. Database Docker mới vẫn có `legal_document total=0, verified=0, fresh=0`; do đó các kết luận N/A cho `warm_cache_post` ở mục 7 vẫn giữ nguyên và không được thay bằng số retrieval.
 
 Qdrant Python client cài trên host là `1.18.0`, cao hơn server `1.15.3` và phát cảnh báo compatibility, dù toàn bộ sync/query đã thành công. Đây là rủi ro cấu hình cần ghim client tương thích trước production; không ảnh hưởng việc ghi nhận các run đã hoàn tất, nhưng cần chạy regression lại nếu thay version.

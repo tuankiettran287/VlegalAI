@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import json
 import logging
 import re
 import uuid
+from binascii import Error as BinasciiError
 from datetime import UTC, datetime
 from typing import Any
 
+from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import delete, func, select
+from pydantic import ValidationError
+from sqlalchemy import delete, func, select, text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -40,6 +42,7 @@ from app.schemas import (
     ChatResponse,
     CompareContractRequest,
     ConversationCreate,
+    ConversationDetailOut,
     ConversationOut,
     ConversationUpdate,
     DraftContractRequest,
@@ -47,13 +50,31 @@ from app.schemas import (
     MessageOut,
     PrepareSignatureRequest,
     ReviewContractRequest,
+    SourceOut,
+    VerificationReport,
 )
-from app.services.ai import CONTRACT_SYSTEM_PROMPT, LEGAL_SYSTEM_PROMPT, QwenError, QwenService
+from app.services.ai import (
+    CONTRACT_SYSTEM_PROMPT,
+    LEGAL_SYSTEM_PROMPT,
+    GeminiError,
+    GeminiService,
+    untrusted_data_block,
+    validate_citations,
+)
 from app.services.articles import ArticleResearchService
 from app.services.conversation_memory import ConversationMemoryService
-from app.services.freshness import FreshnessUnavailable, LegalFreshnessService
+from app.services.freshness import (
+    CURRENT_STATUSES,
+    LAW_CODE_RE,
+    FreshnessUnavailable,
+    LegalFreshnessService,
+)
 from app.services.guest_limit import GuestRateLimitExceeded, GuestRateLimitUnavailable, GuestRateLimiter
-from app.services.retrieval import RetrievalService, build_context
+from app.services.retrieval import (
+    RetrievalService,
+    build_context,
+    select_context_sources,
+)
 from app.services.semantic_cache import (
     CacheLookup,
     SemanticAnswerCacheService,
@@ -83,7 +104,10 @@ REVIEW_SCHEMA = {
     "additionalProperties": False,
     "required": ["summary", "risks", "recommendations"],
     "properties": {
-        "summary": {"type": "string"},
+        "summary": {
+            "type": "string",
+            "description": "Tóm tắt có [S1], [S2] ngay sau từng nhận định pháp lý.",
+        },
         "risks": {
             "type": "array",
             "items": {
@@ -95,11 +119,24 @@ REVIEW_SCHEMA = {
                     "title": {"type": "string"},
                     "detail": {"type": "string"},
                     "recommendation": {"type": "string"},
-                    "citations": {"type": "array", "items": {"type": "string"}},
+                    "citations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "string",
+                            "pattern": r"^(?:S\d+|\[S\d+\])$",
+                        },
+                    },
                 },
             },
         },
-        "recommendations": {"type": "array", "items": {"type": "string"}},
+        "recommendations": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "description": "Gắn [S1], [S2] sau mọi khuyến nghị dựa trên pháp luật.",
+            },
+        },
     },
 }
 
@@ -109,23 +146,37 @@ COMPARE_SCHEMA = {
     "additionalProperties": False,
     "required": ["summary", "differences", "risks", "recommendation"],
     "properties": {
-        "summary": {"type": "string"},
+        "summary": {
+            "type": "string",
+            "description": "Tóm tắt có [S1], [S2] ngay sau từng nhận định pháp lý.",
+        },
         "differences": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["type", "before", "after", "legal_impact"],
+                "required": ["type", "before", "after", "legal_impact", "citations"],
                 "properties": {
                     "type": {"type": "string"},
                     "before": {"type": "string"},
                     "after": {"type": "string"},
                     "legal_impact": {"type": "string"},
+                    "citations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "string",
+                            "pattern": r"^(?:S\d+|\[S\d+\])$",
+                        },
+                    },
                 },
             },
         },
         "risks": {"type": "array", "items": REVIEW_SCHEMA["properties"]["risks"]["items"]},
-        "recommendation": {"type": "string"},
+        "recommendation": {
+            "type": "string",
+            "description": "Gắn [S1], [S2] sau mọi khuyến nghị dựa trên pháp luật.",
+        },
     },
 }
 
@@ -138,7 +189,7 @@ def freshness_service(request: Request) -> LegalFreshnessService:
     return request.app.state.freshness
 
 
-def ai_service(request: Request) -> QwenService:
+def ai_service(request: Request) -> GeminiService:
     return request.app.state.ai
 
 
@@ -199,14 +250,59 @@ def _artifact_out(artifact: Artifact, settings: Settings) -> ArtifactOut:
     )
 
 
+def _message_verification_out(value: Any) -> VerificationReport | None:
+    if not isinstance(value, dict) or not value:
+        return None
+
+    payload = dict(value)
+    if not isinstance(payload.get("items"), list):
+        payload["items"] = []
+    try:
+        return VerificationReport.model_validate(payload)
+    except ValidationError:
+        logger.warning("Ignoring malformed verification payload in stored chat message")
+        return VerificationReport(
+            checked=bool(payload.get("checked", False)),
+            all_current=bool(payload.get("all_current", False)),
+            note=payload.get("note") if isinstance(payload.get("note"), str) else "",
+        )
+
+
+def _message_sources_out(value: Any) -> list[SourceOut]:
+    if not isinstance(value, list):
+        return []
+
+    sources: list[SourceOut] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        try:
+            sources.append(SourceOut.model_validate(item))
+        except ValidationError:
+            logger.warning("Ignoring malformed source payload in stored chat message")
+    return sources
+
+
+def _message_content_out(message: ChatMessage, settings: Settings) -> str:
+    try:
+        return decrypt_text(message.content_ciphertext, settings)
+    except (BinasciiError, InvalidTag, UnicodeDecodeError, ValueError):
+        logger.exception("Cannot decrypt stored chat message message_id=%s", message.id)
+        return "Không thể khôi phục nội dung tin nhắn này."
+
+
 def _message_out(message: ChatMessage, settings: Settings) -> MessageOut:
+    role = str(message.role).lower()
+    if role not in {"user", "assistant"}:
+        logger.warning("Normalizing unsupported stored chat role role=%s message_id=%s", role, message.id)
+        role = "assistant"
     return MessageOut(
         id=message.id,
         conversation_id=message.conversation_id,
-        role=message.role.lower(),
-        content=decrypt_text(message.content_ciphertext, settings),
-        sources=message.sources,
-        verification=message.verification,
+        role=role,
+        content=_message_content_out(message, settings),
+        sources=_message_sources_out(message.sources),
+        verification=_message_verification_out(message.verification),
         created_at=message.created_at,
     )
 
@@ -237,30 +333,129 @@ async def _legal_sources(
     retrieval: RetrievalService,
     freshness: LegalFreshnessService,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    sources = await retrieval.retrieve(query)
-    if not sources:
-        raise HTTPException(status_code=404, detail="Chưa tìm thấy căn cứ pháp lý phù hợp trong chỉ mục")
+    configured_limit = getattr(
+        getattr(freshness, "settings", None),
+        "max_laws_verified_per_request",
+        16,
+    )
     try:
-        verification, updated = await freshness.verify_sources(sources)
-    except FreshnessUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if updated:
-        sources = await retrieval.retrieve(query)
-        verification, _ = await freshness.verify_sources(sources)
-    blocked_codes = {
-        item.code.upper()
-        for item in verification.items
-        if item.status in {"EXPIRED", "REPLACED", "UNKNOWN"}
-    }
-    if blocked_codes:
-        sources = [
+        source_limit = max(1, int(configured_limit))
+    except (TypeError, ValueError):
+        source_limit = 16
+
+    def usable_sources(rows: Any) -> list[dict[str, Any]]:
+        filtered = [
             source
-            for source in sources
-            if not any(
-                code in f"{source.get('citation', '')} {source.get('title', '')}".upper()
-                for code in blocked_codes
-            )
+            for source in rows
+            if isinstance(source, dict)
+            and str(source.get("text") or "").strip()
+            and str(source.get("citation") or source.get("title") or "").strip()
         ]
+        # Every source admitted to the model context must be among the sources
+        # passed to freshness verification. Capping by source count is stricter
+        # than the verifier's unique-law cap and therefore cannot leave an
+        # unverified 17th law in the prompt.
+        return select_context_sources(filtered)[:source_limit]
+
+    def source_law_code(source: dict[str, Any]) -> str:
+        label = f"{source.get('citation', '')} {source.get('title', '')}"
+        match = LAW_CODE_RE.search(label.upper())
+        if match:
+            return match.group(0).upper()
+        return str(
+            source.get("doc_id") or source.get("title") or "Không rõ"
+        )[:120].strip().upper()
+
+    sources = usable_sources(await retrieval.retrieve(query))
+    if not sources:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Không tìm thấy nguồn pháp lý phù hợp để trả lời an toàn. "
+                "Vui lòng cung cấp thêm số hiệu văn bản hoặc bối cảnh."
+            ),
+        )
+    try:
+        retrieval_query = query
+        followed_replacements: set[str] = set()
+        for _ in range(6):
+            verification, updated = await freshness.verify_sources(sources)
+            verification_items = list(
+                getattr(verification, "items", []) or []
+            )
+            verified_statuses = {
+                item.code.strip().upper(): item.status.strip().upper()
+                for item in verification_items
+            }
+            current_sources = [
+                source
+                for source in sources
+                if verified_statuses.get(source_law_code(source))
+                in CURRENT_STATUSES
+            ]
+            replacement_codes = []
+            for item in verification_items:
+                replacement_code = str(
+                    getattr(item, "replacement_code", "") or ""
+                ).strip().upper()
+                if (
+                    item.status.strip().upper() not in CURRENT_STATUSES
+                    and replacement_code
+                    and replacement_code not in followed_replacements
+                ):
+                    replacement_codes.append(replacement_code)
+            if not updated and not replacement_codes:
+                sources = current_sources
+                break
+            followed_replacements.update(replacement_codes)
+            retrieval_query = " ".join(
+                [query, *sorted(followed_replacements)]
+            )
+            sources = usable_sources(
+                await retrieval.retrieve(retrieval_query)
+            )
+            if not sources:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Chỉ mục pháp luật đã được cập nhật nhưng chưa có "
+                        "văn bản thay thế phù hợp để trả lời an toàn."
+                    ),
+                )
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail="Chuỗi văn bản thay thế vượt quá giới hạn xử lý an toàn.",
+            )
+    except FreshnessUnavailable as exc:
+        logger.warning(
+            "Legal freshness verification unavailable error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Không thể hoàn tất kiểm tra hiệu lực văn bản lúc này.",
+        ) from exc
+    verified_statuses = {
+        item.code.strip().upper(): item.status.strip().upper()
+        for item in verification.items
+    }
+    verification_by_code = {
+        item.code.strip().upper(): item for item in verification.items
+    }
+    verified_sources: list[dict[str, Any]] = []
+    for source in sources:
+        code = source_law_code(source)
+        item = verification_by_code.get(code)
+        if item is None or verified_statuses.get(code) not in CURRENT_STATUSES:
+            continue
+        enriched = dict(source)
+        enriched["law_status"] = item.status
+        enriched["source_url"] = (
+            getattr(item, "source_url", None) or enriched.get("source_url")
+        )
+        verified_sources.append(enriched)
+    sources = verified_sources
     if not sources:
         raise HTTPException(
             status_code=409,
@@ -272,14 +467,138 @@ async def _legal_sources(
 
 
 def _verification_prompt(verification: dict[str, Any]) -> str:
-    return json.dumps(verification, ensure_ascii=False, indent=2)
+    return untrusted_data_block("VERIFICATION_REPORT", verification)
+
+
+def _summary_prompt(summary: str) -> str:
+    if not summary:
+        return "(Chưa có tóm tắt)"
+    return untrusted_data_block("CONVERSATION_SUMMARY", summary)
 
 
 def _chat_history_prompt(turns: list[tuple[str, str]]) -> str:
     if not turns:
         return "(Không có hội thoại trước đó)"
     labels = {"USER": "Người dùng", "ASSISTANT": "Trợ lý", "user": "Người dùng", "assistant": "Trợ lý"}
-    return "\n".join(f"{labels.get(role, role)}: {content[:2000]}" for role, content in turns[-8:])
+    history = [
+        {
+            "role": labels.get(role, role),
+            "content": content[:2000],
+        }
+        for role, content in turns[-8:]
+    ]
+    return untrusted_data_block("CONVERSATION_HISTORY", history)
+
+
+def _validate_narrative_claims(
+    values: str | list[str],
+    allowed_ids: list[str],
+) -> None:
+    items = [values] if isinstance(values, str) else values
+    for value in items:
+        validate_citations(
+            value,
+            allowed_ids,
+            require=False,
+            require_claim_coverage=True,
+        )
+
+
+async def _complete_with_citation_repair(
+    ai: GeminiService,
+    system: str,
+    prompt: str,
+    *,
+    allowed_ids: list[str],
+    max_tokens: int,
+    temperature: float = 0.1,
+) -> str:
+    answer = await ai.complete(
+        system,
+        prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    try:
+        validate_citations(
+            answer,
+            allowed_ids,
+            require_claim_coverage=True,
+        )
+        return answer
+    except GeminiError:
+        repair_prompt = (
+            f"{prompt}\n\n"
+            "YÊU CẦU SỬA TRÍCH DẪN BẮT BUỘC:\n"
+            "Chuyển câu trả lời thành các nhận định ngắn. Mỗi phần tử chỉ chứa "
+            "một nhận định và phải chọn ít nhất một ID nguồn thực sự hỗ trợ "
+            "nhận định đó. Không tạo ID mới.\n"
+            f"{untrusted_data_block('DRAFT_WITH_INVALID_CITATIONS', answer)}"
+        )
+        repair_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["statements"],
+            "properties": {
+                "statements": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["text", "citations"],
+                        "properties": {
+                            "text": {"type": "string"},
+                            "citations": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                    "type": "string",
+                                    "enum": allowed_ids,
+                                },
+                            },
+                        },
+                    },
+                }
+            },
+        }
+        structured = await ai.complete_json(
+            system,
+            repair_prompt,
+            schema=repair_schema,
+            max_tokens=max_tokens,
+            temperature=0,
+        )
+        validate_citations(structured, allowed_ids)
+        repaired_units: list[str] = []
+        for statement in structured["statements"]:
+            citations = list(dict.fromkeys(
+                str(item).strip().upper()
+                for item in statement["citations"]
+            ))
+            suffix = " ".join(f"[{item}]" for item in citations)
+            text = re.sub(
+                r"(?:\s*,?\s*\[(?:S\d+)\])+",
+                "",
+                str(statement["text"]),
+                flags=re.IGNORECASE,
+            ).strip()
+            text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+            for unit in re.split(r"(?<=[.!?;])\s+|\n+", text):
+                unit = unit.strip()
+                if unit:
+                    terminal = unit[-1] if unit[-1] in ".!?;" else ""
+                    body = unit[:-1].rstrip() if terminal else unit
+                    repaired_units.append(
+                        f"- {body} {suffix}{terminal}"
+                    )
+        repaired = "\n".join(repaired_units)
+        validate_citations(
+            repaired,
+            allowed_ids,
+            require_claim_coverage=True,
+        )
+        return repaired
 
 
 async def _load_postgres_chat_history(
@@ -294,7 +613,7 @@ async def _load_postgres_chat_history(
         await db.scalars(
             select(ChatMessage)
             .where(ChatMessage.conversation_id == conversation_id)
-            .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+            .order_by(ChatMessage.message_sequence.desc())
             .limit(limit)
         )
     ).all()
@@ -313,12 +632,32 @@ async def liveness() -> dict[str, str]:
 async def readiness(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
+    ai: GeminiService = Depends(ai_service),
 ) -> dict[str, str]:
     await db.scalar(select(func.now()))
-    if not settings.qwen_ready:
+    # The database probe is complete; do not hold its transaction while the
+    # credential/token readiness check performs network I/O.
+    await db.rollback()
+    if not settings.gemini_ready:
         raise HTTPException(
             status_code=503,
-            detail="Qwen offline checkpoint is not available",
+            detail="Gemini service-account credential is not available",
+        )
+    try:
+        await ai.ensure_ready()
+    except GeminiError as exc:
+        logger.warning(
+            "Gemini readiness check failed error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini authentication is not ready",
+        ) from exc
+    if settings.require_freshness_check and not settings.tavily_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Legal freshness search is not configured",
         )
     if not settings.embedding_ready:
         raise HTTPException(
@@ -426,22 +765,25 @@ async def list_conversations(
     return [_conversation_out(row, int(count)) for row, count in (await db.execute(statement)).all()]
 
 
-@router.get("/conversations/{conversation_id}")
+@router.get("/conversations/{conversation_id}", response_model=ConversationDetailOut)
 async def get_conversation(
     conversation_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
     settings: Settings = Depends(get_settings),
-) -> dict[str, Any]:
+) -> ConversationDetailOut:
     conversation = await _owned_conversation(db, conversation_id, user)
     messages = (
         await db.scalars(
             select(ChatMessage)
             .where(ChatMessage.conversation_id == conversation.id)
-            .order_by(ChatMessage.created_at)
+            .order_by(ChatMessage.message_sequence)
         )
     ).all()
-    return {"conversation": _conversation_out(conversation, len(messages)), "messages": [_message_out(row, settings) for row in messages]}
+    return ConversationDetailOut(
+        conversation=_conversation_out(conversation, len(messages)),
+        messages=[_message_out(row, settings) for row in messages],
+    )
 
 
 @router.patch("/conversations/{conversation_id}", response_model=ConversationOut)
@@ -481,19 +823,24 @@ async def chat(
     settings: Settings = Depends(get_settings),
     retrieval: RetrievalService = Depends(retrieval_service),
     freshness: LegalFreshnessService = Depends(freshness_service),
-    ai: QwenService = Depends(ai_service),
+    ai: GeminiService = Depends(ai_service),
     limiter: GuestRateLimiter = Depends(guest_rate_limiter),
     memory: ConversationMemoryService = Depends(conversation_memory_service),
     answer_cache: SemanticAnswerCacheService = Depends(semantic_answer_cache_service),
 ) -> ChatResponse:
     conversation: Conversation | None = None
+    conversation_id: uuid.UUID | None = None
+    authenticated_user_id = user.id if user else None
+    cache_scope = f"user:{authenticated_user_id}" if authenticated_user_id else ""
     summary_context = ""
     # Client-provided history is only for an anonymous, temporary browser
     # session. Authenticated history always comes from PostgreSQL below.
     history_turns = [] if user else [(turn.role, turn.content) for turn in payload.history]
     if not user:
+        guest_subject = _guest_rate_subject(request, response, settings)
+        cache_scope = f"guest:{guest_subject}"
         try:
-            await limiter.check(_guest_rate_subject(request, response, settings))
+            await limiter.check(guest_subject)
         except GuestRateLimitExceeded as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except GuestRateLimitUnavailable as exc:
@@ -501,24 +848,13 @@ async def chat(
     if user:
         if payload.conversation_id:
             conversation = await _owned_conversation(db, payload.conversation_id, user)
-            summary_context = await memory.get_summary(db, conversation.id)
-            history_turns = await _load_postgres_chat_history(db, conversation.id, settings)
-        else:
-            conversation = Conversation(
-                user_id=user.id,
-                title=payload.message[:100],
-                retrieval_mode=settings.retriever_backend.upper(),
-            )
-            db.add(conversation)
-            await db.flush()
-        user_message = ChatMessage(
-            conversation_id=conversation.id,
-            role="USER",
-            content_ciphertext=encrypt_text(payload.message, settings),
-            content_hash=_hash_content(payload.message),
-        )
-        db.add(user_message)
-        await db.commit()
+            conversation_id = conversation.id
+            summary_context = await memory.get_summary(db, conversation_id)
+            history_turns = await _load_postgres_chat_history(db, conversation_id, settings)
+        # Authentication and history reads must not retain a PostgreSQL
+        # transaction while cache/search/Gemini network calls are in flight.
+        await db.rollback()
+        conversation = None
     elif payload.conversation_id:
         raise HTTPException(
             status_code=401,
@@ -539,26 +875,43 @@ async def chat(
     )
     if cache_eligible:
         try:
-            cache_lookup = await answer_cache.lookup(payload.message)
+            cache_lookup = await answer_cache.lookup(
+                payload.message,
+                scope=cache_scope,
+            )
         except Exception:
             logger.exception("Cannot query semantic answer cache")
 
     if cache_lookup and cache_lookup.hit:
         cached = cache_lookup.hit
         try:
-            current_report, index_updated = await freshness.verify_sources(cached.sources)
-            current_verification = current_report.model_dump(mode="json")
+            if not cached.sources:
+                raise GeminiError("Bản cache không có nguồn pháp lý.")
+            validate_citations(
+                cached.answer,
+                [source.get("source_id", "") for source in cached.sources],
+                require_claim_coverage=True,
+            )
+            current_sources, current_verification = await _legal_sources(
+                payload.message,
+                retrieval,
+                freshness,
+            )
             fingerprint_matches = (
-                legal_fingerprint(cached.sources, current_verification)
+                legal_fingerprint(current_sources, current_verification)
                 == cached.law_fingerprint
             )
             if (
-                current_report.checked
-                and current_report.all_current
-                and not index_updated
+                current_verification.get("checked")
+                and current_verification.get("all_current")
                 and fingerprint_matches
             ):
-                sources = cached.sources
+                validate_citations(
+                    cached.answer,
+                    [source.get("source_id", "") for source in current_sources],
+                    require_claim_coverage=True,
+                )
+                sources = current_sources
                 verification = current_verification
                 cache_similarity = cached.similarity
                 if cached.exact_match:
@@ -573,7 +926,18 @@ async def chat(
                 except Exception:
                     logger.exception("Cannot update semantic answer cache hit counter")
             else:
+                sources = current_sources
+                verification = current_verification
                 await answer_cache.invalidate(cached.id)
+        except HTTPException:
+            try:
+                await answer_cache.invalidate(cached.id)
+            except Exception:
+                logger.exception(
+                    "Cannot invalidate semantic answer cache entry %s",
+                    cached.id,
+                )
+            raise
         except Exception:
             logger.exception("Cannot validate semantic answer cache entry %s", cached.id)
             try:
@@ -582,17 +946,26 @@ async def chat(
                 logger.exception("Cannot invalidate semantic answer cache entry %s", cached.id)
 
     if not cache_hit:
-        sources, verification = await _legal_sources(payload.message, retrieval, freshness)
-        answer = await ai.complete(
+        if not sources:
+            sources, verification = await _legal_sources(
+                payload.message,
+                retrieval,
+                freshness,
+            )
+        answer = await _complete_with_citation_repair(
+            ai,
             LEGAL_SYSTEM_PROMPT,
-            f"BỘ NHỚ TÓM TẮT:\n{summary_context or '(Chưa có tóm tắt)'}\n\n"
+            "BỘ NHỚ TÓM TẮT:\n"
+            f"{_summary_prompt(summary_context)}\n\n"
             f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
             f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-            f"NGUỒN:\n{build_context(sources)}\n\nCÂU HỎI HIỆN TẠI:\n{payload.message}"
+            f"NGUỒN:\n{build_context(sources)}\n\n"
+            f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
             f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
-            f"{cached_draft or '(Không có)'}\n"
+            f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
             "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
             "không được sao chép các kết luận không còn phù hợp.",
+            allowed_ids=[source["source_id"] for source in sources],
             max_tokens=2200,
         )
         if cache_lookup and verification.get("checked") and verification.get("all_current"):
@@ -606,9 +979,58 @@ async def chat(
             except Exception:
                 logger.exception("Cannot store semantic answer cache entry")
     message_id = uuid.uuid4()
-    if conversation:
+    if user:
+        if conversation_id is None:
+            conversation = Conversation(
+                user_id=authenticated_user_id,
+                title=payload.message[:100],
+                retrieval_mode=settings.retriever_backend.upper(),
+            )
+            db.add(conversation)
+            await db.flush()
+            conversation_id = conversation.id
+            lock_key = f"vlegal:conversation-messages:{conversation_id}"
+            await db.execute(
+                sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": lock_key},
+            )
+        else:
+            lock_key = f"vlegal:conversation-messages:{conversation_id}"
+            await db.execute(
+                sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": lock_key},
+            )
+            # Authorization is re-evaluated after the network phase and while
+            # the append lock is held, so deletion/ownership changes cannot be
+            # bypassed by the earlier snapshot.
+            conversation = await db.scalar(
+                select(Conversation).where(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == authenticated_user_id,
+                )
+            )
+            if conversation is None:
+                raise HTTPException(status_code=404, detail="Không tìm thấy cuộc trò chuyện")
+
+        last_sequence = int(
+            await db.scalar(
+                select(func.max(ChatMessage.message_sequence)).where(
+                    ChatMessage.conversation_id == conversation_id
+                )
+            )
+            or 0
+        )
+        user_message = ChatMessage(
+            conversation_id=conversation_id,
+            message_sequence=last_sequence + 1,
+            role="USER",
+            content_ciphertext=encrypt_text(payload.message, settings),
+            content_hash=_hash_content(payload.message),
+        )
+        db.add(user_message)
         assistant_message = ChatMessage(
-            conversation_id=conversation.id,
+            conversation_id=conversation_id,
+            message_sequence=last_sequence + 2,
             role="ASSISTANT",
             content_ciphertext=encrypt_text(answer, settings),
             content_hash=_hash_content(answer),
@@ -621,13 +1043,13 @@ async def chat(
         await db.refresh(assistant_message)
         message_id = assistant_message.id
         try:
-            await memory.refresh(conversation.id)
+            await memory.refresh(conversation_id)
         except Exception:
             # The full encrypted transcript is already durable. A later turn
-            # retries every message after source_message_count automatically.
-            logger.exception("Cannot refresh conversation summary for %s", conversation.id)
+            # retries every message after last_message_sequence automatically.
+            logger.exception("Cannot refresh conversation summary for %s", conversation_id)
     return ChatResponse(
-        conversation_id=conversation.id if conversation else None,
+        conversation_id=conversation_id,
         message_id=message_id,
         answer=answer,
         sources=sources,
@@ -641,7 +1063,7 @@ async def chat(
 
 async def _save_artifact(
     db: AsyncSession,
-    user: User,
+    user_id: uuid.UUID,
     settings: Settings,
     *,
     kind: str,
@@ -649,8 +1071,16 @@ async def _save_artifact(
     content: str,
     metadata: dict[str, Any],
 ) -> Artifact:
+    active_user_id = await db.scalar(
+        select(User.id).where(User.id == user_id, User.is_active.is_(True))
+    )
+    if active_user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Tài khoản không còn hoạt động",
+        )
     artifact = Artifact(
-        user_id=user.id,
+        user_id=active_user_id,
         kind=kind,
         title=title[:220],
         content_ciphertext=encrypt_text(content, settings),
@@ -670,8 +1100,10 @@ async def draft_contract(
     settings: Settings = Depends(get_settings),
     retrieval: RetrievalService = Depends(retrieval_service),
     freshness: LegalFreshnessService = Depends(freshness_service),
-    ai: QwenService = Depends(ai_service),
+    ai: GeminiService = Depends(ai_service),
 ) -> dict[str, Any]:
+    user_id = user.id
+    await db.rollback()
     template = payload.template_name or next(
         (item["name"] for item in CONTRACT_TEMPLATES if item["id"] == payload.template_id), "Hợp đồng"
     )
@@ -680,9 +1112,17 @@ async def draft_contract(
     draft = await ai.complete(
         CONTRACT_SYSTEM_PROMPT,
         f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\nNGUỒN:\n{build_context(sources)}\n\n"
-        f"Hãy soạn {template}. Yêu cầu: {payload.prompt}\nBao gồm căn cứ, định nghĩa, quyền/nghĩa vụ, thanh toán, vi phạm, chấm dứt, tranh chấp và phần ký.",
+        "Hãy soạn hợp đồng theo dữ liệu đầu vào dưới đây.\n"
+        f"{untrusted_data_block('CONTRACT_REQUEST', {'template': template, 'requirements': payload.prompt})}\n"
+        "Bao gồm căn cứ, định nghĩa, quyền/nghĩa vụ, thanh toán, vi phạm, "
+        "chấm dứt, tranh chấp và phần ký.",
         max_tokens=5000,
         temperature=0.12,
+    )
+    validate_citations(
+        draft,
+        [source["source_id"] for source in sources],
+        require_claim_coverage=True,
     )
     checklist = [
         "Điền và đối chiếu thông tin pháp lý của các bên.",
@@ -692,12 +1132,12 @@ async def draft_contract(
         "Luật sư kiểm tra bản cuối trước khi ký nếu giao dịch có giá trị hoặc rủi ro cao.",
     ]
     artifact = await _save_artifact(
-        db, user, settings, kind="CONTRACT_DRAFT", title=template, content=draft,
+        db, user_id, settings, kind="CONTRACT_DRAFT", title=template, content=draft,
         metadata={"sources": sources, "verification": verification, "checklist": checklist},
     )
     return {
         "artifact_id": str(artifact.id), "title": template, "draft": draft, "checklist": checklist,
-        "sources": sources, "verification": verification, "model": settings.qwen_model,
+        "sources": sources, "verification": verification, "model": settings.gemini_model,
     }
 
 
@@ -709,21 +1149,29 @@ async def review_contract(
     settings: Settings = Depends(get_settings),
     retrieval: RetrievalService = Depends(retrieval_service),
     freshness: LegalFreshnessService = Depends(freshness_service),
-    ai: QwenService = Depends(ai_service),
+    ai: GeminiService = Depends(ai_service),
 ) -> dict[str, Any]:
+    user_id = user.id
+    await db.rollback()
     query = f"Rà soát hợp đồng và rủi ro pháp lý: {payload.title or ''} {payload.text[:5000]}"
     sources, verification = await _legal_sources(query, retrieval, freshness)
     result = await ai.complete_json(
         CONTRACT_SYSTEM_PROMPT,
-        f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\nNGUỒN:\n{build_context(sources)}\n\nHỢP ĐỒNG:\n{payload.text}",
+        f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
+        f"NGUỒN:\n{build_context(sources)}\n\n"
+        f"HỢP ĐỒNG:\n{untrusted_data_block('CONTRACT_TEXT', payload.text)}",
         schema=REVIEW_SCHEMA,
         max_tokens=4200,
     )
+    allowed_ids = [source["source_id"] for source in sources]
+    validate_citations(result, allowed_ids)
+    _validate_narrative_claims(result["summary"], allowed_ids)
+    _validate_narrative_claims(result["recommendations"], allowed_ids)
     artifact = await _save_artifact(
-        db, user, settings, kind="CONTRACT_REVIEW", title=payload.title or "Kết quả review hợp đồng",
+        db, user_id, settings, kind="CONTRACT_REVIEW", title=payload.title or "Kết quả review hợp đồng",
         content=result["summary"], metadata={**result, "sources": sources, "verification": verification},
     )
-    return {"artifact_id": str(artifact.id), **result, "sources": sources, "verification": verification, "model": settings.qwen_model}
+    return {**result, "artifact_id": str(artifact.id), "sources": sources, "verification": verification, "model": settings.gemini_model}
 
 
 @router.post("/contracts/compare")
@@ -734,23 +1182,30 @@ async def compare_contracts(
     settings: Settings = Depends(get_settings),
     retrieval: RetrievalService = Depends(retrieval_service),
     freshness: LegalFreshnessService = Depends(freshness_service),
-    ai: QwenService = Depends(ai_service),
+    ai: GeminiService = Depends(ai_service),
 ) -> dict[str, Any]:
+    user_id = user.id
+    await db.rollback()
     query = f"Rủi ro pháp lý khi sửa đổi hợp đồng: {payload.original_text[:2500]} {payload.revised_text[:2500]}"
     sources, verification = await _legal_sources(query, retrieval, freshness)
     result = await ai.complete_json(
         CONTRACT_SYSTEM_PROMPT,
         f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\nNGUỒN:\n{build_context(sources)}\n\n"
-        f"BẢN GỐC:\n{payload.original_text}\n\nBẢN SỬA:\n{payload.revised_text}",
+        f"BẢN GỐC:\n{untrusted_data_block('ORIGINAL_CONTRACT', payload.original_text)}\n\n"
+        f"BẢN SỬA:\n{untrusted_data_block('REVISED_CONTRACT', payload.revised_text)}",
         schema=COMPARE_SCHEMA,
         max_tokens=4800,
     )
+    allowed_ids = [source["source_id"] for source in sources]
+    validate_citations(result, allowed_ids)
+    _validate_narrative_claims(result["summary"], allowed_ids)
+    _validate_narrative_claims(result["recommendation"], allowed_ids)
     result["similarity"] = round(difflib.SequenceMatcher(None, payload.original_text, payload.revised_text).ratio() * 100)
     artifact = await _save_artifact(
-        db, user, settings, kind="CONTRACT_COMPARE", title="So sánh hợp đồng",
+        db, user_id, settings, kind="CONTRACT_COMPARE", title="So sánh hợp đồng",
         content=result["summary"], metadata={**result, "sources": sources, "verification": verification},
     )
-    return {"artifact_id": str(artifact.id), **result, "sources": sources, "verification": verification, "model": settings.qwen_model}
+    return {**result, "artifact_id": str(artifact.id), "sources": sources, "verification": verification, "model": settings.gemini_model}
 
 
 @router.post("/artifacts", response_model=ArtifactOut, status_code=201)
@@ -880,10 +1335,20 @@ async def web_search_articles(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
 ) -> dict[str, Any]:
+    user_id = user.id
+    await db.rollback()
     result = await research.search(payload.query)
     if payload.save:
+        active_user_id = await db.scalar(
+            select(User.id).where(User.id == user_id, User.is_active.is_(True))
+        )
+        if active_user_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Tài khoản không còn hoạt động",
+            )
         article = Article(
-            author_id=user.id,
+            author_id=active_user_id,
             slug=_slugify(payload.query),
             title=f"Nghiên cứu: {payload.query}",
             excerpt=result["summary"][:500],

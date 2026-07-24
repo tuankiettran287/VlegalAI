@@ -1,19 +1,38 @@
+# Local development stack only. Google Cloud Run does not deploy Compose files;
+# use compose.gcp.yml to build/tag images and scripts/gcp/deploy.ps1 to deploy.
 name: vlegal
 
 x-app-environment: &app-environment
-  DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
-  POSTGRES_VECTOR_SIZE: "1024"
+  APP_ENV: development
+  PUBLIC_URL: http://localhost:8000
+  FRONTEND_URL: http://localhost:5173
+  CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000
+  DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in .env}"
+  POSTGRES_VECTOR_SIZE: "${POSTGRES_VECTOR_SIZE:-1024}"
   NEO4J_URI: bolt://neo4j:7687
-  NEO4J_USER: neo4j
-  NEO4J_PASSWORD: local-neo4j-password
-  QWEN_MODEL_PATH: /models/qwen3
-  QWEN_DEVICE: auto
+  NEO4J_USER: "${NEO4J_USER:-neo4j}"
+  NEO4J_PASSWORD: "${NEO4J_PASSWORD:-local-neo4j-password}"
+  NEO4J_DATABASE: "${NEO4J_DATABASE:-neo4j}"
+  GEMINI_CREDENTIALS_PATH: /app/env.json
+  GEMINI_USE_ADC: "${GEMINI_USE_ADC:-false}"
+  GEMINI_PROJECT_ID: "${GEMINI_PROJECT_ID:-}"
+  GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.5-flash}"
+  GEMINI_LOCATION: "${GEMINI_LOCATION:-global}"
+  GEMINI_THINKING_LEVEL: "${GEMINI_THINKING_LEVEL:-low}"
+  GEMINI_DATA_POLICY: "${GEMINI_DATA_POLICY:-redact}"
   EMBEDDING_MODEL_PATH: /models/embedding
-  EMBEDDING_MODEL_REPO: BAAI/bge-m3
-  EMBEDDING_DEVICE: auto
+  EMBEDDING_MODEL_REPO: "${EMBEDDING_MODEL_REPO:-BAAI/bge-m3}"
+  EMBEDDING_MODEL_REVISION: "${EMBEDDING_MODEL_REVISION:-main}"
+  EMBEDDING_DEVICE: "${EMBEDDING_DEVICE:-auto}"
   LEGAL_DATA_DIR: /app/legal-data
   LEGAL_STORAGE_DIR: /app/storage/graphrag
   LEGAL_GRAPHRAG_DB: /app/storage/graphrag/legal_graphrag.sqlite
+
+x-runtime-volumes: &runtime-volumes
+  - ./env.json:/app/env.json:ro
+  - embedding_model:/models/embedding:ro
+  - "./Data (1):/app/legal-data:ro"
+  - ./storage:/app/storage
 
 services:
   model-init:
@@ -21,19 +40,12 @@ services:
     build:
       context: .
       dockerfile: docker/model-init.Dockerfile
-    env_file: .env
     environment:
-      HF_HUB_OFFLINE: "0"
-      TRANSFORMERS_OFFLINE: "0"
-      QWEN_MODEL_PATH: /models/qwen3
-      QWEN_MODEL_REPO: "${QWEN_MODEL_REPO:-Qwen/Qwen3-14B}"
-      QWEN_MODEL_REVISION: "${QWEN_MODEL_REVISION:-main}"
+      HF_TOKEN: "${HF_TOKEN:-}"
       EMBEDDING_MODEL_PATH: /models/embedding
       EMBEDDING_MODEL_REPO: "${EMBEDDING_MODEL_REPO:-BAAI/bge-m3}"
       EMBEDDING_MODEL_REVISION: "${EMBEDDING_MODEL_REVISION:-main}"
-    user: "0:0"
     volumes:
-      - qwen_model:/models/qwen3
       - embedding_model:/models/embedding
     restart: "no"
 
@@ -42,12 +54,10 @@ services:
     build:
       context: .
       dockerfile: docker/migrate.Dockerfile
-    env_file: .env
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
-    depends_on:
-      postgres:
-        condition: service_healthy
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in .env}"
     restart: "no"
 
   reindex:
@@ -55,8 +65,9 @@ services:
     build:
       context: .
       dockerfile: docker/reindex.Dockerfile
-    profiles: ["jobs"]
-    env_file: .env
+    profiles: [jobs]
+    env_file:
+      - .env
     environment:
       <<: *app-environment
     volumes:
@@ -68,8 +79,6 @@ services:
         condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
       neo4j:
         condition: service_healthy
     restart: "no"
@@ -79,16 +88,14 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    env_file: .env
+    init: true
+    env_file:
+      - .env
     environment:
       <<: *app-environment
-    volumes:
-      - qwen_model:/models/qwen3:ro
-      - embedding_model:/models/embedding:ro
-      - "./Data (1):/app/legal-data:ro"
-      - ./storage:/app/storage
+    volumes: *runtime-volumes
     ports:
-      - "8000:8080"
+      - "${API_PORT:-8000}:8080"
     depends_on:
       model-init:
         condition: service_completed_successfully
@@ -107,7 +114,7 @@ services:
       PORT: "8080"
       API_UPSTREAM: http://api:8080
     ports:
-      - "5173:8080"
+      - "${FRONTEND_PORT:-5173}:8080"
     depends_on:
       api:
         condition: service_healthy
@@ -118,14 +125,13 @@ services:
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
-    env_file: .env
+    init: true
+    env_file:
+      - .env
     environment:
       <<: *app-environment
-    volumes:
-      - qwen_model:/models/qwen3:ro
-      - embedding_model:/models/embedding:ro
-      - "./Data (1):/app/legal-data:ro"
-      - ./storage:/app/storage
+      CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-1}"
+    volumes: *runtime-volumes
     depends_on:
       model-init:
         condition: service_completed_successfully
@@ -140,46 +146,36 @@ services:
     build:
       context: .
       dockerfile: docker/beat.Dockerfile
-    env_file: .env
+    init: true
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in .env}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     depends_on:
       migrate:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
     restart: unless-stopped
-
-  postgres:
-    image: pgvector/pgvector:0.8.2-pg16
-    environment:
-      POSTGRES_DB: vlegal
-      POSTGRES_USER: vlegal
-      POSTGRES_PASSWORD: vlegal
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vlegal -d vlegal"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
 
   neo4j:
     image: neo4j:5.26-community
     environment:
-      NEO4J_AUTH: neo4j/local-neo4j-password
-      NEO4J_server_memory_heap_initial__size: 512m
-      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-local-neo4j-password}"
+      NEO4J_server_memory_heap_initial__size: "${NEO4J_HEAP_INITIAL:-512m}"
+      NEO4J_server_memory_heap_max__size: "${NEO4J_HEAP_MAX:-1G}"
     volumes:
       - neo4j_data:/data
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:7474"]
+      test: [CMD, wget, --spider, -q, http://localhost:7474]
       interval: 10s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
 
 volumes:
-  qwen_model:
   embedding_model:
-  postgres_data:
   neo4j_data:

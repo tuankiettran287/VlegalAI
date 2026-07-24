@@ -27,11 +27,13 @@ def test_authenticated_history_is_loaded_from_postgresql_in_chronological_order(
     now = datetime.now(UTC)
     oldest = SimpleNamespace(
         role="USER",
+        message_sequence=1,
         content_ciphertext=encrypt_text("Câu hỏi trước", settings),
         created_at=now,
     )
     newest = SimpleNamespace(
         role="ASSISTANT",
+        message_sequence=2,
         content_ciphertext=encrypt_text("Câu trả lời sau", settings),
         created_at=now + timedelta(seconds=1),
     )
@@ -46,4 +48,4 @@ def test_authenticated_history_is_loaded_from_postgresql_in_chronological_order(
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert "FROM chat_message" in sql
     assert "chat_message.conversation_id" in sql
-    assert "ORDER BY chat_message.created_at DESC" in sql
+    assert "ORDER BY chat_message.message_sequence DESC" in sql

@@ -1,6 +1,7 @@
 # Environment variables and local secrets
 
-.env.*
+
+.env
 !.env.example
 !.env.production.example
 env.json
@@ -20,6 +21,7 @@ venv/
 env/
 ENV/
 .pytest_cache/
+.pytest-tmp/
 .mypy_cache/
 .ruff_cache/
 .tox/
@@ -64,6 +66,7 @@ output/
 playwright-report/
 test-results/
 blob-report/
+.pytest-tmp-*/
 
 # Logs and process files
 *.log
@@ -71,6 +74,7 @@ blob-report/
 *.err.log
 *.pid
 *.pid.lock
+.local-tools/
 
 # Local model/checkpoint artifacts
 /models/*

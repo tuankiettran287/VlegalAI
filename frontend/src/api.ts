@@ -1,11 +1,13 @@
 import type {
   Article,
   Artifact,
+  ChatMessage,
   Conversation,
   Risk,
   Source,
   Template,
   User,
+  VerificationItem,
   VerificationReport,
   WebSource,
 } from "./types";
@@ -75,6 +77,89 @@ function patch<T>(url: string, body: unknown) {
   return requestJson<T>(url, { method: "PATCH", body: JSON.stringify(body) });
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const verificationStatuses = new Set<VerificationItem["status"]>([
+  "IN_FORCE",
+  "PARTIALLY_IN_FORCE",
+  "AMENDED",
+  "EXPIRED",
+  "REPLACED",
+  "UNKNOWN",
+]);
+
+function normalizeSources(value: unknown): Source[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item, index) => {
+    if (!isRecord(item)) return [];
+    return [{
+      source_id: typeof item.source_id === "string" ? item.source_id : `S${index + 1}`,
+      score: typeof item.score === "number" && Number.isFinite(item.score) ? item.score : 0,
+      chunk_type: typeof item.chunk_type === "string" ? item.chunk_type : "",
+      citation: typeof item.citation === "string" ? item.citation : "",
+      title: typeof item.title === "string" ? item.title : "",
+      text: typeof item.text === "string" ? item.text : "",
+      reasons: Array.isArray(item.reasons)
+        ? item.reasons.filter((reason): reason is string => typeof reason === "string")
+        : [],
+      doc_id: typeof item.doc_id === "string" ? item.doc_id : null,
+      source_url: typeof item.source_url === "string" ? item.source_url : null,
+    }];
+  });
+}
+
+function normalizeVerification(value: unknown): VerificationReport | undefined {
+  if (!isRecord(value) || Object.keys(value).length === 0) return undefined;
+  const items: VerificationItem[] = Array.isArray(value.items)
+    ? value.items.flatMap((item) => {
+        if (!isRecord(item)) return [];
+        const rawStatus = typeof item.status === "string" ? item.status : "UNKNOWN";
+        const status = verificationStatuses.has(rawStatus as VerificationItem["status"])
+          ? rawStatus as VerificationItem["status"]
+          : "UNKNOWN";
+        return [{
+          code: typeof item.code === "string" ? item.code : "",
+          title: typeof item.title === "string" ? item.title : "",
+          status,
+          checked_at: typeof item.checked_at === "string" ? item.checked_at : "",
+          source_url: typeof item.source_url === "string" ? item.source_url : null,
+          replacement_code: typeof item.replacement_code === "string" ? item.replacement_code : null,
+          index_updated: Boolean(item.index_updated),
+        }];
+      })
+    : [];
+
+  return {
+    checked: Boolean(value.checked),
+    all_current: Boolean(value.all_current),
+    checked_at: typeof value.checked_at === "string" ? value.checked_at : null,
+    items,
+    note: typeof value.note === "string" ? value.note : "",
+  };
+}
+
+function normalizeConversationMessages(value: unknown, conversationId: string): ChatMessage[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item, index) => {
+    if (!isRecord(item)) return [];
+    const role = typeof item.role === "string" ? item.role.toLowerCase() : "";
+    if (role !== "user" && role !== "assistant") return [];
+    const sources = normalizeSources(item.sources);
+    const verification = normalizeVerification(item.verification);
+    return [{
+      id: typeof item.id === "string" ? item.id : `${conversationId}-${index}`,
+      conversation_id: typeof item.conversation_id === "string" ? item.conversation_id : conversationId,
+      role,
+      content: typeof item.content === "string" ? item.content : "",
+      sources: sources.length ? sources : undefined,
+      verification,
+      created_at: typeof item.created_at === "string" ? item.created_at : undefined,
+    }];
+  });
+}
+
 export const authApi = {
   capabilities: () => requestJson<{ google_login: boolean }>("/api/auth/capabilities"),
   me: () => requestJson<User>("/api/auth/me"),
@@ -85,19 +170,16 @@ export const authApi = {
 export const conversationApi = {
   list: () => requestJson<Conversation[]>("/api/conversations"),
   create: (title = "Cuộc trò chuyện mới") => post<Conversation>("/api/conversations", { title }),
-  get: (id: string) =>
-    requestJson<{
+  get: async (id: string) => {
+    const data = await requestJson<{
       conversation: Conversation;
-      messages: Array<{
-        id: string;
-        conversation_id: string;
-        role: "user" | "assistant";
-        content: string;
-        sources: Source[];
-        verification: VerificationReport;
-        created_at: string;
-      }>;
-    }>(`/api/conversations/${id}`),
+      messages: unknown;
+    }>(`/api/conversations/${id}`);
+    return {
+      conversation: data.conversation,
+      messages: normalizeConversationMessages(data.messages, id),
+    };
+  },
   update: (id: string, body: Partial<Pick<Conversation, "title" | "status">>) =>
     patch<Conversation>(`/api/conversations/${id}`, body),
   remove: (id: string) => requestJson<void>(`/api/conversations/${id}`, { method: "DELETE" }),
@@ -153,7 +235,13 @@ export type CompareResponse = {
   artifact_id: string;
   summary: string;
   similarity: number;
-  differences: Array<{ type: string; before: string; after: string; legal_impact: string }>;
+  differences: Array<{
+    type: string;
+    before: string;
+    after: string;
+    legal_impact: string;
+    citations: string[];
+  }>;
   risks: Risk[];
   recommendation: string;
   sources: Source[];
@@ -194,10 +282,15 @@ export const articleApi = {
   list: (query = "") => requestJson<{ items: Article[] }>(`/api/articles?q=${encodeURIComponent(query)}`),
   get: (slug: string) => requestJson<Article>(`/api/articles/${encodeURIComponent(slug)}`),
   webSearch: (query: string, save = false) =>
-    post<{ query: string; summary: string; sources: WebSource[]; article?: Article }>("/api/articles/web-search", {
-      query,
-      save,
-    }),
+    post<{
+      query: string;
+      summary: string;
+      sources: WebSource[];
+      providers_used: string[];
+      search_warnings: string[];
+      google_search_entry_point?: string | null;
+      article?: Article;
+    }>("/api/articles/web-search", { query, save }),
 };
 
 export function getTemplates() {

@@ -67,12 +67,16 @@ class GuestRateLimiter:
                 await db.commit()
         except Exception as exc:
             raise GuestRateLimitUnavailable(
-                "Không thể xác minh hạn mức chat tạm thời; vui lòng đăng nhập Google hoặc thử lại sau"
+                "Không thể xác minh hạn mức chat tạm thời; "
+                "vui lòng đăng nhập Google hoặc thử lại sau"
             ) from exc
 
         if counts["MINUTE"] > self.settings.guest_chat_requests_per_minute:
-            raise GuestRateLimitExceeded("Bạn gửi câu hỏi quá nhanh; vui lòng chờ một phút rồi thử lại")
+            raise GuestRateLimitExceeded(
+                "Bạn gửi câu hỏi quá nhanh; vui lòng chờ một phút rồi thử lại"
+            )
         if counts["HOUR"] > self.settings.guest_chat_requests_per_hour:
             raise GuestRateLimitExceeded(
-                "Phiên khách đã đạt hạn mức theo giờ; đăng nhập Google để tiếp tục và lưu lịch sử"
+                "Phiên khách đã đạt hạn mức theo giờ; "
+                "đăng nhập Google để tiếp tục và lưu lịch sử"
             )

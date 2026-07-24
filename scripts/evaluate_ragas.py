@@ -19,14 +19,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.services.embeddings import EmbeddingConfig, get_embedding_service
-from app.main import (
-    backend_mode_label,
-    call_groq_chat,
-    get_store,
-    normalize_backend,
-    repair_text,
+from app.core.config import Settings
+from app.external_graphrag import (
+    Neo4jGraphRAGStore,
+    Neo4jPostgresGraphRAGStore,
+    PostgresGraphRAGStore,
 )
+from app.legal_graphrag import GraphRAGStore
+from app.services.embeddings import EmbeddingConfig, get_embedding_service
+from app.services.retrieval import _embedding_config, _external_config
 
 
 DEFAULT_DATASET = PROJECT_ROOT / "eval_legal_rag_graphrag_1000.json"
@@ -50,6 +51,53 @@ class LocalBgeEmbeddings:
 
     def embed_query(self, text: str) -> list[float]:
         return get_embedding_service(EmbeddingConfig.from_env()).embed_query(text)
+
+
+def repair_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def normalize_backend(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_")
+    aliases = {
+        "hybrid": "hybrid_rag",
+        "neo4j_postgres": "hybrid_rag",
+        "postgres": "rag",
+        "pgvector": "rag",
+        "neo4j": "graphrag",
+        "graph": "graphrag",
+        "sqlite": "local_graphrag",
+        "local": "local_graphrag",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def backend_mode_label(backend: str) -> str:
+    return {
+        "rag": "PostgreSQL pgvector RAG",
+        "graphrag": "Neo4j GraphRAG",
+        "hybrid_rag": "Hybrid GraphRAG",
+        "local_graphrag": "Local GraphRAG",
+    }.get(normalize_backend(backend), backend)
+
+
+def get_store(backend: str) -> Any:
+    canonical = normalize_backend(backend)
+    settings = Settings(retriever_backend=canonical)
+    config = _external_config(settings)
+    if canonical == "hybrid_rag":
+        return Neo4jPostgresGraphRAGStore(config)
+    if canonical == "rag":
+        return PostgresGraphRAGStore(config)
+    if canonical == "graphrag":
+        return Neo4jGraphRAGStore(config)
+    if canonical == "local_graphrag":
+        return GraphRAGStore(settings.legal_graphrag_db, _embedding_config(settings))
+    raise ValueError(f"Unsupported retrieval backend: {backend}")
 
 
 def now_slug() -> str:
@@ -147,6 +195,7 @@ def response_for_sample(
     reference: str,
     sources: list[dict[str, Any]],
     mode_label: str,
+    response_llm: Any | None,
 ) -> str:
     ragas_response = clean_text((sample.get("ragas_fields") or {}).get("response") or "")
     if response_mode == "dataset":
@@ -157,7 +206,26 @@ def response_for_sample(
         return ""
     if response_mode == "generate" and ragas_response:
         return ragas_response
-    return clean_text(call_groq_chat(question, sources, mode_label))
+    if response_llm is None:
+        raise RuntimeError("Gemini response model is required when --response-mode=generate")
+    context = "\n\n".join(
+        f"[S{index}] {context_text_from_source(source)}"
+        for index, source in enumerate(sources, start=1)
+    )
+    result = response_llm.invoke(
+        [
+            (
+                "system",
+                "Bạn là trợ lý pháp lý Việt Nam. Chỉ trả lời từ nguồn đã cung cấp, "
+                "trích dẫn [S1], [S2] và không bịa căn cứ.",
+            ),
+            (
+                "human",
+                f"Chế độ truy xuất: {mode_label}\n\nNGUỒN:\n{context}\n\nCÂU HỎI:\n{question}",
+            ),
+        ]
+    )
+    return clean_text(getattr(result, "content", result))
 
 
 def build_records_for_backend(
@@ -165,6 +233,7 @@ def build_records_for_backend(
     samples: list[dict[str, Any]],
     top_k: int,
     response_mode: str,
+    response_llm: Any | None = None,
 ) -> list[dict[str, Any]]:
     backend_name = backend_slug(backend)
     canonical_backend = normalize_backend(backend)
@@ -201,6 +270,7 @@ def build_records_for_backend(
             reference=reference,
             sources=sources,
             mode_label=mode_label,
+            response_llm=response_llm,
         )
         expected_ids = expected_chunk_ids(sample)
         exact_scores = exact_retrieval_scores(sources, expected_ids)
@@ -296,32 +366,33 @@ def build_ragas_metrics(metric_names: list[str]) -> list[Any]:
 
 
 def build_evaluator_llm(provider: str, model: str | None, temperature: float) -> Any:
-    if provider == "openai":
-        if not os.getenv("OPENAI_API_KEY"):
-            raise RuntimeError("OPENAI_API_KEY is required for --evaluator-provider openai")
-        from langchain_openai import ChatOpenAI
+    if provider == "gemini":
+        from google.oauth2 import service_account
+        from langchain_google_vertexai import ChatVertexAI
 
-        return ChatOpenAI(model=model or "gpt-4o-mini", temperature=temperature)
-    if provider == "groq":
-        if not os.getenv("GROQ_API_KEY"):
-            raise RuntimeError("GROQ_API_KEY is required for --evaluator-provider groq")
-        from langchain_groq import ChatGroq
+        from app.services.ai import VERTEX_SCOPE
 
-        return ChatGroq(model=model or "llama-3.3-70b-versatile", temperature=temperature)
+        settings = Settings()
+        credentials_path = settings.gemini_credentials_local_path
+        if not credentials_path.is_file():
+            raise RuntimeError(f"Gemini credential is missing: {credentials_path}")
+        credentials = service_account.Credentials.from_service_account_file(
+            credentials_path,
+            scopes=[VERTEX_SCOPE],
+        )
+        project_id = settings.gemini_project_id.strip() or str(credentials.project_id or "").strip()
+        return ChatVertexAI(
+            model=model or settings.gemini_model,
+            project=project_id,
+            location=settings.gemini_location,
+            credentials=credentials,
+            temperature=temperature,
+        )
     raise ValueError(f"Unsupported evaluator provider: {provider}")
 
 
 def resolve_evaluator_provider(value: str) -> str:
-    if value != "auto":
-        return value
-    if os.getenv("OPENAI_API_KEY"):
-        return "openai"
-    if os.getenv("GROQ_API_KEY"):
-        return "groq"
-    raise RuntimeError(
-        "No evaluator provider is configured. Set OPENAI_API_KEY or GROQ_API_KEY, "
-        "or run with --prepare-only."
-    )
+    return "gemini" if value == "auto" else value
 
 
 def build_embeddings(provider: str, model: str | None) -> Any:
@@ -332,12 +403,6 @@ def build_embeddings(provider: str, model: str | None) -> Any:
             pass
 
         return LangChainLocalBgeEmbeddings()
-    if provider == "openai":
-        if not os.getenv("OPENAI_API_KEY"):
-            raise RuntimeError("OPENAI_API_KEY is required for --embedding-provider openai")
-        from langchain_openai import OpenAIEmbeddings
-
-        return OpenAIEmbeddings(model=model or "text-embedding-3-small")
     raise ValueError(f"Unsupported embedding provider: {provider}")
 
 
@@ -455,13 +520,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument(
         "--evaluator-provider",
-        choices=["auto", "openai", "groq"],
+        choices=["auto", "gemini"],
         default=os.getenv("RAGAS_EVALUATOR_PROVIDER", "auto"),
     )
     parser.add_argument("--judge-model", default=os.getenv("RAGAS_EVALUATOR_MODEL"))
+    parser.add_argument("--generation-model", default=os.getenv("RAGAS_GENERATION_MODEL"))
     parser.add_argument(
         "--embedding-provider",
-        choices=["local_bge", "openai"],
+        choices=["local_bge"],
         default=os.getenv("RAGAS_EMBEDDING_PROVIDER", "local_bge"),
     )
     parser.add_argument("--embedding-model", default=os.getenv("RAGAS_EMBEDDING_MODEL"))
@@ -489,8 +555,13 @@ def main() -> None:
     print(f"Samples: {len(samples)} (offset={args.offset}, limit={args.limit})")
     print(f"Run dir: {run_dir}")
     print(f"Metrics: {', '.join(metric_names)}")
-    if args.response_mode == "generate" and not os.getenv("GROQ_API_KEY"):
-        print("Warning: GROQ_API_KEY is not set. Generated responses will use fallback text.")
+    response_llm = None
+    if args.response_mode == "generate":
+        response_llm = build_evaluator_llm(
+            "gemini",
+            args.generation_model,
+            temperature=0.1,
+        )
 
     summaries: list[dict[str, Any]] = []
     for backend in args.backends:
@@ -501,6 +572,7 @@ def main() -> None:
             samples=samples,
             top_k=args.top_k,
             response_mode=args.response_mode,
+            response_llm=response_llm,
         )
         write_jsonl(run_dir / f"{backend_name}_prepared.jsonl", records)
         write_records_csv(run_dir / f"{backend_name}_prepared.csv", records)

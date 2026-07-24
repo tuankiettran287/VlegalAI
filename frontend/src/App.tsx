@@ -3,7 +3,9 @@ import {
   ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -145,7 +147,9 @@ function markdown(value: string) {
 
 function formatDate(value?: string | null) {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short" }).format(date);
 }
 
 function usePath() {
@@ -182,9 +186,10 @@ function ErrorNotice({ error, onClose }: { error: string; onClose?: () => void }
   );
 }
 
-function VerificationBadge({ report }: { report?: VerificationReport }) {
+function VerificationBadge({ report }: { report?: VerificationReport | null }) {
   if (!report) return null;
   const current = report.checked && report.all_current;
+  const items = Array.isArray(report.items) ? report.items : [];
   return (
     <details className={`verification ${current ? "verified" : "attention"}`}>
       <summary>
@@ -195,7 +200,7 @@ function VerificationBadge({ report }: { report?: VerificationReport }) {
       </summary>
       <div className="verification-body">
         <p>{report.note}</p>
-        {report.items.map((item) => (
+        {items.map((item) => (
           <div className="law-status-row" key={`${item.code}-${item.checked_at}`}>
             <div>
               <strong>{item.code}</strong>
@@ -222,8 +227,8 @@ function VerificationBadge({ report }: { report?: VerificationReport }) {
   );
 }
 
-function SourcePanel({ sources }: { sources?: Source[] }) {
-  if (!sources?.length) return null;
+function SourcePanel({ sources }: { sources?: Source[] | null }) {
+  if (!Array.isArray(sources) || !sources.length) return null;
   return (
     <details className="source-panel">
       <summary>
@@ -287,7 +292,7 @@ function PageHeader({ title, subtitle, action }: { title: string; subtitle: stri
   return (
     <header className="page-header">
       <div>
-        <span className="eyebrow">VLegal workspace</span>
+        <span className="eyebrow"><i aria-hidden="true" /> Không gian nghiệp vụ</span>
         <h1>{title}</h1>
         <p>{subtitle}</p>
       </div>
@@ -319,15 +324,60 @@ function DocumentInput({ title, value, onChange }: { title: string; value: strin
   );
 }
 
-function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: boolean }) {
+function ChatPage({
+  user,
+  authAvailable,
+  onNavigate,
+}: {
+  user: User | null;
+  authAvailable: boolean;
+  onNavigate: (path: string) => void;
+}) {
   const authenticated = Boolean(user);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>(() => (authenticated ? [] : readGuestMessages()));
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(true);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState("");
+  const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
+  const composerRef = useRef<HTMLFormElement>(null);
+  const composerSlotRef = useRef<HTMLDivElement>(null);
+  const conversationRequestRef = useRef(0);
+  const hasMessages = messages.length > 0;
+
+  const syncHomeComposerPosition = useCallback(() => {
+    const composer = composerRef.current;
+    const slot = composerSlotRef.current;
+    if (!composer || !slot || hasMessages) return;
+
+    const offsetParent = composer.offsetParent;
+    if (!offsetParent) return;
+
+    slot.style.height = `${composer.offsetHeight}px`;
+    const slotRect = slot.getBoundingClientRect();
+    const parentRect = offsetParent.getBoundingClientRect();
+    const nextOffset = slotRect.top - parentRect.top - composer.offsetTop;
+
+    composer.dataset.homeOffset = String(nextOffset);
+    composer.style.setProperty("--composer-home-offset", `${nextOffset}px`);
+    composer.style.setProperty("--composer-home-width", `${slotRect.width}px`);
+  }, [hasMessages]);
+
+  useLayoutEffect(() => {
+    if (hasMessages) return;
+
+    syncHomeComposerPosition();
+    const observer = new ResizeObserver(syncHomeComposerPosition);
+    if (composerRef.current) observer.observe(composerRef.current);
+    window.addEventListener("resize", syncHomeComposerPosition);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", syncHomeComposerPosition);
+    };
+  }, [hasMessages, syncHomeComposerPosition]);
 
   const reloadHistory = useCallback(() => {
     if (!authenticated) {
@@ -341,25 +391,67 @@ function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: b
   useEffect(() => {
     if (!authenticated) writeGuestMessages(messages);
   }, [authenticated, messages]);
+  useEffect(() => {
+    if (!authenticated) {
+      conversationRequestRef.current += 1;
+      setLoadingConversationId(null);
+      setHistoryOpen(false);
+    }
+  }, [authenticated]);
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setHistoryOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, []);
 
   const openConversation = async (id: string) => {
     if (!authenticated) return;
+    if (id === conversationId) {
+      conversationRequestRef.current += 1;
+      setLoadingConversationId(null);
+      setHistoryOpen(false);
+      return;
+    }
+
+    const requestId = conversationRequestRef.current + 1;
+    conversationRequestRef.current = requestId;
     setError("");
-    const data = await conversationApi.get(id);
-    setConversationId(id);
-    setMessages(data.messages);
+    setLoadingConversationId(id);
+    try {
+      const data = await conversationApi.get(id);
+      if (conversationRequestRef.current !== requestId) return;
+      if (data.conversation.id !== id) {
+        throw new Error("Dữ liệu cuộc trò chuyện không khớp. Vui lòng thử lại.");
+      }
+      setConversationId(id);
+      setMessages(data.messages);
+      setHistoryOpen(false);
+    } catch (reason) {
+      if (conversationRequestRef.current !== requestId) return;
+      setError((reason as Error).message);
+      setHistoryOpen(false);
+    } finally {
+      if (conversationRequestRef.current === requestId) {
+        setLoadingConversationId(null);
+      }
+    }
   };
 
   const newConversation = () => {
+    conversationRequestRef.current += 1;
+    setLoadingConversationId(null);
     setConversationId(null);
     setMessages([]);
     setInput("");
+    setError("");
     if (!authenticated) sessionStorage.removeItem(GUEST_CHAT_STORAGE_KEY);
   };
 
   const submit = async (question = input) => {
     const trimmed = question.trim();
-    if (!trimmed || loading) return;
+    if (!trimmed || loading || loadingConversationId) return;
     setError("");
     setLoading(true);
     const userMessage: ChatMessage = { id: uid(), role: "user", content: trimmed };
@@ -405,9 +497,65 @@ function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: b
     }
   };
 
+  const renderComposer = (home = false) => (
+    <form
+      ref={composerRef}
+      className={home ? "composer composer-home" : "composer"}
+      aria-busy={Boolean(loadingConversationId)}
+      onSubmit={(event) => {
+        event.preventDefault();
+        submit();
+      }}
+    >
+      <div className="input-wrap">
+        <div className="composer-meta">
+          <label htmlFor="legal-question-input">{home ? "Tình huống cần tư vấn" : "Tiếp tục trao đổi"}</label>
+          <span>{home ? "Mô tả càng cụ thể, kết quả càng sát nhu cầu" : "Shift + Enter để xuống dòng"}</span>
+        </div>
+        <textarea
+          id="legal-question-input"
+          value={input}
+          maxLength={5000}
+          rows={home ? 3 : 1}
+          disabled={Boolean(loadingConversationId)}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              submit();
+            }
+          }}
+          placeholder="Hỏi VLegal về tình huống pháp lý của bạn…"
+        />
+        <div className="composer-toolbar">
+          <span className="policy-line">
+            <ShieldCheck size={14} />
+            {authenticated ? "Đối chiếu căn cứ và kiểm tra hiệu lực" : "Phiên tạm · câu trả lời có dẫn nguồn"}
+          </span>
+          <span className="counter">{input.length}/5000</span>
+          <button className="primary-icon" type="submit" disabled={!input.trim() || loading || Boolean(loadingConversationId)} aria-label="Gửi câu hỏi">
+            <SendHorizontal size={18} />
+          </button>
+        </div>
+      </div>
+    </form>
+  );
+
   return (
     <section className={historyOpen ? "chat-page" : "chat-page history-collapsed"}>
-      <aside id="chat-history-panel" className={historyOpen ? "chat-history" : "chat-history hidden"}>
+      {historyOpen && (
+        <button
+          className="chat-history-backdrop"
+          type="button"
+          onClick={() => setHistoryOpen(false)}
+          aria-label="Đóng lịch sử trò chuyện"
+        />
+      )}
+      <aside
+        id="chat-history-panel"
+        className={historyOpen ? "chat-history" : "chat-history hidden"}
+        aria-label="Lịch sử trò chuyện"
+      >
         <div className="history-head">
           <strong>{authenticated ? "Lịch sử hỏi đáp" : "Phiên trò chuyện tạm"}</strong>
           <button className="icon-button compact" type="button" onClick={newConversation} aria-label="Tạo cuộc trò chuyện">
@@ -415,29 +563,42 @@ function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: b
           </button>
         </div>
         <div className="conversation-list">
-          {authenticated && conversations.map((item) => (
-            <div className={item.id === conversationId ? "conversation-row active" : "conversation-row"} key={item.id}>
-              <button type="button" onClick={() => openConversation(item.id)}>
-                <MessageSquareText size={15} />
-                <span>
-                  <strong>{item.title}</strong>
-                  <small>{item.message_count} tin · {formatDate(item.updated_at)}</small>
-                </span>
-              </button>
-              <button
-                className="row-action"
-                type="button"
-                onClick={async () => {
-                  await conversationApi.remove(item.id);
-                  if (conversationId === item.id) newConversation();
-                  reloadHistory();
-                }}
-                aria-label="Xóa cuộc trò chuyện"
+          {authenticated && conversations.map((item) => {
+            const isLoading = item.id === loadingConversationId;
+            const isActive = item.id === (loadingConversationId || conversationId);
+            return (
+              <div
+                className={["conversation-row", isActive ? "active" : "", isLoading ? "loading" : ""].filter(Boolean).join(" ")}
+                key={item.id}
               >
-                <Trash2 size={14} />
-              </button>
-            </div>
-          ))}
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => openConversation(item.id)}
+                  aria-current={isActive ? "true" : undefined}
+                >
+                  {isLoading ? <RefreshCw className="conversation-row-spinner" size={15} /> : <MessageSquareText size={15} />}
+                  <span>
+                    <strong>{item.title}</strong>
+                    <small>{isLoading ? "Đang tải lại nội dung…" : `${item.message_count} tin · ${formatDate(item.updated_at)}`}</small>
+                  </span>
+                </button>
+                <button
+                  className="row-action"
+                  type="button"
+                  disabled={Boolean(loadingConversationId)}
+                  onClick={async () => {
+                    await conversationApi.remove(item.id);
+                    if (conversationId === item.id) newConversation();
+                    reloadHistory();
+                  }}
+                  aria-label="Xóa cuộc trò chuyện"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            );
+          })}
           {authenticated && !conversations.length && <p className="empty-copy">Các cuộc trò chuyện đã lưu sẽ xuất hiện tại đây.</p>}
           {!authenticated && (
             <div className="guest-session-card">
@@ -450,7 +611,10 @@ function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: b
         </div>
       </aside>
 
-      <div className="chat-main">
+      <div
+        className={`${hasMessages ? "chat-main has-conversation" : "chat-main empty-chat"}${loadingConversationId ? " switching-conversation" : ""}`}
+        aria-busy={Boolean(loadingConversationId)}
+      >
         <header className="chat-topbar">
           <button
             className="icon-button compact"
@@ -464,7 +628,7 @@ function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: b
           </button>
           <div className="chat-title">
             <strong>Trợ lý pháp lý</strong>
-            <span><ShieldCheck size={12} /> {authenticated ? "Tự động đối chiếu căn cứ liên quan" : "Đang dùng phiên trò chuyện tạm"}</span>
+            <span><i aria-hidden="true" /><ShieldCheck size={12} /> {authenticated ? "Tự động đối chiếu căn cứ liên quan" : "Đang dùng phiên trò chuyện tạm"}</span>
           </div>
           <div className="chat-topbar-actions">
             {!authenticated && authAvailable && <a className="google-login-inline" href={authApi.loginUrl("/")}><LogIn size={15} /> Đăng nhập Google</a>}
@@ -475,28 +639,43 @@ function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: b
         </header>
 
         <div className="chat-scroll">
-          {messages.length === 0 ? (
-            <div className="welcome">
-              <div className="welcome-mark"><Scale size={30} /></div>
-              <span className="eyebrow">Tra cứu pháp lý có kiểm chứng</span>
-              <h1>Hiểu đúng quy định.<br />Ra quyết định tự tin hơn.</h1>
-              <p>{authenticated ? "Mỗi câu trả lời được đối chiếu với căn cứ liên quan, kiểm tra hiệu lực và lưu lại để bạn tiếp tục xử lý sau." : "Bạn có thể bắt đầu ngay mà không cần đăng nhập. Nội dung hiện tại chỉ được giữ tạm trong trình duyệt."}</p>
-              <div className="welcome-proof" aria-label="Cam kết chất lượng câu trả lời">
-                <span><ShieldCheck size={15} /> Kiểm tra hiệu lực</span>
-                <span><BookOpen size={15} /> Kèm căn cứ</span>
-                <span><CheckCircle2 size={15} /> Áp dụng toàn bộ luật liên quan</span>
+            <div className="chat-empty" aria-hidden={hasMessages}>
+              <header className="empty-heading">
+                <span className="empty-logo" aria-hidden="true"><Scale size={24} /></span>
+                <span className="eyebrow"><i aria-hidden="true" /> Legal intelligence</span>
+                <h1>Hiểu đúng quy định.<br /><span>Vững vàng quyết định.</span></h1>
+                <p>Trình bày tình huống của bạn. VLegal sẽ phân tích, đối chiếu hiệu lực và trả lời bằng những căn cứ có thể kiểm tra lại.</p>
+                <div className="confidence-row" aria-label="Tiêu chuẩn câu trả lời">
+                  <span><ShieldCheck size={14} /> Đối chiếu hiệu lực</span>
+                  <span><BookOpen size={14} /> Dẫn nguồn rõ ràng</span>
+                  <span><Clock3 size={14} /> Lưu vết trao đổi</span>
+                </div>
+              </header>
+
+              <div ref={composerSlotRef} className="composer-home-slot" aria-hidden="true" />
+
+              <div className="chat-shortcuts" aria-label="Công cụ pháp lý">
+                <button type="button" onClick={() => onNavigate("/tao-hop-dong")}><FilePenLine size={16} /> Tạo hợp đồng</button>
+                <button type="button" onClick={() => onNavigate("/review-hop-dong")}><ClipboardCheck size={16} /> Review hợp đồng</button>
+                <button type="button" onClick={() => onNavigate("/so-sanh-hop-dong")}><FileDiff size={16} /> So sánh văn bản</button>
               </div>
-              <div className="suggestion-grid">
-                {sampleQuestions.map((question) => (
+
+              <div className="starter-grid">
+                {sampleQuestions.map((question, index) => (
                   <button key={question} type="button" onClick={() => submit(question)}>
-                    <Sparkles size={17} />
-                    <span>{question}</span>
+                    <span>{index === 0 ? "Lao động" : index === 1 ? "Tiền lương" : index === 2 ? "Hợp đồng" : "Tranh chấp"}</span>
+                    <strong>{question}</strong>
+                    <SendHorizontal size={15} />
                   </button>
                 ))}
               </div>
+
+              <p className="chat-disclaimer">
+                <ShieldCheck size={13} />
+                VLegal kiểm tra hiệu lực và hiển thị nguồn; kết quả không thay thế ý kiến tư vấn chuyên môn.
+              </p>
             </div>
-          ) : (
-            <div className="messages">
+            <div className="messages" aria-live="polite">
               {messages.map((message) => (
                 <article className={`message ${message.role}`} key={message.id}>
                   {message.role === "assistant" && <div className="avatar"><Scale size={16} /></div>}
@@ -509,37 +688,18 @@ function ChatPage({ user, authAvailable }: { user: User | null; authAvailable: b
                 </article>
               ))}
             </div>
-          )}
+            {loadingConversationId && (
+              <div className="conversation-switching" role="status" aria-live="polite">
+                <RefreshCw size={18} />
+                <span>
+                  <strong>Đang mở cuộc trò chuyện</strong>
+                  <small>Đang khôi phục đầy đủ tin nhắn và căn cứ…</small>
+                </span>
+              </div>
+            )}
         </div>
         {error && <div className="chat-error"><ErrorNotice error={error} onClose={() => setError("")} /></div>}
-        <form
-          className="composer"
-          onSubmit={(event) => {
-            event.preventDefault();
-            submit();
-          }}
-        >
-          <div className="policy-line"><CheckCircle2 size={14} /> Câu trả lời có căn cứ và được kiểm tra hiệu lực{!authenticated && " · phiên tạm thời"}</div>
-          <div className="input-wrap">
-            <textarea
-              value={input}
-              maxLength={5000}
-              rows={1}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  submit();
-                }
-              }}
-              placeholder="Nhập tình huống hoặc câu hỏi pháp lý…"
-            />
-            <span className="counter">{input.length}/5000</span>
-            <button className="primary-icon" type="submit" disabled={!input.trim() || loading} aria-label="Gửi câu hỏi">
-              <SendHorizontal size={18} />
-            </button>
-          </div>
-        </form>
+        {renderComposer(!hasMessages)}
       </div>
     </section>
   );
@@ -621,6 +781,7 @@ function RiskList({ risks }: { risks?: Risk[] }) {
     <article className={`risk-card ${risk.level}`} key={`${risk.title}-${index}`}>
       <span>{risk.level === "high" ? "Cao" : risk.level === "medium" ? "Trung bình" : "Thấp"}</span>
       <h3>{risk.title}</h3><p>{risk.detail}</p><strong>{risk.recommendation}</strong>
+      <small>Nguồn: {risk.citations.join(", ")}</small>
     </article>
   ))}</div>;
 }
@@ -680,7 +841,7 @@ function ComparePage() {
         </button>
       </form>
       {result && <ResultPanel title={`Mức tương đồng ${result.similarity}%`} text={result.summary} sources={result.sources} verification={result.verification}>
-        <div className="diff-list">{result.differences.map((item, index) => <article key={`${item.type}-${index}`}><span>{item.type}</span><div><small>Trước</small><p>{item.before}</p></div><div><small>Sau</small><p>{item.after}</p></div><strong>{item.legal_impact}</strong></article>)}</div>
+        <div className="diff-list">{result.differences.map((item, index) => <article key={`${item.type}-${index}`}><span>{item.type}</span><div><small>Trước</small><p>{item.before}</p></div><div><small>Sau</small><p>{item.after}</p></div><strong>{item.legal_impact}</strong><small>Nguồn: {item.citations.join(", ")}</small></article>)}</div>
         <RiskList risks={result.risks} />
       </ResultPanel>}
     </section>
@@ -722,6 +883,9 @@ function ArticlesPage() {
   const [articles, setArticles] = useState<Article[]>([]);
   const [webSummary, setWebSummary] = useState("");
   const [webSources, setWebSources] = useState<WebSource[]>([]);
+  const [webProviders, setWebProviders] = useState<string[]>([]);
+  const [webWarnings, setWebWarnings] = useState<string[]>([]);
+  const [googleSearchEntryPoint, setGoogleSearchEntryPoint] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const load = useCallback((value = "") => articleApi.list(value).then((data) => setArticles(data.items)).catch((reason) => setError((reason as Error).message)), []);
@@ -734,14 +898,14 @@ function ArticlesPage() {
       {error && <ErrorNotice error={error} onClose={() => setError("")} />}
       <form className="web-search-card" onSubmit={async (event) => {
         event.preventDefault(); if (!query.trim()) return; setLoading(true); setError("");
-        try { const data = await articleApi.webSearch(query); setWebSummary(data.summary); setWebSources(data.sources); load(query); }
+        try { const data = await articleApi.webSearch(query); setWebSummary(data.summary); setWebSources(data.sources); setWebProviders(data.providers_used); setWebWarnings(data.search_warnings); setGoogleSearchEntryPoint(data.google_search_entry_point || ""); load(query); }
         catch (reason) { setError((reason as Error).message); }
         finally { setLoading(false); }
       }}>
         <Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm chủ đề pháp lý trên web…" />
         <button className="primary-button" type="submit" disabled={loading || query.length < 2}>{loading ? "Đang tìm…" : "Tìm trên web"}</button>
       </form>
-      {webSummary && <section className="research-result"><span className="eyebrow">Tổng hợp từ internet</span><div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(webSummary) }} /><div className="web-source-grid">{webSources.map((source) => <a key={source.id} href={source.url} target="_blank" rel="noreferrer"><span>{source.id}</span><strong>{source.title}</strong><ExternalLink size={14} /></a>)}</div></section>}
+      {webSummary && <section className="research-result"><div className="research-heading"><span className="eyebrow">Tổng hợp từ internet</span><div className="provider-pills">{webProviders.map((provider) => <span key={provider}>{provider === "google" ? "Google Search" : "Tavily"}</span>)}</div></div>{webWarnings.length > 0 && <p className="search-warning">{webWarnings.join(" · ")}</p>}<div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(webSummary) }} />{googleSearchEntryPoint && <iframe className="google-search-entry" title="Thông tin đối chiếu từ Google Search" sandbox="allow-popups" referrerPolicy="no-referrer" srcDoc={googleSearchEntryPoint} />}<div className="web-source-grid">{webSources.map((source) => <a key={source.id} href={source.url} target="_blank" rel="noreferrer"><span>{source.id}</span><strong>{source.title}<small>{(source.providers || []).map((provider) => provider === "google" ? "Google" : "Tavily").join(" + ")}</small></strong><ExternalLink size={14} /></a>)}</div></section>}
       <div className="article-list">{articles.map((article) => <article className="article-card" key={article.id}><div className="article-icon"><BookOpen size={23} /><span>{article.category}</span></div><div><small>{formatDate(article.published_at || article.created_at)} · {article.views} lượt xem</small><h2>{article.title}</h2><p>{article.excerpt}</p>{article.source_url && <a href={article.source_url} target="_blank" rel="noreferrer">Nguồn tham khảo <ExternalLink size={13} /></a>}</div></article>)}{!articles.length && <div className="empty-state"><BookOpen size={28} /><h3>Chưa có bài viết</h3><p>Hãy tìm một chủ đề trên web để bắt đầu nghiên cứu.</p></div>}</div>
     </section>
   );
@@ -769,7 +933,7 @@ function FeedbackModal({ open, page, onClose }: { open: boolean; page: string; o
   const [message, setMessage] = useState("");
   const [sent, setSent] = useState(false);
   if (!open) return null;
-  return <div className="modal-backdrop"><form className="modal feedback-modal" onSubmit={async (event) => { event.preventDefault(); await sendFeedback({ message, page }); setSent(true); setMessage(""); }}><header><div><span className="eyebrow">Phản hồi</span><h2>Giúp VLegal tốt hơn</h2></div><button className="icon-button" type="button" onClick={onClose}><X size={17} /></button></header>{sent && <div className="success-notice"><CheckCircle2 size={16} />Đã ghi nhận góp ý.</div>}<textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Nội dung góp ý…" /><footer><button className="ghost-button" type="button" onClick={onClose}>Đóng</button><button className="primary-button" type="submit" disabled={message.length < 3}>Gửi góp ý</button></footer></form></div>;
+  return <div className="modal-backdrop"><form className="modal feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-title" onSubmit={async (event) => { event.preventDefault(); await sendFeedback({ message, page }); setSent(true); setMessage(""); }}><header><div><span className="eyebrow">Phản hồi</span><h2 id="feedback-title">Giúp VLegal tốt hơn</h2></div><button className="icon-button" type="button" onClick={onClose} aria-label="Đóng hộp thoại góp ý"><X size={17} /></button></header>{sent && <div className="success-notice"><CheckCircle2 size={16} />Đã ghi nhận góp ý.</div>}<textarea aria-label="Nội dung góp ý" value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Nội dung góp ý…" /><footer><button className="ghost-button" type="button" onClick={onClose}>Đóng</button><button className="primary-button" type="submit" disabled={message.length < 3}>Gửi góp ý</button></footer></form></div>;
 }
 
 function SignInGate({ available, returnTo, onContinue }: { available: boolean; returnTo: string; onContinue: () => void }) {
@@ -778,7 +942,9 @@ function SignInGate({ available, returnTo, onContinue }: { available: boolean; r
 
 function App() {
   const [path, navigate] = usePath();
-  const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 900);
+  const [collapsed, setCollapsed] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 1080,
+  );
   const [dark, setDark] = useState(() => typeof window !== "undefined" && localStorage.getItem("vlegal-theme") === "dark");
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [user, setUser] = useState<User | null>(null);
@@ -789,6 +955,23 @@ function App() {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     localStorage.setItem("vlegal-theme", dark ? "dark" : "light");
   }, [dark]);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1080px)");
+    const closeOnNarrowViewport = (event: MediaQueryListEvent) => {
+      if (event.matches) setCollapsed(true);
+    };
+    media.addEventListener("change", closeOnNarrowViewport);
+    return () => media.removeEventListener("change", closeOnNarrowViewport);
+  }, []);
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && window.innerWidth <= 1080) {
+        setCollapsed(true);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, []);
 
   useEffect(() => {
     Promise.allSettled([authApi.capabilities(), authApi.me()]).then(([capabilityResult, userResult]) => {
@@ -811,20 +994,32 @@ function App() {
     if (path === "/ky-van-ban") return <SignaturePage />;
     if (path === "/bai-viet") return <ArticlesPage />;
     if (path === "/thu-vien") return <LibraryPage />;
-    return <ChatPage user={user} authAvailable={authAvailable} />;
+    return <ChatPage user={user} authAvailable={authAvailable} onNavigate={navigate} />;
   }, [authAvailable, navigate, path, user]);
 
   if (authLoading) return <div className="app-loading"><Scale size={34} /><span>Đang mở VLegal AI…</span></div>;
 
   return (
     <div className="app-shell">
-      <aside className={collapsed ? "sidebar collapsed" : "sidebar"}>
+      {!collapsed && (
+        <button
+          className="sidebar-backdrop"
+          type="button"
+          onClick={() => setCollapsed(true)}
+          aria-label="Đóng thanh điều hướng"
+        />
+      )}
+      <aside
+        id="primary-navigation"
+        className={collapsed ? "sidebar collapsed" : "sidebar"}
+        aria-label="Điều hướng chính"
+      >
         <div className="brand-row"><button className="brand" type="button" title={collapsed ? "Mở thanh điều hướng" : "Về trang chủ"} aria-label={collapsed ? "Mở thanh điều hướng" : "Về trang chủ"} onClick={() => { if (collapsed) { setCollapsed(false); return; } if (path !== "/") navigate("/"); }}><span className="brand-mark"><Scale size={22} /></span><span><strong>VLegal</strong><small>Trợ lý pháp lý</small></span></button><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Mở thanh điều hướng" : "Thu gọn thanh điều hướng"}><AlignLeft size={18} /></button></div>
-        <nav className="nav-list"><span className="nav-label">Không gian làm việc</span>{routes.map((route) => { const Icon = route.icon; return <button key={route.path} type="button" className={activeRoute.path === route.path ? "active" : ""} onClick={() => { navigate(route.path); if (window.innerWidth <= 900) setCollapsed(true); }}><Icon size={19} /><span>{route.label}</span></button>; })}</nav>
+        <nav className="nav-list"><span className="nav-label">Trung tâm pháp lý</span>{routes.map((route) => { const Icon = route.icon; const active = activeRoute.path === route.path; return <button key={route.path} type="button" className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => { navigate(route.path); if (window.innerWidth <= 1080) setCollapsed(true); }}><Icon size={19} /><span>{route.label}</span></button>; })}</nav>
         <div className="trust-card"><ShieldCheck size={17} /><span><strong>Căn cứ minh bạch</strong><small>Kiểm tra hiệu lực trước khi trả lời</small></span></div>
         <div className="sidebar-actions"><button type="button" onClick={() => setFeedbackOpen(true)}><Bot size={17} /><span>Gửi góp ý</span></button><button type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={17} /> : <Moon size={17} />}<span>{dark ? "Giao diện sáng" : "Giao diện tối"}</span></button>{user ? <div className="user-card"><span className="user-avatar">{user.avatar_url ? <img src={user.avatar_url} alt="" /> : user.display_name.charAt(0).toUpperCase()}</span><span><strong>{user.display_name}</strong><small>{user.email}</small></span><button type="button" onClick={async () => { await authApi.logout(); window.location.reload(); }} aria-label="Đăng xuất"><LogOut size={16} /></button></div> : <div className="user-card guest-user-card"><span className="user-avatar"><UserRound size={17} /></span><span><strong>Khách</strong><small>Phiên tạm thời</small></span>{authAvailable && <a href={authApi.loginUrl(path)} aria-label="Đăng nhập bằng Google"><LogIn size={16} /></a>}</div>}</div>
       </aside>
-      <div className="content-shell"><header className="mobile-topbar"><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)}><Menu size={19} /></button><strong>{activeRoute.label}</strong><button className="icon-button" type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button></header><main className="content">{page}</main></div>
+      <div className="content-shell"><header className="mobile-topbar"><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Mở thanh điều hướng" : "Đóng thanh điều hướng"} aria-controls="primary-navigation" aria-expanded={!collapsed}><Menu size={19} /></button><strong>{activeRoute.label}</strong><button className="icon-button" type="button" onClick={() => setDark((value) => !value)} aria-label={dark ? "Chuyển sang giao diện sáng" : "Chuyển sang giao diện tối"}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button></header><main className="content">{page}</main></div>
       <FeedbackModal open={feedbackOpen} page={path} onClose={() => setFeedbackOpen(false)} />
     </div>
   );

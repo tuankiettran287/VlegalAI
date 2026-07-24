@@ -8,12 +8,12 @@ Dockerfile và một image riêng.
 
 | Image | Tài nguyên GCP | Vai trò |
 | --- | --- | --- |
-| `vlegal-api` | Cloud Run Service có GPU | FastAPI và Qwen inference |
+| `vlegal-api` | Cloud Run Service có GPU | FastAPI, Gemini 3.5 Flash và BGE-M3 retrieval |
 | `vlegal-frontend` | Cloud Run Service CPU | React SPA và reverse proxy `/api` |
 | `vlegal-worker` | Cloud Run Worker Pool có GPU | Celery consumer chạy liên tục |
 | `vlegal-beat` | Cloud Run Worker Pool CPU | Celery scheduler chạy liên tục |
 | `vlegal-migrate` | Cloud Run Job | `alembic upgrade head` |
-| `vlegal-model-init` | Cloud Run Job | tải Qwen3 và BGE-M3 vào hai bucket Cloud Storage |
+| `vlegal-model-init` | Cloud Run Job | tải BGE-M3 vào Cloud Storage |
 | `vlegal-reindex` | Cloud Run Job GPU | embedding lại corpus và đồng bộ Neo4j/pgvector |
 
 PostgreSQL/pgvector nên chạy trên Cloud SQL và Neo4j
@@ -43,9 +43,9 @@ docker/model-init.Dockerfile
 docker/reindex.Dockerfile
 ```
 
-`docker-compose.yml`, `compose.production.yml` và workflow CI đã trỏ trực tiếp
-đến các file này. `Dockerfile` ở root chỉ được giữ để tương thích với lệnh build
-cũ; deploy mới không dùng file đó.
+`compose.gcp.yml` trỏ trực tiếp đến các file này để build/tag image cho Artifact
+Registry. `Dockerfile` ở root chỉ được giữ để tương thích với lệnh build cũ;
+luồng deploy GCP dùng các Dockerfile riêng trong `docker/`.
 
 ## 1. Biến dùng chung
 
@@ -60,7 +60,6 @@ $AR_REPO = "vlegal"
 $TAG = git rev-parse --short HEAD
 $RUN_SA_NAME = "vlegal-run"
 $RUN_SA = "$RUN_SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
-$MODEL_BUCKET = "$PROJECT_ID-vlegal-qwen3-14b"
 $EMBEDDING_BUCKET = "$PROJECT_ID-vlegal-bge-m3"
 $CORPUS_BUCKET = "$PROJECT_ID-vlegal-corpus"
 $NETWORK = "default"
@@ -71,9 +70,8 @@ gcloud auth login
 gcloud config set project $PROJECT_ID
 ```
 
-Cloud Run GPU `nvidia-rtx-pro-6000` hiện cần ít nhất 20 CPU/80 GiB RAM. Script
-dùng loại GPU này vì checkpoint Qwen3-14B đầy đủ không vừa L4 24 GB. Chỉ truyền
-`-GpuType nvidia-l4` sau khi đã thay bằng checkpoint nhỏ hoặc quantized phù hợp.
+Script mặc định dùng L4 cho BGE-M3 embedding. Các tác vụ sinh, phân loại, tóm tắt
+và đánh giá gọi `gemini-3.5-flash` qua Vertex AI bằng service identity của Cloud Run.
 
 ## 2. Bootstrap project một lần
 
@@ -83,6 +81,7 @@ gcloud services enable `
   artifactregistry.googleapis.com `
   secretmanager.googleapis.com `
   storage.googleapis.com `
+  aiplatform.googleapis.com `
   compute.googleapis.com `
   sqladmin.googleapis.com `
   servicenetworking.googleapis.com
@@ -99,13 +98,9 @@ gcloud projects add-iam-policy-binding $PROJECT_ID `
   --member="serviceAccount:$RUN_SA" `
   --role="roles/secretmanager.secretAccessor"
 
-gcloud storage buckets create "gs://$MODEL_BUCKET" `
-  --location=$REGION `
-  --uniform-bucket-level-access
-
-gcloud storage buckets add-iam-policy-binding "gs://$MODEL_BUCKET" `
+gcloud projects add-iam-policy-binding $PROJECT_ID `
   --member="serviceAccount:$RUN_SA" `
-  --role="roles/storage.objectUser"
+  --role="roles/aiplatform.user"
 
 gcloud storage buckets create "gs://$EMBEDDING_BUCKET" `
   --location=$REGION `
@@ -201,14 +196,14 @@ nếu chỉ muốn cập nhật cấu hình job mà chưa chạy.
 ```powershell
 .\scripts\gcp\deploy.ps1 `
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -ModelBucket $MODEL_BUCKET -EmbeddingBucket $EMBEDDING_BUCKET `
+  -EmbeddingBucket $EMBEDDING_BUCKET `
   -Neo4jUri $NEO4J_URI `
   -Component model-init -ExecuteJobs
 ```
 
-Hai Cloud Storage bucket được mount read-write vào job ở `/models/qwen3` và
-`/models/embedding`. API/worker mount lại read-only. Job có marker nên chạy lại
-không tải checkpoint nếu repo/revision không thay đổi.
+Bucket embedding được mount read-write vào job ở `/models/embedding`.
+API/worker mount lại read-only. Job có marker nên chạy lại không tải checkpoint
+nếu repo/revision không thay đổi.
 
 ### 5.2 Migration
 
@@ -243,7 +238,7 @@ filesystem tạm của job; dữ liệu lâu dài được ghi vào Cloud SQL/pg
 ```powershell
 .\scripts\gcp\deploy.ps1 `
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -ModelBucket $MODEL_BUCKET -EmbeddingBucket $EMBEDDING_BUCKET `
+  -EmbeddingBucket $EMBEDDING_BUCKET `
   -Network $NETWORK -Subnet $SUBNET `
   -Neo4jUri $NEO4J_URI -Component api
 ```
@@ -268,7 +263,7 @@ của API. Không có bước cấu hình domain.
 ```powershell
 .\scripts\gcp\deploy.ps1 `
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -ModelBucket $MODEL_BUCKET -EmbeddingBucket $EMBEDDING_BUCKET `
+  -EmbeddingBucket $EMBEDDING_BUCKET `
   -Network $NETWORK -Subnet $SUBNET `
   -Neo4jUri $NEO4J_URI -Component worker
 ```
@@ -293,8 +288,8 @@ Sau khi dữ liệu, bucket và secrets đã sẵn sàng:
 ```powershell
 .\scripts\gcp\deploy.ps1 `
   -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -RunServiceAccount $RUN_SA -ModelBucket $MODEL_BUCKET `
-  -EmbeddingBucket $EMBEDDING_BUCKET -CorpusBucket $CORPUS_BUCKET `
+  -RunServiceAccount $RUN_SA -EmbeddingBucket $EMBEDDING_BUCKET `
+  -CorpusBucket $CORPUS_BUCKET `
   -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
   -Component all -ExecuteJobs
 ```

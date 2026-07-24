@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -19,7 +20,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, validates
 
 
 class Base(DeclarativeBase):
@@ -31,6 +32,15 @@ class TimestampMixin:
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+def normalize_legal_document_code(value: str) -> str:
+    normalized = re.sub(r"\s+", "", value or "").upper()
+    if not normalized:
+        raise ValueError("Mã văn bản pháp luật không được để trống")
+    if len(normalized) > 120:
+        raise ValueError("Mã văn bản pháp luật vượt quá độ dài cho phép")
+    return normalized
 
 
 class User(TimestampMixin, Base):
@@ -74,7 +84,9 @@ class Conversation(TimestampMixin, Base):
 
     user: Mapped[User] = relationship(back_populates="conversations")
     messages: Mapped[list[ChatMessage]] = relationship(
-        back_populates="conversation", cascade="all, delete-orphan", order_by="ChatMessage.created_at"
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="ChatMessage.message_sequence",
     )
     summary: Mapped[ConversationSummary | None] = relationship(
         back_populates="conversation", cascade="all, delete-orphan", uselist=False
@@ -83,10 +95,18 @@ class Conversation(TimestampMixin, Base):
 
 class ChatMessage(Base):
     __tablename__ = "chat_message"
-    __table_args__ = (Index("ix_chat_message_conversation_created", "conversation_id", "created_at"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            "message_sequence",
+            name="uq_chat_message_conversation_sequence",
+        ),
+        Index("ix_chat_message_conversation_created", "conversation_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversation.id", ondelete="CASCADE"), index=True)
+    message_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     role: Mapped[str] = mapped_column(String(16))
     content_ciphertext: Mapped[str] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
@@ -110,6 +130,10 @@ class ConversationSummary(TimestampMixin, Base):
             "source_message_count > 0",
             name="ck_conversation_summary_message_count",
         ),
+        CheckConstraint(
+            "last_message_sequence > 0",
+            name="ck_conversation_summary_last_message_sequence",
+        ),
         Index(
             "ix_conversation_summary_embedding_hnsw",
             "embedding",
@@ -124,6 +148,7 @@ class ConversationSummary(TimestampMixin, Base):
     summary_ciphertext: Mapped[str] = mapped_column(Text)
     summary_hash: Mapped[str] = mapped_column(String(64), index=True)
     source_message_count: Mapped[int] = mapped_column(Integer)
+    last_message_sequence: Mapped[int] = mapped_column(BigInteger)
     embedding_model: Mapped[str] = mapped_column(String(255))
     embedding_revision: Mapped[str] = mapped_column(String(255))
     embedding: Mapped[list[float]] = mapped_column(Vector(1024))
@@ -137,6 +162,12 @@ class LegalAnswerCache(TimestampMixin, Base):
         CheckConstraint("hit_count >= 0", name="ck_legal_answer_cache_hit_count"),
         Index("ix_legal_answer_cache_expires_at", "expires_at"),
         Index(
+            "uq_legal_answer_cache_scope_query",
+            "cache_scope_hash",
+            "query_hash",
+            unique=True,
+        ),
+        Index(
             "ix_legal_answer_cache_embedding_hnsw",
             "query_embedding",
             postgresql_using="hnsw",
@@ -146,7 +177,8 @@ class LegalAnswerCache(TimestampMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    query_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    cache_scope_hash: Mapped[str] = mapped_column(String(64), index=True)
+    query_hash: Mapped[str] = mapped_column(String(64), index=True)
     query_ciphertext: Mapped[str] = mapped_column(Text)
     answer_ciphertext: Mapped[str] = mapped_column(Text)
     answer_hash: Mapped[str] = mapped_column(String(64), index=True)
@@ -203,7 +235,26 @@ class LegalDocument(TimestampMixin, Base):
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     verification_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
 
+    __table_args__ = (
+        Index(
+            "uq_legal_document_code_normalized",
+            func.upper(
+                func.regexp_replace(
+                    func.btrim(code),
+                    "[[:space:]]+",
+                    "",
+                    "g",
+                )
+            ),
+            unique=True,
+        ),
+    )
+
     chunks: Mapped[list[LegalChunk]] = relationship(back_populates="document", cascade="all, delete-orphan")
+
+    @validates("code")
+    def _normalize_code(self, _: str, value: str) -> str:
+        return normalize_legal_document_code(value)
 
 
 class LegalChunk(Base):

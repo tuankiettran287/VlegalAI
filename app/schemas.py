@@ -75,11 +75,16 @@ class ConversationOut(BaseModel):
 class MessageOut(BaseModel):
     id: uuid.UUID
     conversation_id: uuid.UUID
-    role: str
+    role: Literal["user", "assistant"]
     content: str
-    sources: list[dict[str, Any]] = Field(default_factory=list)
-    verification: dict[str, Any] = Field(default_factory=dict)
+    sources: list[SourceOut] = Field(default_factory=list)
+    verification: VerificationReport | None = None
     created_at: datetime
+
+
+class ConversationDetailOut(BaseModel):
+    conversation: ConversationOut
+    messages: list[MessageOut] = Field(default_factory=list)
 
 
 class ChatTurn(BaseModel):

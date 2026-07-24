@@ -61,7 +61,7 @@ export type Risk = {
   title: string;
   detail: string;
   recommendation: string;
-  citations?: string[];
+  citations: string[];
 };
 
 export type Template = {
@@ -103,4 +103,5 @@ export type WebSource = {
   excerpt: string;
   published_date?: string | null;
   score: number;
+  providers?: string[];
 };

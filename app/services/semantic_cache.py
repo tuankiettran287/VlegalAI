@@ -17,10 +17,11 @@ from app.core.config import Settings
 from app.core.security import decrypt_text, encrypt_text
 from app.db import SessionFactory
 from app.models import LegalAnswerCache
+from app.services.ai import redact_sensitive_text
 from app.services.embeddings import EmbeddingConfig, LocalEmbeddingService, get_embedding_service
 
 
-LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v1"
+LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v2"
 _PRIVATE_CONTEXT_RE = re.compile(
     r"\b("
     r"tôi|mình|chúng tôi|của tôi|của mình|công ty tôi|gia đình tôi|"
@@ -41,6 +42,79 @@ _PUBLIC_LEGAL_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_ORGANIZATION_CONTEXT_RE = re.compile(
+    r"\b(?:công ty|doanh nghiệp|hộ kinh doanh|tập đoàn|ngân hàng|"
+    r"hợp tác xã|văn phòng luật|chi nhánh|đơn vị sử dụng lao động)\b",
+    re.IGNORECASE,
+)
+_PERSON_TITLE_RE = re.compile(
+    r"\b(?:ông|bà|anh|chị|ông/bà)\s+"
+    r"[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯẠ-Ỹ][^\W\d_]+"
+    r"(?:\s+[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯẠ-Ỹ][^\W\d_]+){1,4}\b",
+)
+_PUBLIC_TITLE_FIRST_WORDS = {
+    "bộ",
+    "chính",
+    "điều",
+    "luật",
+    "nghị",
+    "nhà",
+    "người",
+    "pháp",
+    "quy",
+    "theo",
+    "thông",
+    "thuế",
+    "việt",
+}
+_PUBLIC_ACRONYMS = {
+    "BHXH",
+    "BLĐTBXH",
+    "BTC",
+    "CP",
+    "GTGT",
+    "NĐ",
+    "QH",
+    "TNCN",
+    "TNDN",
+    "TT",
+    "UBTVQH",
+    "VAT",
+    "VND",
+}
+
+
+def _contains_likely_private_entity(query: str) -> bool:
+    """Conservatively exclude named people/organizations from answer caching."""
+
+    if _ORGANIZATION_CONTEXT_RE.search(query) or _PERSON_TITLE_RE.search(query):
+        return True
+
+    words = re.findall(r"[^\W\d_]+", query, flags=re.UNICODE)
+    proper_run = 0
+    for index, word in enumerate(words):
+        is_title_case = len(word) > 1 and word[0].isupper() and word[1:].islower()
+        if is_title_case:
+            if (
+                proper_run == 0
+                and index == 0
+                and word.casefold() in _PUBLIC_TITLE_FIRST_WORDS
+            ):
+                proper_run = 0
+                continue
+            proper_run += 1
+            if proper_run >= 2:
+                return True
+        else:
+            proper_run = 0
+
+        if (
+            len(word) >= 2
+            and word.isupper()
+            and word not in _PUBLIC_ACRONYMS
+        ):
+            return True
+    return False
 
 
 def normalize_public_query(query: str) -> str:
@@ -51,11 +125,14 @@ def normalize_public_query(query: str) -> str:
 
 def is_public_cache_candidate(query: str, *, max_chars: int = 1500) -> bool:
     normalized = normalize_public_query(query)
+    _, sensitive_count = redact_sensitive_text(query)
     return (
         20 <= len(normalized) <= max_chars
         and bool(_PUBLIC_LEGAL_RE.search(normalized))
+        and sensitive_count == 0
         and not _PRIVATE_CONTEXT_RE.search(normalized)
         and not _DIRECT_IDENTIFIER_RE.search(normalized)
+        and not _contains_likely_private_entity(query)
     )
 
 
@@ -66,9 +143,15 @@ def legal_fingerprint(
     source_identity = sorted(
         {
             (
+                str(source.get("source_id") or ""),
                 str(source.get("doc_id") or ""),
                 str(source.get("citation") or ""),
                 str(source.get("source_url") or ""),
+                str(source.get("law_status") or ""),
+                str(source.get("law_version") or ""),
+                hashlib.sha256(
+                    str(source.get("text") or "").encode("utf-8")
+                ).hexdigest(),
             )
             for source in sources
         }
@@ -121,6 +204,7 @@ class CachedLegalAnswer:
 
 @dataclass(frozen=True, slots=True)
 class CacheLookup:
+    scope_hash: str
     query_hash: str
     normalized_query: str
     embedding: list[float] | None
@@ -128,7 +212,7 @@ class CacheLookup:
 
 
 class SemanticAnswerCacheService:
-    """Cross-user cache restricted to context-free public legal questions."""
+    """Per-user/guest cache restricted to context-free public legal questions."""
 
     def __init__(
         self,
@@ -165,24 +249,29 @@ class SemanticAnswerCacheService:
             exact_match=exact_match,
         )
 
-    async def lookup(self, query: str) -> CacheLookup:
+    async def lookup(self, query: str, *, scope: str) -> CacheLookup:
+        if not scope.strip():
+            raise ValueError("Semantic answer cache scope must not be blank.")
+        scope_hash = hashlib.sha256(scope.encode("utf-8")).hexdigest()
         normalized_query = normalize_public_query(query)
         query_hash = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
         now = datetime.now(UTC)
         active = (
             LegalAnswerCache.expires_at > now,
-            LegalAnswerCache.model_name == self.settings.qwen_model,
+            LegalAnswerCache.model_name == self.settings.gemini_model,
             LegalAnswerCache.prompt_version == LEGAL_ANSWER_PROMPT_VERSION,
         )
         async with SessionFactory() as db:
             exact = await db.scalar(
                 select(LegalAnswerCache).where(
+                    LegalAnswerCache.cache_scope_hash == scope_hash,
                     LegalAnswerCache.query_hash == query_hash,
                     *active,
                 )
             )
             if exact:
                 return CacheLookup(
+                    scope_hash=scope_hash,
                     query_hash=query_hash,
                     normalized_query=normalized_query,
                     embedding=None,
@@ -194,7 +283,10 @@ class SemanticAnswerCacheService:
         async with SessionFactory() as db:
             result = await db.execute(
                 select(LegalAnswerCache, distance.label("distance"))
-                .where(*active)
+                .where(
+                    LegalAnswerCache.cache_scope_hash == scope_hash,
+                    *active,
+                )
                 .order_by(distance)
                 .limit(1)
             )
@@ -203,8 +295,13 @@ class SemanticAnswerCacheService:
         if match:
             similarity = 1.0 - float(match[1])
             if similarity >= self.settings.semantic_answer_cache_similarity:
-                hit = self._cached_answer(match[0], similarity, exact_match=False)
+                hit = self._cached_answer(
+                    match[0],
+                    similarity,
+                    exact_match=False,
+                )
         return CacheLookup(
+            scope_hash=scope_hash,
             query_hash=query_hash,
             normalized_query=normalized_query,
             embedding=embedding,
@@ -227,6 +324,7 @@ class SemanticAnswerCacheService:
         now = datetime.now(UTC)
         values = {
             "id": uuid.uuid4(),
+            "cache_scope_hash": lookup.scope_hash,
             "query_hash": lookup.query_hash,
             "query_ciphertext": encrypt_text(lookup.normalized_query, self.settings),
             "answer_ciphertext": encrypt_text(answer, self.settings),
@@ -235,14 +333,17 @@ class SemanticAnswerCacheService:
             "sources": sources,
             "verification": verification,
             "law_fingerprint": legal_fingerprint(sources, verification),
-            "model_name": self.settings.qwen_model,
+            "model_name": self.settings.gemini_model,
             "prompt_version": LEGAL_ANSWER_PROMPT_VERSION,
             "expires_at": now + timedelta(hours=self.settings.semantic_answer_cache_ttl_hours),
             "hit_count": 0,
         }
         statement = insert(LegalAnswerCache).values(**values)
         statement = statement.on_conflict_do_update(
-            index_elements=[LegalAnswerCache.query_hash],
+            index_elements=[
+                LegalAnswerCache.cache_scope_hash,
+                LegalAnswerCache.query_hash,
+            ],
             set_={
                 "query_ciphertext": statement.excluded.query_ciphertext,
                 "answer_ciphertext": statement.excluded.answer_ciphertext,

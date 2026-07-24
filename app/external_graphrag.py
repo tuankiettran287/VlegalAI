@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
+import logging
 import math
 import os
 import re
@@ -8,6 +10,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 from neo4j import GraphDatabase
 import psycopg
@@ -16,6 +19,9 @@ from sqlalchemy.engine import make_url
 
 from app.legal_graphrag import DEFAULT_DB_PATH, blob_to_vector, key_terms, normalize_space, strip_accents
 from app.services.embeddings import EmbeddingConfig, get_embedding_service
+
+
+logger = logging.getLogger(__name__)
 
 
 RELATION_TYPE_MAP = {
@@ -77,6 +83,217 @@ POSTGRES_LEXICAL_STOP_WORDS = {
     "của", "cua", "được", "duoc", "không", "khong", "trong", "những",
     "nhung", "gì", "gi", "các", "cac", "một", "mot", "số", "so",
 }
+CURRENT_LAW_STATUSES = ("IN_FORCE", "PARTIALLY_IN_FORCE", "AMENDED")
+SETTLED_LAW_STATUSES = (
+    *CURRENT_LAW_STATUSES,
+    "EXPIRED",
+    "REPLACED",
+    "UNKNOWN",
+)
+UNVERIFIED_LAW_STATUS = "UNVERIFIED"
+
+
+def merge_chunk_rows(
+    preferred: dict[str, Any],
+    supplement: dict[str, Any],
+) -> dict[str, Any]:
+    """Fill gaps from a graph row without dropping richer provenance."""
+    merged = dict(supplement)
+    for key, value in preferred.items():
+        if value is not None and value != "":
+            merged[key] = value
+        else:
+            merged.setdefault(key, value)
+    return merged
+
+
+def _normalized_law_code(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "")).upper()[:120]
+
+
+def _positive_version(value: Any) -> int:
+    try:
+        version = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, version)
+
+
+def _verified_provenance_flag(value: Any) -> bool:
+    return value is True or (
+        isinstance(value, str)
+        and value.strip().lower() in {"true", "verified"}
+    )
+
+
+def _verified_https_source(value: Any) -> str | None:
+    source_url = str(value or "").strip()
+    try:
+        parsed = urlparse(source_url)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or (port is not None and port != 443)
+    ):
+        return None
+    return source_url
+
+
+def _read_jsonl_records(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid provenance JSONL at {path}:{line_number}"
+                ) from exc
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"Invalid provenance record at {path}:{line_number}"
+                )
+            records.append(row)
+    return records
+
+
+def load_bootstrap_document_metadata(
+    db_path: Path | str,
+) -> dict[str, dict[str, Any]]:
+    """Load explicit provenance or quarantine legacy documents.
+
+    A local filename/code is useful for discovery but is not proof of current
+    legal effect. Only an explicit verified provenance record with an HTTPS
+    source and a settled lifecycle status can become retrievable.
+    """
+    db_path = Path(db_path)
+    records = {
+        str(row.get("doc_id") or ""): dict(row)
+        for row in sqlite_rows(db_path, "docs")
+        if str(row.get("doc_id") or "")
+    }
+    for filename in ("documents.jsonl", "document_provenance.jsonl"):
+        for row in _read_jsonl_records(db_path.parent / filename):
+            doc_id = str(row.get("doc_id") or "")
+            if not doc_id:
+                continue
+            records[doc_id] = {**records.get(doc_id, {}), **row}
+
+    metadata: dict[str, dict[str, Any]] = {}
+    for doc_id, row in records.items():
+        nested = row.get("provenance")
+        provenance = nested if isinstance(nested, dict) else {}
+        code = _normalized_law_code(
+            provenance.get("law_code")
+            or provenance.get("code")
+            or row.get("law_code")
+            or row.get("code")
+        )
+        title = str(row.get("title") or provenance.get("title") or code).strip()
+        status = str(
+            provenance.get("law_status")
+            or provenance.get("status")
+            or row.get("law_status")
+            or row.get("status")
+            or ""
+        ).strip().upper()
+        source_url = _verified_https_source(
+            provenance.get("source_url") or row.get("source_url")
+        )
+        verified = _verified_provenance_flag(
+            provenance.get("provenance_verified")
+            if "provenance_verified" in provenance
+            else row.get("provenance_verified")
+        )
+        if not (
+            verified
+            and code
+            and source_url
+            and status in SETTLED_LAW_STATUSES
+        ):
+            status = UNVERIFIED_LAW_STATUS
+            source_url = None
+        metadata[doc_id] = {
+            "doc_id": doc_id,
+            "title": title,
+            "law_code": code or None,
+            "source_url": source_url,
+            "law_status": status,
+            "law_version": _positive_version(
+                provenance.get("law_version")
+                or provenance.get("version")
+                or row.get("law_version")
+                or row.get("version")
+            ),
+            "provenance_verified": status != UNVERIFIED_LAW_STATUS,
+        }
+    return metadata
+
+
+def bootstrap_provenance(
+    metadata: dict[str, dict[str, Any]],
+    doc_id: Any,
+) -> dict[str, Any]:
+    """Return explicit lifecycle fields for every bootstrap graph row."""
+
+    row = metadata.get(str(doc_id or ""))
+    if row is not None:
+        return {
+            "law_code": row["law_code"],
+            "source_url": row["source_url"],
+            "law_status": row["law_status"],
+            "law_version": row["law_version"],
+            "provenance_verified": row["provenance_verified"],
+        }
+    return {
+        "law_code": None,
+        "source_url": None,
+        "law_status": UNVERIFIED_LAW_STATUS,
+        "law_version": 1,
+        "provenance_verified": False,
+    }
+
+
+def postgres_latest_chunk_predicate(alias: str) -> str:
+    """SQL predicate that admits the latest indexed version of each law."""
+    normalized_code = f"""
+        upper(
+            regexp_replace(
+                btrim({alias}.law_code),
+                '[[:space:]]+',
+                '',
+                'g'
+            )
+        )
+    """
+    return f"""
+        {alias}.law_code IS NOT NULL
+        AND {alias}.law_version IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM graphrag_law_version AS latest_law
+            WHERE latest_law.law_code_normalized = {normalized_code}
+              AND latest_law.latest_version = {alias}.law_version
+        )
+    """
+
+
+def postgres_current_chunk_predicate(alias: str) -> str:
+    """SQL predicate for the latest indexed version with a current status."""
+    statuses = ", ".join(f"'{status}'" for status in CURRENT_LAW_STATUSES)
+    return f"""
+        {postgres_latest_chunk_predicate(alias)}
+        AND {alias}.law_status IN ({statuses})
+    """
 
 
 @dataclass(frozen=True)
@@ -241,6 +458,7 @@ def sync_neo4j(
     edges = sqlite_rows(db_path, "edges")
     validate_sqlite_embedding_metadata(db_path, config)
     chunks = sqlite_rows(db_path, "chunks")
+    document_metadata = load_bootstrap_document_metadata(db_path)
 
     driver = neo4j_driver(config)
     try:
@@ -251,6 +469,15 @@ def sync_neo4j(
                 session.run("MATCH (n:LegalNode) DETACH DELETE n")
 
             for batch in batched(nodes, config.batch_size):
+                prepared = []
+                for source in batch:
+                    row = dict(source)
+                    provenance = bootstrap_provenance(
+                        document_metadata,
+                        row.get("doc_id"),
+                    )
+                    row.update(provenance)
+                    prepared.append(row)
                 session.run(
                     """
                     UNWIND $rows AS row
@@ -263,16 +490,29 @@ def sync_neo4j(
                         n.parent_id = row.parent_id,
                         n.path_label = row.path_label,
                         n.text = row.text,
-                        n.ordinal = row.ordinal
+                        n.ordinal = row.ordinal,
+                        n.code = row.law_code,
+                        n.status = row.law_status,
+                        n.version = row.law_version,
+                        n.law_code = row.law_code,
+                        n.law_status = row.law_status,
+                        n.law_version = row.law_version,
+                        n.source_url = row.source_url,
+                        n.provenance_verified = row.provenance_verified
                     """,
-                    rows=batch,
+                    rows=prepared,
                 )
 
             for batch in batched(chunks, config.batch_size):
                 prepared = []
-                for row in batch:
-                    row = dict(row)
+                for source in batch:
+                    row = dict(source)
                     row.pop("vector", None)
+                    provenance = bootstrap_provenance(
+                        document_metadata,
+                        row.get("doc_id"),
+                    )
+                    row.update(provenance)
                     prepared.append(row)
                 session.run(
                     """
@@ -286,7 +526,12 @@ def sync_neo4j(
                         c.citation = row.citation,
                         c.text = row.text,
                         c.token_count = row.token_count,
-                        c.ordinal = row.ordinal
+                        c.ordinal = row.ordinal,
+                        c.law_code = row.law_code,
+                        c.law_status = row.law_status,
+                        c.law_version = row.law_version,
+                        c.source_url = row.source_url,
+                        c.provenance_verified = row.provenance_verified
                     WITH c, row
                     MATCH (n:LegalNode {node_id: row.node_id})
                     MERGE (c)-[:CHUNK_OF]->(n)
@@ -377,9 +622,64 @@ def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) 
             cursor.execute(
                 "ALTER TABLE graphrag_chunk ADD COLUMN IF NOT EXISTS embedding_revision VARCHAR(255)"
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS graphrag_law_version (
+                    law_code_normalized VARCHAR(120) PRIMARY KEY,
+                    latest_version INTEGER NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cursor.execute(
+                """
+                INSERT INTO graphrag_law_version (
+                    law_code_normalized,
+                    latest_version,
+                    updated_at
+                )
+                SELECT
+                    upper(
+                        regexp_replace(
+                            btrim(law_code),
+                            '[[:space:]]+',
+                            '',
+                            'g'
+                        )
+                    ),
+                    max(law_version),
+                    now()
+                FROM graphrag_chunk
+                WHERE law_code IS NOT NULL AND law_version IS NOT NULL
+                GROUP BY 1
+                ON CONFLICT (law_code_normalized) DO UPDATE SET
+                    latest_version = GREATEST(
+                        graphrag_law_version.latest_version,
+                        EXCLUDED.latest_version
+                    ),
+                    updated_at = now()
+                """
+            )
             cursor.execute("CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_doc_id ON graphrag_chunk (doc_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_node_id ON graphrag_chunk (node_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_type ON graphrag_chunk (chunk_type)")
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_law_code_version
+                ON graphrag_chunk (
+                    upper(
+                        regexp_replace(
+                            btrim(law_code),
+                            '[[:space:]]+',
+                            '',
+                            'g'
+                        )
+                    ),
+                    law_version DESC
+                )
+                WHERE law_code IS NOT NULL AND law_version IS NOT NULL
+                """
+            )
             cursor.execute(
                 """
                 CREATE INDEX IF NOT EXISTS ix_graphrag_chunk_search ON graphrag_chunk USING gin (
@@ -395,7 +695,20 @@ def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) 
                 """
             )
             if reset:
-                cursor.execute("TRUNCATE TABLE graphrag_chunk")
+                cursor.execute(
+                    "TRUNCATE TABLE graphrag_chunk, graphrag_law_version"
+                )
+
+
+def drop_postgres_bulk_load_indexes(config: ExternalGraphRAGConfig) -> None:
+    """Drop rebuildable indexes before a full corpus reload."""
+
+    with postgres_connection(config) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("DROP INDEX IF EXISTS ix_graphrag_chunk_search")
+            cursor.execute(
+                "DROP INDEX IF EXISTS ix_graphrag_chunk_embedding_hnsw"
+            )
 
 
 def validate_postgres_embeddings(connection, config: ExternalGraphRAGConfig) -> None:
@@ -488,8 +801,49 @@ def upsert_postgres_chunks(
             updated_at = now()
     """
     with postgres_connection(config) as connection:
-        with connection.cursor() as cursor:
-            cursor.executemany(statement, prepared)
+        # `postgres_connection` is autocommit for read-heavy runtime paths.
+        # Use an explicit transaction here so a failed batch cannot expose
+        # only a prefix of a new legal-document version.
+        with connection.transaction():
+            with connection.cursor() as cursor:
+                cursor.executemany(statement, prepared)
+                latest_versions: dict[str, int] = {}
+                for row in prepared:
+                    normalized_code = _normalized_law_code(row.get("law_code"))
+                    if not normalized_code:
+                        continue
+                    latest_versions[normalized_code] = max(
+                        latest_versions.get(normalized_code, 0),
+                        _positive_version(row.get("law_version")),
+                    )
+                if latest_versions:
+                    cursor.executemany(
+                        """
+                        INSERT INTO graphrag_law_version (
+                            law_code_normalized,
+                            latest_version,
+                            updated_at
+                        )
+                        VALUES (
+                            %(law_code_normalized)s,
+                            %(latest_version)s,
+                            now()
+                        )
+                        ON CONFLICT (law_code_normalized) DO UPDATE SET
+                            latest_version = GREATEST(
+                                graphrag_law_version.latest_version,
+                                EXCLUDED.latest_version
+                            ),
+                            updated_at = now()
+                        """,
+                        [
+                            {
+                                "law_code_normalized": code,
+                                "latest_version": version,
+                            }
+                            for code, version in latest_versions.items()
+                        ],
+                    )
     return len(prepared)
 
 
@@ -624,30 +978,41 @@ def sync_postgres(
 
     validate_sqlite_embedding_metadata(db_path, config)
     chunks = sqlite_rows(db_path, "chunks")
+    document_metadata = load_bootstrap_document_metadata(db_path)
     ensure_postgres_schema(config, reset=reset)
+    if reset:
+        drop_postgres_bulk_load_indexes(config)
 
     total = 0
-    for batch in batched(chunks, config.batch_size):
-        rows = []
-        for row in batch:
-            rows.append({
-                "chunk_id": row["chunk_id"],
-                "doc_id": row["doc_id"],
-                "node_id": row["node_id"],
-                "chunk_type": row["chunk_type"],
-                "title": row["title"],
-                "path_label": row["path_label"],
-                "citation": row["citation"],
-                "text": row["text"],
-                "token_count": row["token_count"],
-                "ordinal": row["ordinal"],
-                "source_url": None,
-                "law_code": None,
-                "law_status": None,
-                "law_version": None,
-                "vector": row["vector"],
-            })
-        total += upsert_postgres_chunks(rows, config)
+    try:
+        for batch in batched(chunks, config.batch_size):
+            rows = []
+            for row in batch:
+                provenance = bootstrap_provenance(
+                    document_metadata,
+                    row.get("doc_id"),
+                )
+                rows.append({
+                    "chunk_id": row["chunk_id"],
+                    "doc_id": row["doc_id"],
+                    "node_id": row["node_id"],
+                    "chunk_type": row["chunk_type"],
+                    "title": row["title"],
+                    "path_label": row["path_label"],
+                    "citation": row["citation"],
+                    "text": row["text"],
+                    "token_count": row["token_count"],
+                    "ordinal": row["ordinal"],
+                    "source_url": provenance["source_url"],
+                    "law_code": provenance["law_code"],
+                    "law_status": provenance["law_status"],
+                    "law_version": provenance["law_version"],
+                    "vector": row["vector"],
+                })
+            total += upsert_postgres_chunks(rows, config)
+    finally:
+        if reset:
+            ensure_postgres_schema(config)
 
     return {"chunks": total}
 
@@ -694,8 +1059,25 @@ class PostgresGraphRAGStore:
         self.connection.close()
 
     def stats(self) -> dict[str, Any]:
+        current_chunk = postgres_latest_chunk_predicate("current_chunk")
         with self.connection.cursor() as cursor:
-            cursor.execute("SELECT count(*) AS chunks, count(DISTINCT doc_id) AS documents FROM graphrag_chunk")
+            cursor.execute(
+                f"""
+                SELECT count(*) AS chunks,
+                       count(
+                           DISTINCT upper(
+                               regexp_replace(
+                                   btrim(current_chunk.law_code),
+                                   '[[:space:]]+',
+                                   '',
+                                   'g'
+                               )
+                           )
+                       ) AS documents
+                FROM graphrag_chunk AS current_chunk
+                WHERE {current_chunk}
+                """
+            )
             counts = cursor.fetchone() or {"chunks": 0, "documents": 0}
         return {
             "backend": "postgres_hybrid",
@@ -763,14 +1145,21 @@ class PostgresGraphRAGStore:
 
     def _vector_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
         query_vector = vector_literal(postgres_dense_vector(query, self.config))
+        current_chunk = postgres_latest_chunk_predicate("current_chunk")
         with self.connection.cursor() as cursor:
             cursor.execute(
-                """
-                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
-                       citation, text, token_count, ordinal, source_url,
-                       1 - (embedding <=> %s::vector) AS _vector_score
-                FROM graphrag_chunk
-                ORDER BY embedding <=> %s::vector
+                f"""
+                SELECT current_chunk.chunk_id, current_chunk.doc_id,
+                       current_chunk.node_id, current_chunk.chunk_type,
+                       current_chunk.title, current_chunk.path_label,
+                       current_chunk.citation, current_chunk.text,
+                       current_chunk.token_count, current_chunk.ordinal,
+                       current_chunk.source_url, current_chunk.law_code,
+                       current_chunk.law_status, current_chunk.law_version,
+                       1 - (current_chunk.embedding <=> %s::vector) AS _vector_score
+                FROM graphrag_chunk AS current_chunk
+                WHERE {current_chunk}
+                ORDER BY current_chunk.embedding <=> %s::vector
                 LIMIT %s
                 """,
                 (query_vector, query_vector, limit),
@@ -783,15 +1172,24 @@ class PostgresGraphRAGStore:
         if not tsquery:
             return []
 
+        current_chunk = postgres_latest_chunk_predicate("current_chunk")
+        frequency_chunk = postgres_latest_chunk_predicate("frequency_chunk")
         with self.connection.cursor() as cursor:
             cursor.execute(
                 f"""
                 WITH query AS (SELECT to_tsquery('simple', %s) AS value)
-                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
-                       citation, text, token_count, ordinal, source_url,
+                SELECT current_chunk.chunk_id, current_chunk.doc_id,
+                       current_chunk.node_id, current_chunk.chunk_type,
+                       current_chunk.title, current_chunk.path_label,
+                       current_chunk.citation, current_chunk.text,
+                       current_chunk.token_count, current_chunk.ordinal,
+                       current_chunk.source_url, current_chunk.law_code,
+                       current_chunk.law_status, current_chunk.law_version,
                        ts_rank_cd({POSTGRES_TEXT_SEARCH_EXPRESSION}, query.value, 32) AS _fts_score
-                FROM graphrag_chunk, query
-                WHERE {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ query.value
+                FROM graphrag_chunk AS current_chunk
+                CROSS JOIN query
+                WHERE {current_chunk}
+                  AND {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ query.value
                 ORDER BY _fts_score DESC, chunk_id
                 LIMIT %s
                 """,
@@ -804,8 +1202,9 @@ class PostgresGraphRAGStore:
                 f"""
                 SELECT term, (
                     SELECT count(*)
-                    FROM graphrag_chunk
-                    WHERE {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ plainto_tsquery('simple', term)
+                    FROM graphrag_chunk AS frequency_chunk
+                    WHERE {frequency_chunk}
+                      AND {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ plainto_tsquery('simple', term)
                 ) AS document_frequency
                 FROM unnest(%s::text[]) AS terms(term)
                 """,
@@ -832,12 +1231,17 @@ class PostgresGraphRAGStore:
 
     def _corpus_statistics(self) -> tuple[int, float]:
         if self._bm25_corpus_statistics is None:
+            current_chunk = postgres_latest_chunk_predicate("current_chunk")
             with self.connection.cursor() as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT count(*) AS documents,
-                           coalesce(avg(greatest(token_count, 1)), 1.0) AS average_length
-                    FROM graphrag_chunk
+                           coalesce(
+                               avg(greatest(current_chunk.token_count, 1)),
+                               1.0
+                           ) AS average_length
+                    FROM graphrag_chunk AS current_chunk
+                    WHERE {current_chunk}
                     """
                 )
                 row = cursor.fetchone() or {"documents": 0, "average_length": 1.0}
@@ -952,6 +1356,15 @@ class Neo4jGraphRAGStore:
                     """
                     CALL db.index.fulltext.queryNodes('legal_chunk_fulltext', $q)
                     YIELD node, score
+                    MATCH (node)-[:CHUNK_OF]->(:LegalNode)-[:BELONGS_TO]->(document:LegalNode)
+                    WHERE coalesce(node.law_version, node.version) = document.version
+                      AND NOT EXISTS {
+                          MATCH (newer_document:LegalNode)
+                          WHERE newer_document.node_type = 'document'
+                            AND toUpper(replace(coalesce(newer_document.code, ''), ' ', ''))
+                                = toUpper(replace(coalesce(document.code, ''), ' ', ''))
+                            AND newer_document.version > document.version
+                      }
                     RETURN node.chunk_id AS chunk_id,
                            node.doc_id AS doc_id,
                            node.node_id AS node_id,
@@ -975,9 +1388,20 @@ class Neo4jGraphRAGStore:
                 rows = session.run(
                     """
                     MATCH (node:LegalChunk)
-                    WHERE toLower(node.text) CONTAINS $needle
-                       OR toLower(node.title) CONTAINS $needle
-                       OR toLower(node.citation) CONTAINS $needle
+                    MATCH (node)-[:CHUNK_OF]->(:LegalNode)-[:BELONGS_TO]->(document:LegalNode)
+                    WHERE coalesce(node.law_version, node.version) = document.version
+                      AND NOT EXISTS {
+                          MATCH (newer_document:LegalNode)
+                          WHERE newer_document.node_type = 'document'
+                            AND toUpper(replace(coalesce(newer_document.code, ''), ' ', ''))
+                                = toUpper(replace(coalesce(document.code, ''), ' ', ''))
+                            AND newer_document.version > document.version
+                      }
+                      AND (
+                           toLower(node.text) CONTAINS $needle
+                        OR toLower(node.title) CONTAINS $needle
+                        OR toLower(node.citation) CONTAINS $needle
+                      )
                     RETURN node.chunk_id AS chunk_id,
                            node.doc_id AS doc_id,
                            node.node_id AS node_id,
@@ -1077,7 +1501,16 @@ class Neo4jGraphRAGStore:
             rows = session.run(
                 """
                 MATCH (c:LegalChunk)-[:CHUNK_OF]->(n:LegalNode)
+                MATCH (n)-[:BELONGS_TO]->(document:LegalNode)
                 WHERE n.node_id IN $node_ids
+                  AND coalesce(c.law_version, c.version) = document.version
+                  AND NOT EXISTS {
+                      MATCH (newer_document:LegalNode)
+                      WHERE newer_document.node_type = 'document'
+                        AND toUpper(replace(coalesce(newer_document.code, ''), ' ', ''))
+                            = toUpper(replace(coalesce(document.code, ''), ' ', ''))
+                        AND newer_document.version > document.version
+                  }
                 RETURN c.chunk_id AS chunk_id,
                        c.doc_id AS doc_id,
                        c.node_id AS node_id,
@@ -1118,46 +1551,64 @@ class Neo4jPostgresGraphRAGStore:
         self.driver = neo4j_driver(self.config)
         try:
             self.driver.verify_connectivity()
-        except Exception:
-            self.rag.close()
-            self.driver.close()
-            raise
+        except Exception as exc:
+            # Aura/network outages must not make the PostgreSQL index
+            # unavailable. The driver remains open and retries on later calls.
+            logger.warning(
+                "Neo4j connectivity check failed; hybrid retrieval will "
+                "temporarily fall back to PostgreSQL error_type=%s",
+                type(exc).__name__,
+            )
 
     def close(self) -> None:
         self.rag.close()
         self.driver.close()
 
     def stats(self) -> dict[str, Any]:
-        with self.driver.session(database=self.config.neo4j_database) as session:
-            row = session.run(
-                """
-                MATCH (d:LegalNode)
-                WHERE d.node_id STARTS WITH 'doc:'
-                WITH count(d) AS documents
-                MATCH (n:LegalNode)
-                WITH documents, count(n) AS nodes
-                MATCH ()-[r]->()
-                WHERE type(r) <> 'CHUNK_OF'
-                WITH documents, nodes, count(r) AS edges
-                MATCH (c:LegalChunk)
-                RETURN documents, nodes, edges, count(c) AS chunks
-                """
-            ).single()
-            rel_rows = session.run(
-                """
-                MATCH ()-[r]->()
-                WHERE type(r) <> 'CHUNK_OF'
-                RETURN type(r) AS relation, count(r) AS count
-                ORDER BY count DESC
-                """
-            ).data()
-            node_type_rows = session.run(
-                """
-                MATCH (n:LegalNode)
-                RETURN n.node_type AS node_type, count(n) AS count
-                ORDER BY count DESC
-                """
-            ).data()
+        try:
+            with self.driver.session(database=self.config.neo4j_database) as session:
+                row = session.run(
+                    """
+                    MATCH (d:LegalNode)
+                    WHERE d.node_id STARTS WITH 'doc:'
+                    WITH count(d) AS documents
+                    MATCH (n:LegalNode)
+                    WITH documents, count(n) AS nodes
+                    MATCH ()-[r]->()
+                    WHERE type(r) <> 'CHUNK_OF'
+                    WITH documents, nodes, count(r) AS edges
+                    MATCH (c:LegalChunk)
+                    RETURN documents, nodes, edges, count(c) AS chunks
+                    """
+                ).single()
+                rel_rows = session.run(
+                    """
+                    MATCH ()-[r]->()
+                    WHERE type(r) <> 'CHUNK_OF'
+                    RETURN type(r) AS relation, count(r) AS count
+                    ORDER BY count DESC
+                    """
+                ).data()
+                node_type_rows = session.run(
+                    """
+                    MATCH (n:LegalNode)
+                    RETURN n.node_type AS node_type, count(n) AS count
+                    ORDER BY count DESC
+                    """
+                ).data()
+        except Exception as exc:
+            logger.warning(
+                "Neo4j stats unavailable; returning PostgreSQL stats "
+                "error_type=%s",
+                type(exc).__name__,
+            )
+            rag_stats = self.rag.stats()
+            return {
+                **rag_stats,
+                "backend": "postgres_hybrid",
+                "neo4j_available": False,
+                "neo4j_uri": self.config.neo4j_uri,
+            }
         rag_stats = self.rag.stats()
         return {
             "backend": "postgres_hybrid+neo4j_graphrag",
@@ -1169,6 +1620,7 @@ class Neo4jPostgresGraphRAGStore:
             "relations": {item["relation"]: item["count"] for item in rel_rows},
             "node_types": {item["node_type"]: item["count"] for item in node_type_rows},
             "neo4j_uri": self.config.neo4j_uri,
+            "neo4j_available": True,
             "retrieval": {
                 "dense": "cosine",
                 "lexical": "bm25",
@@ -1200,9 +1652,20 @@ class Neo4jPostgresGraphRAGStore:
             if node_id:
                 node_scores[node_id] = max(node_scores.get(node_id, 0.0), score)
 
-        expanded_scores = self._expand_node_scores(node_scores)
-        graph_node_ids = set(expanded_scores) - set(node_scores)
-        expanded_rows = self._chunks_for_nodes(expanded_scores.keys())
+        try:
+            expanded_scores = self._expand_node_scores(node_scores)
+            graph_node_ids = set(expanded_scores) - set(node_scores)
+            expanded_rows = self._chunks_for_nodes(expanded_scores.keys())
+        except Exception as exc:
+            logger.warning(
+                "Neo4j graph expansion failed; using PostgreSQL retrieval "
+                "error_type=%s",
+                type(exc).__name__,
+            )
+            selected = [dict(row) for row in candidates[:top_k]]
+            for index, row in enumerate(selected, start=1):
+                row["source_id"] = f"S{index}"
+            return selected
         for row in expanded_rows:
             chunk_id = row["chunk_id"]
             score = expanded_scores.get(row["node_id"], 0.0)
@@ -1311,7 +1774,16 @@ class Neo4jPostgresGraphRAGStore:
             rows = session.run(
                 """
                 MATCH (c:LegalChunk)-[:CHUNK_OF]->(n:LegalNode)
+                MATCH (n)-[:BELONGS_TO]->(document:LegalNode)
                 WHERE n.node_id IN $node_ids
+                  AND coalesce(c.law_version, c.version) = document.version
+                  AND NOT EXISTS {
+                      MATCH (newer_document:LegalNode)
+                      WHERE newer_document.node_type = 'document'
+                        AND toUpper(replace(coalesce(newer_document.code, ''), ' ', ''))
+                            = toUpper(replace(coalesce(document.code, ''), ' ', ''))
+                        AND newer_document.version > document.version
+                  }
                 RETURN c.chunk_id AS chunk_id,
                        c.doc_id AS doc_id,
                        c.node_id AS node_id,
@@ -1340,14 +1812,21 @@ class Neo4jPostgresGraphRAGStore:
         return rows
 
     def chunks_by_node(self, node_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        current_chunk = postgres_latest_chunk_predicate("current_chunk")
         with self.postgres.cursor() as cursor:
             cursor.execute(
-                """
-                SELECT chunk_id, doc_id, node_id, chunk_type, title, path_label,
-                       citation, text, token_count, ordinal, source_url
-                FROM graphrag_chunk
-                WHERE node_id = %s
-                ORDER BY ordinal
+                f"""
+                SELECT current_chunk.chunk_id, current_chunk.doc_id,
+                       current_chunk.node_id, current_chunk.chunk_type,
+                       current_chunk.title, current_chunk.path_label,
+                       current_chunk.citation, current_chunk.text,
+                       current_chunk.token_count, current_chunk.ordinal,
+                       current_chunk.source_url, current_chunk.law_code,
+                       current_chunk.law_status, current_chunk.law_version
+                FROM graphrag_chunk AS current_chunk
+                WHERE current_chunk.node_id = %s
+                  AND {current_chunk}
+                ORDER BY current_chunk.ordinal
                 LIMIT %s
                 """,
                 (node_id, limit),

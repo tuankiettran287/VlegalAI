@@ -7,6 +7,7 @@ from sqlalchemy.dialects import postgresql
 
 from app.core.celery import postgres_celery_urls
 from app.core.config import Settings
+from app.core.database import asyncpg_database_url
 from app.services import guest_limit
 from app.services.guest_limit import GuestRateLimiter
 
@@ -48,7 +49,19 @@ def test_celery_rejects_non_postgresql_database() -> None:
         postgres_celery_urls("sqlite:///vlegal.db")
 
 
-def test_guest_rate_limit_is_an_atomic_postgresql_upsert(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_asyncpg_url_translates_provider_ssl_parameters() -> None:
+    url = asyncpg_database_url(
+        "postgresql+asyncpg://user:secret@db.example.com/legal"
+        "?sslmode=require&channel_binding=require"
+    )
+
+    assert url.drivername == "postgresql+asyncpg"
+    assert dict(url.query) == {"ssl": "require"}
+
+
+def test_guest_rate_limit_is_an_atomic_postgresql_upsert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     db = _FakeSession([1, 1])
     monkeypatch.setattr(guest_limit, "SessionFactory", lambda: db)
     limiter = GuestRateLimiter(Settings(_env_file=None))

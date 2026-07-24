@@ -26,6 +26,7 @@ class _FakeSession:
         self.scalar_results = iter(scalar_results)
         self.messages = messages
         self.executed: list[object] = []
+        self.scalar_queries: list[object] = []
         self.added: list[object] = []
         self.committed = False
 
@@ -41,7 +42,8 @@ class _FakeSession:
     async def scalar(self, _: object) -> object:
         return next(self.scalar_results)
 
-    async def scalars(self, _: object) -> _Rows:
+    async def scalars(self, statement: object) -> _Rows:
+        self.scalar_queries.append(statement)
         return _Rows(self.messages)
 
     def add(self, value: object) -> None:
@@ -85,19 +87,23 @@ def test_refresh_summarizes_embeds_and_persists_conversation_memory(
     messages = [
         SimpleNamespace(
             id=uuid.uuid4(),
+            message_sequence=1,
             role="USER",
             content_ciphertext=encrypt_text("Thời hạn là bao lâu?", settings),
             created_at=now,
         ),
         SimpleNamespace(
             id=uuid.uuid4(),
+            message_sequence=2,
             role="ASSISTANT",
             content_ciphertext=encrypt_text("Thời hạn là 30 ngày.", settings),
             created_at=now + timedelta(seconds=1),
         ),
     ]
-    db = _FakeSession([conversation_id, None, 2], messages)
-    monkeypatch.setattr(conversation_memory, "SessionFactory", lambda: db)
+    read_db = _FakeSession([conversation_id, None], messages)
+    write_db = _FakeSession([conversation_id, None], [])
+    sessions = iter([read_db, write_db])
+    monkeypatch.setattr(conversation_memory, "SessionFactory", lambda: next(sessions))
     ai = _FakeAI()
     embeddings = _FakeEmbeddings()
     service = ConversationMemoryService(settings, ai, embeddings)
@@ -105,14 +111,19 @@ def test_refresh_summarizes_embeds_and_persists_conversation_memory(
     memory = asyncio.run(service.refresh(conversation_id))
 
     assert memory is not None
-    assert db.committed
-    assert db.added == [memory]
-    assert "pg_advisory_xact_lock" in str(db.executed[0])
+    assert write_db.committed
+    assert write_db.added == [memory]
+    assert read_db.executed == []
+    snapshot_query = str(read_db.scalar_queries[0])
+    assert "chat_message.message_sequence" in snapshot_query
+    assert "OFFSET" not in snapshot_query
+    assert "pg_advisory_xact_lock" in str(write_db.executed[0])
     assert "Thời hạn là bao lâu?" in ai.calls[0][1]
     assert embeddings.inputs == [[
         "Người dùng hỏi về thời hạn; trợ lý kết luận là 30 ngày."
     ]]
     assert memory.source_message_count == 2
+    assert memory.last_message_sequence == 2
     assert memory.embedding == [0.5] * 1024
     assert memory.embedding_model == settings.embedding_model_repo
     assert decrypt_text(memory.summary_ciphertext, settings).startswith("Người dùng hỏi")

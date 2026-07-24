@@ -39,6 +39,18 @@ def _safe_return_to(value: str | None, settings: Settings) -> str:
     return settings.frontend_url
 
 
+def _set_session_cookie(response: Response, token: str, settings: Settings) -> None:
+    response.set_cookie(
+        "vlegal_session",
+        token,
+        max_age=settings.session_ttl_seconds,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="none" if settings.cookie_secure else "lax",
+        path="/",
+    )
+
+
 async def _oidc_metadata(settings: Settings) -> dict:
     if not settings.oidc_ready:
         raise HTTPException(status_code=503, detail="SSO chưa được cấu hình")
@@ -157,7 +169,7 @@ async def login(return_to: str = "/", settings: Settings = Depends(get_settings)
         {
             "client_id": settings.oidc_client_id,
             "response_type": "code",
-            "redirect_uri": settings.oidc_redirect_uri,
+            "redirect_uri": settings.oidc_callback_url,
             "scope": settings.oidc_scopes,
             "state": state_jwt,
             "nonce": nonce,
@@ -195,7 +207,7 @@ async def callback(
                 "grant_type": "authorization_code",
                 "client_id": settings.oidc_client_id,
                 "client_secret": settings.oidc_client_secret,
-                "redirect_uri": settings.oidc_redirect_uri,
+                "redirect_uri": settings.oidc_callback_url,
                 "code": code,
                 "code_verifier": transaction["verifier"],
             },
@@ -207,14 +219,14 @@ async def callback(
 
     subject = str(claims["sub"])
     issuer = str(claims.get("iss") or settings.oidc_issuer).rstrip("/")
-    user_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(claims.get("email") or subject)))
-
     try:
         identity = await db.scalar(
             select(SsoIdentity).where(SsoIdentity.issuer == issuer, SsoIdentity.subject == subject)
         )
         if identity:
             user = await db.get(User, identity.user_id)
+            if not user:
+                raise RuntimeError("Google identity references a missing user")
         else:
             email = str(claims.get("email", "")).lower().strip()
             user = await db.scalar(select(User).where(User.email == email)) if email else None
@@ -234,33 +246,46 @@ async def callback(
                 claims=claims,
             )
             db.add(identity)
-        if user:
-            user.last_login_at = datetime.now(UTC)
-            user.display_name = str(claims.get("name") or user.display_name)
-            user.avatar_url = claims.get("picture") or user.avatar_url
-            user_id = str(user.id)
-            await db.commit()
+        user.last_login_at = datetime.now(UTC)
+        user.display_name = str(claims.get("name") or user.display_name)
+        user.avatar_url = claims.get("picture") or user.avatar_url
+        identity.claims = claims
+        await db.commit()
     except Exception as exc:
-        logger.warning("SSO DB persistence bypassed: %s", exc)
+        await db.rollback()
+        logger.exception("Unable to persist Google SSO identity")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Không thể tạo phiên đăng nhập lúc này. Vui lòng thử lại.",
+        ) from exc
 
-    response = RedirectResponse(_safe_return_to(transaction.get("return_to"), settings), status_code=302)
-    samesite = "none" if settings.cookie_secure else "lax"
-    response.set_cookie(
-        "vlegal_session",
-        create_session_token(user_id, settings),
-        max_age=settings.session_ttl_seconds,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite=samesite,
-        path="/",
-    )
+    session_token = create_session_token(str(user.id), settings)
+    target = _safe_return_to(transaction.get("return_to"), settings)
+    response = RedirectResponse(target, status_code=302)
+    _set_session_cookie(response, session_token, settings)
+    return response
+
+
+@router.get("/session_callback", include_in_schema=False)
+async def session_callback(
+    token: str,
+    return_to: str = "/",
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    response = RedirectResponse(_safe_return_to(return_to, settings), status_code=302)
+    _set_session_cookie(response, token, settings)
     return response
 
 
 @router.post("/logout", status_code=204)
 async def logout(settings: Settings = Depends(get_settings)) -> Response:
     response = Response(status_code=204)
-    response.delete_cookie("vlegal_session", path="/", secure=settings.cookie_secure, samesite="lax")
+    response.delete_cookie(
+        "vlegal_session",
+        path="/",
+        secure=settings.cookie_secure,
+        samesite="none" if settings.cookie_secure else "lax",
+    )
     return response
 
 

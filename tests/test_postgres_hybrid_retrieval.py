@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app import external_graphrag as graphrag_module
 from app.external_graphrag import (
+    CURRENT_LAW_STATUSES,
+    Neo4jGraphRAGStore,
     Neo4jPostgresGraphRAGStore,
     PostgresGraphRAGStore,
+    UNVERIFIED_LAW_STATUS,
     bm25_score,
+    bootstrap_provenance,
+    postgres_current_chunk_predicate,
+    postgres_latest_chunk_predicate,
     postgres_lexical_terms,
     postgres_or_tsquery,
     reciprocal_rank_fusion,
@@ -26,6 +33,25 @@ def _row(chunk_id: str, text: str = "nghia vu thue") -> dict:
         "ordinal": 0,
         "source_url": None,
     }
+
+
+def test_bootstrap_provenance_quarantines_unknown_documents() -> None:
+    metadata = {
+        "verified-doc": {
+            "law_code": "45/2019/QH14",
+            "source_url": "https://vanban.chinhphu.vn/example",
+            "law_status": "IN_FORCE",
+            "law_version": 2,
+            "provenance_verified": True,
+        }
+    }
+
+    assert bootstrap_provenance(metadata, "verified-doc") == metadata["verified-doc"]
+    unknown = bootstrap_provenance(metadata, "legacy-doc")
+    assert unknown["law_status"] == UNVERIFIED_LAW_STATUS
+    assert unknown["law_version"] == 1
+    assert unknown["source_url"] is None
+    assert unknown["provenance_verified"] is False
 
 
 def test_postgres_lexical_terms_preserve_vietnamese_and_remove_stop_words() -> None:
@@ -100,3 +126,199 @@ def test_neo4j_hybrid_expands_postgres_rag_seeds() -> None:
     assert rows[0]["reasons"] == ["postgres_vector_cosine", "postgres_bm25"]
     assert rows[1]["chunk_id"] == "related"
     assert rows[1]["reasons"] == ["neo4j_graph"]
+
+
+def test_neo4j_hybrid_falls_back_to_postgres_when_graph_is_unavailable() -> None:
+    store = object.__new__(Neo4jPostgresGraphRAGStore)
+    seed = {
+        **_row("seed"),
+        "node_id": "seed-node",
+        "score": 2.0,
+        "reasons": ["postgres_vector_cosine", "postgres_bm25"],
+    }
+    store._postgres_candidates = lambda query, limit: [seed]
+
+    def unavailable(_: dict[str, float]) -> dict[str, float]:
+        raise RuntimeError("Neo4j unavailable")
+
+    store._expand_node_scores = unavailable
+
+    rows = store.retrieve("nghia vu thue", top_k=3)
+
+    assert [row["chunk_id"] for row in rows] == ["seed"]
+    assert rows[0]["source_id"] == "S1"
+    assert rows[0]["reasons"] == ["postgres_vector_cosine", "postgres_bm25"]
+
+
+class _RecordingCursor:
+    def __init__(
+        self,
+        *,
+        fetchall_results: list[list[dict]] | None = None,
+        fetchone_results: list[dict] | None = None,
+    ) -> None:
+        self.queries: list[tuple[str, object]] = []
+        self.fetchall_results = list(fetchall_results or [])
+        self.fetchone_results = list(fetchone_results or [])
+
+    def __enter__(self) -> "_RecordingCursor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, query: str, parameters: object = None) -> None:
+        self.queries.append((query, parameters))
+
+    def fetchall(self) -> list[dict]:
+        return self.fetchall_results.pop(0) if self.fetchall_results else []
+
+    def fetchone(self) -> dict | None:
+        return self.fetchone_results.pop(0) if self.fetchone_results else None
+
+
+class _RecordingConnection:
+    def __init__(self, cursor: _RecordingCursor) -> None:
+        self.recording_cursor = cursor
+
+    def cursor(self) -> _RecordingCursor:
+        return self.recording_cursor
+
+
+class _GraphResult:
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self.rows = rows or []
+
+    def data(self) -> list[dict]:
+        return self.rows
+
+
+class _GraphSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def __enter__(self) -> "_GraphSession":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def run(self, query: str, **parameters: object) -> _GraphResult:
+        self.calls.append((query, parameters))
+        return _GraphResult()
+
+
+class _GraphDriver:
+    def __init__(self) -> None:
+        self.recording_session = _GraphSession()
+
+    def session(self, **_: object) -> _GraphSession:
+        return self.recording_session
+
+
+def test_current_postgres_predicate_requires_current_status_and_latest_version() -> None:
+    predicate = postgres_current_chunk_predicate("candidate")
+
+    assert all(status in predicate for status in CURRENT_LAW_STATUSES)
+    assert "candidate.law_status IN" in predicate
+    assert "candidate.law_code IS NOT NULL" in predicate
+    assert "regexp_replace" in predicate
+    assert "graphrag_law_version AS latest_law" in predicate
+    assert "latest_law.latest_version = candidate.law_version" in predicate
+
+
+def test_latest_postgres_predicate_accepts_indexed_statuses_and_latest_version() -> None:
+    predicate = postgres_latest_chunk_predicate("candidate")
+
+    assert "candidate.law_status IN" not in predicate
+    assert "candidate.law_code IS NOT NULL" in predicate
+    assert "regexp_replace" in predicate
+    assert "graphrag_law_version AS latest_law" in predicate
+    assert "latest_law.latest_version = candidate.law_version" in predicate
+
+
+def test_postgres_stats_count_latest_indexed_chunks() -> None:
+    cursor = _RecordingCursor(
+        fetchone_results=[{"chunks": 4, "documents": 2}]
+    )
+    store = object.__new__(PostgresGraphRAGStore)
+    store.connection = _RecordingConnection(cursor)
+
+    result = store.stats()
+
+    query = cursor.queries[0][0]
+    assert result["chunks"] == 4
+    assert "current_chunk.law_status IN" not in query
+    assert "latest_law.latest_version = current_chunk.law_version" in query
+
+
+def test_postgres_vector_and_bm25_paths_use_latest_indexed_versions(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        graphrag_module,
+        "postgres_dense_vector",
+        lambda *_: [0.1, 0.2],
+    )
+    vector_cursor = _RecordingCursor(fetchall_results=[[]])
+    vector_store = object.__new__(PostgresGraphRAGStore)
+    vector_store.connection = _RecordingConnection(vector_cursor)
+    vector_store.config = SimpleNamespace(postgres_vector_size=2)
+
+    assert vector_store._vector_candidates("thuế", 5) == []
+    vector_query = vector_cursor.queries[0][0]
+    assert "current_chunk.law_status IN" not in vector_query
+    assert "latest_law.latest_version = current_chunk.law_version" in vector_query
+
+    row = {
+        **_row("current", "thuế phải nộp"),
+        "_fts_score": 1.0,
+        "law_code": "200/2025/QH15",
+        "law_status": "IN_FORCE",
+        "law_version": 2,
+    }
+    bm25_cursor = _RecordingCursor(
+        fetchall_results=[
+            [row],
+            [{"term": "thuế", "document_frequency": 1}],
+        ],
+        fetchone_results=[{"documents": 1, "average_length": 3.0}],
+    )
+    bm25_store = object.__new__(PostgresGraphRAGStore)
+    bm25_store.connection = _RecordingConnection(bm25_cursor)
+    bm25_store._bm25_corpus_statistics = None
+    bm25_store.config = SimpleNamespace(bm25_k1=1.5, bm25_b=0.75)
+
+    assert bm25_store._bm25_candidates("thuế", 5)
+    candidate_query, frequency_query, statistics_query = [
+        query for query, _ in bm25_cursor.queries
+    ]
+    assert "current_chunk.law_status IN" not in candidate_query
+    assert "frequency_chunk.law_status IN" not in frequency_query
+    assert "current_chunk.law_status IN" not in statistics_query
+    assert all(
+        "graphrag_law_version AS latest_law" in query
+        for query in (candidate_query, frequency_query, statistics_query)
+    )
+
+
+def test_neo4j_candidate_and_expansion_paths_use_latest_indexed_versions() -> None:
+    driver = _GraphDriver()
+    plain = object.__new__(Neo4jGraphRAGStore)
+    plain.driver = driver
+    plain.config = SimpleNamespace(neo4j_database="neo4j")
+
+    assert plain._neo4j_candidates("thuế", 5) == []
+    assert plain._chunks_for_nodes(["node-1"]) == []
+
+    hybrid = object.__new__(Neo4jPostgresGraphRAGStore)
+    hybrid.driver = driver
+    hybrid.config = SimpleNamespace(neo4j_database="neo4j")
+    assert hybrid._chunks_for_nodes(["node-1"]) == []
+
+    assert len(driver.recording_session.calls) == 3
+    for query, parameters in driver.recording_session.calls:
+        assert "law_status IN $current_statuses" not in query
+        assert "coalesce(" in query
+        assert "newer_document.version > document.version" in query
+        assert "current_statuses" not in parameters

@@ -1,7 +1,7 @@
 # VLegal AI
 
 Nền tảng trợ lý pháp lý Việt Nam gồm hỏi đáp có căn cứ, lịch sử chat, tạo/review/so
-sánh hợp đồng bằng Qwen3, chuẩn bị gói ký và nghiên cứu bài viết trên internet.
+sánh hợp đồng bằng Gemini 3.5 Flash, chuẩn bị gói ký và nghiên cứu bài viết trên internet.
 
 Người dùng có thể hỏi đáp ngay mà không đăng nhập. Khi đó hội thoại chỉ nằm trong
 `sessionStorage` của tab trình duyệt và không được ghi vào PostgreSQL. Đăng nhập
@@ -14,11 +14,17 @@ Người dùng không phải chọn RAG, GraphRAG hay từng luật áp dụng. 
 trên toàn bộ kho luật bằng Hybrid GraphRAG, sau đó thực hiện tuần tự:
 
 1. Mã hoá câu hỏi bằng BGE-M3, lấy các chunk gần nghĩa bằng `pgvector` trong PostgreSQL và mở rộng quan hệ trên Neo4j.
-2. Dùng Tavily đối chiếu số hiệu trên các nguồn chính thức được cho phép.
-3. Dùng Qwen3 phân loại còn hiệu lực, sửa đổi, hết hiệu lực hoặc bị thay thế.
+2. Chạy Tavily và Google Search grounding song song, khử trùng lặp rồi chỉ giữ
+   kết quả thuộc các nguồn chính thức được cho phép.
+3. Dùng Gemini 3.5 Flash phân loại còn hiệu lực, sửa đổi, hết hiệu lực hoặc bị thay thế.
 4. Nếu có bản mới, tải nguồn chính thức, tách Điều/Khoản thành chunk, upsert
    PostgreSQL/pgvector, dựng node/edge Neo4j và truy xuất lại.
-5. Chỉ sau đó Qwen3 mới sinh kết quả có trích dẫn `[S1]`, `[S2]`.
+5. Chỉ sau đó Gemini 3.5 Flash mới sinh kết quả có trích dẫn `[S1]`, `[S2]`.
+
+Nếu văn bản đã hết hiệu lực hoặc bị thay thế, backend tải văn bản thay thế từ URL
+chính thức, tách Điều/Khoản thành chunk, tạo embedding BGE-M3, upsert
+PostgreSQL/pgvector, tạo node/chunk Neo4j và quan hệ `REPLACES`, rồi truy xuất lại
+trước khi sinh câu trả lời.
 
 Kết quả API kèm `verification` để frontend hiển thị thời điểm kiểm tra, trạng
 thái từng văn bản, URL chính thức và việc chỉ mục có vừa được cập nhật hay không.
@@ -34,49 +40,63 @@ thái từng văn bản, URL chính thức và việc chỉ mục có vừa đư
 - `app/services/indexer.py`: tải luật mới, chunk, cập nhật PostgreSQL/pgvector và Neo4j.
 - `app/worker.py`: Celery refresh toàn bộ kho luật theo lịch.
 - `migrations/`: Alembic PostgreSQL migrations.
-- `compose.production.yml`: stack production chạy hoàn toàn bằng Docker Compose.
-- `Caddyfile`: reverse proxy, HTTPS tự động và security headers.
+- `compose.gcp.yml`: build/tag các image `linux/amd64` cho Google Artifact Registry.
+- `scripts/gcp/`: build và deploy Cloud Run Service, Worker Pool và Job.
 
 Nội dung hội thoại, tài liệu hợp đồng, feedback và văn bản trong gói ký được mã
 hóa AES-256-GCM trước khi lưu PostgreSQL. PostgreSQL cũng lưu rate limit, cung
 cấp distributed advisory lock và làm Celery broker/result backend. Dữ liệu
-PostgreSQL, Neo4j, Caddy và chỉ mục pháp lý được lưu trong Docker volumes.
+PostgreSQL được quản lý bên ngoài (ví dụ Cloud SQL); Neo4j, Caddy và chỉ mục pháp
+lý được lưu trong Docker volumes.
 
-Sau mỗi lượt hỏi đáp đã đăng nhập, Qwen tạo một bản tóm tắt hội thoại lũy tiến.
+Sau mỗi lượt hỏi đáp đã đăng nhập, Gemini tạo một bản tóm tắt hội thoại lũy tiến.
 Summary được mã hóa trước khi lưu; BGE-M3 đồng thời tạo embedding chuẩn hóa 1024
 chiều và lưu vào `conversation_summary.embedding` trên pgvector. Lượt chat sau
 dùng summary làm bộ nhớ dài hạn và các message gần nhất làm ngữ cảnh ngắn hạn.
 
 Các câu hỏi pháp lý công khai, không có lịch sử phiên hoặc dấu hiệu dữ liệu cá
-nhân, được đưa vào semantic answer cache dùng chung. Trước khi tái sử dụng câu
-trả lời, hệ thống tìm tương đồng bằng pgvector rồi kiểm tra lại trạng thái và
-fingerprint nguồn luật. Query trùng chuẩn hóa được trả trực tiếp; query chỉ tương
-tự dùng cache làm bản nháp nhưng vẫn retrieval và sinh câu trả lời đã điều chỉnh.
+nhân, có thể được đưa vào semantic answer cache tách biệt theo người dùng hoặc
+phiên khách. Trước khi tái sử dụng câu trả lời, hệ thống chỉ tìm trong đúng phạm
+vi đó bằng pgvector rồi kiểm tra lại trạng thái và fingerprint nguồn luật. Query
+trùng chuẩn hóa được trả trực tiếp; query chỉ tương tự dùng cache làm bản nháp
+nhưng vẫn retrieval và sinh câu trả lời đã điều chỉnh.
 Câu hỏi có ngữ cảnh riêng luôn sinh câu trả lời mới.
 
 ## Cấu hình
 
-Cho môi trường local, sao chép `.env.example` thành `.env`. Production dùng
-`.env.production.example` làm mẫu và lưu secret trong `.env.production`. Các biến
-bắt buộc cho luồng production:
+Cho môi trường local, sao chép `.env.example` thành `.env`. Trên GCP, cấu hình
+runtime được truyền bởi `scripts/gcp/deploy.ps1`; secret được đọc từ Secret Manager
+và Gemini dùng service identity qua ADC. Các biến bắt buộc cho production:
 
 - `DATABASE_URL`
 - `SESSION_SECRET`, `MESSAGE_ENCRYPTION_KEY`
 - `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
-- `QWEN_MODEL_PATH`, `QWEN_DEVICE`, `QWEN_DTYPE`, `TAVILY_API_KEY`
+- `GEMINI_CREDENTIALS_PATH`, `GEMINI_MODEL`, `GEMINI_LOCATION`, `TAVILY_API_KEY`
 - `EMBEDDING_MODEL_PATH`, `EMBEDDING_DEVICE`, `EMBEDDING_BATCH_SIZE`
 - `NEO4J_*`, `POSTGRES_VECTOR_SIZE`
 
 `RETRIEVER_BACKEND`, provider và API key chỉ tồn tại ở backend; frontend không
 có màn hình cấu hình kỹ thuật hoặc bộ chọn luật.
 
-Qwen3 chạy hoàn toàn trong tiến trình backend bằng checkpoint ở
-`QWEN_MODEL_PATH`; không dùng DashScope/OpenAI-compatible API và không gửi prompt
-ra dịch vụ model bên ngoài. Service `model-init` tự tải `QWEN_MODEL_REPO` từ
-Hugging Face vào named volume `qwen_model`; API và worker chỉ khởi động sau khi
-checkpoint đã đầy đủ. Volume được giữ qua các lần rebuild/restart nên model không
-bị tải lại. Mỗi API/worker process chỉ nạp một bản model và mặc định xử lý một
-lượt sinh tại một thời điểm để tránh nhân bản RAM/VRAM.
+Gemini 3.5 Flash được gọi qua Vertex AI. Backend đọc Google service-account
+credential từ file `env.json` (hoặc `GEMINI_CREDENTIALS_PATH`), lấy OAuth access
+token và gửi prompt tới model `gemini-3.5-flash`; credential không được trả về
+frontend hay ghi vào log. Service account cần quyền gọi Vertex AI trong project
+và Vertex AI API phải được bật. Google Search grounding dùng cùng credential,
+không cần thêm Custom Search API key/CX; project cần bật Google Search
+Suggestions trong Vertex AI.
+
+`GEMINI_DATA_POLICY=redact` là mặc định: email, số điện thoại, định danh, số tài
+khoản và secret phổ biến được che trước khi gửi ra Vertex AI/Tavily/Google Search.
+Chỉ đặt `allow` khi tổ chức đã phê duyệt rõ chính sách dữ liệu tương ứng.
+
+Một cấu hình model duy nhất được dùng cho hỏi đáp, kiểm tra hiệu lực, tạo/review/
+so sánh hợp đồng, nghiên cứu bài viết, tóm tắt bộ nhớ hội thoại và RAGAS judge.
+Chỉ embedding truy xuất/cache tiếp tục dùng BGE-M3 local.
+
+Chức năng Bài viết tìm đồng thời bằng Tavily và Google Search grounding. Các URL
+do Google tìm thấy được Tavily Extract bổ sung nội dung khi có thể; frontend hiển
+thị provider của từng nguồn và Google Search entry point.
 
 BGE-M3 cũng chạy local từ `EMBEDDING_MODEL_PATH`. Mỗi chunk và mỗi câu hỏi đều
 được mã hoá bằng cùng checkpoint thành vector chuẩn hoá 1024 chiều; nội dung pháp
@@ -92,7 +112,22 @@ của frontend và đăng ký chính xác redirect URI
 
 Guest chat được giới hạn phân tán qua PostgreSQL bằng
 `GUEST_CHAT_REQUESTS_PER_MINUTE` và `GUEST_CHAT_REQUESTS_PER_HOUR` để hạn chế
-lạm dụng Qwen/Tavily khi API chạy nhiều replica.
+lạm dụng Gemini/Tavily khi API chạy nhiều replica.
+
+### Chạy backend local với Cloud SQL
+
+Backend local kết nối trực tiếp Public IP của Cloud SQL qua TLS. Cấu hình
+`DATABASE_URL` trong `.env` bằng host Public IP, port `5432` và
+`sslmode=require`. IP Internet của máy chạy backend phải được thêm vào
+**Cloud SQL > Connections > Networking > Authorized networks**.
+
+```powershell
+.\scripts\run_backend_local.ps1 -Reload
+```
+
+Script chạy `alembic upgrade head`, sau đó mở API tại
+`http://127.0.0.1:8000`. Không sử dụng Cloud SQL Auth Proxy và không cần chạy
+database bằng Docker.
 
 ## Database và API
 
@@ -111,12 +146,12 @@ limit PostgreSQL. API chính:
 ## Docker
 
 Thư mục `docker/` có Dockerfile riêng cho `api`, `frontend`, `worker`, `beat`,
-`migrate`, `model-init` và `reindex`; Compose build thành bảy image độc lập. PostgreSQL dùng
-image có extension `pgvector`, lưu dữ liệu ứng dụng, rate limit, lock và hàng đợi
-Celery; Neo4j lưu graph.
+`migrate`, `model-init` và `reindex`; Compose build thành bảy image độc lập.
+PostgreSQL/pgvector là dịch vụ được quản lý bên ngoài và được kết nối qua
+`DATABASE_URL` trong file env; Compose không khởi động database. Neo4j lưu graph.
 Migration phải thành công trước khi API và worker khởi động.
 
-Chạy local toàn bộ stack, gồm cả bước tải model:
+Chạy local toàn bộ stack (đặt `env.json` ở thư mục gốc trước khi chạy):
 
 ```bash
 cp .env.example .env
@@ -131,14 +166,11 @@ docker compose run --rm migrate
 docker compose --profile jobs run --rm reindex --reset-postgres --reset-neo4j
 ```
 
-Lần đầu cần đủ dung lượng đĩa và thời gian tải Qwen3-14B. Theo dõi riêng bằng
-`docker compose logs -f model-init`; các lần sau checkpoint được dùng lại từ
-Docker volume.
+Lần đầu cần đủ dung lượng đĩa và thời gian tải BGE-M3. Theo dõi riêng bằng
+`docker compose logs -f model-init`; các lần sau checkpoint embedding được dùng
+lại từ Docker volume.
 
-Xem [hướng dẫn deploy Docker](deploy.md) và workflow
-[deploy-docker.yml](.github/workflows/deploy-docker.yml).
-
-Nếu triển khai lên Google Cloud Run, xem [hướng dẫn Cloud Run](deploy-gcp-cloud-run.md).
+Xem [hướng dẫn Cloud Run](deploy-gcp-cloud-run.md) để build và triển khai lên GCP.
 API/frontend là hai service riêng dùng URL `run.app`; worker/beat là Worker Pool,
 model/migration là Job. Model dùng Cloud Storage volume, PostgreSQL chuyển sang
 Cloud SQL và Neo4j chạy trên GCE/GKE hoặc Neo4j Aura.

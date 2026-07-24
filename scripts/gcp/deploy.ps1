@@ -5,7 +5,6 @@ param(
     [string]$Repository = "vlegal",
     [string]$Tag = "",
     [string]$RunServiceAccount = "",
-    [string]$ModelBucket = "",
     [string]$EmbeddingBucket = "",
     [string]$CorpusBucket = "",
     [string]$Network = "default",
@@ -16,7 +15,7 @@ param(
     [ValidateSet("all", "model-init", "migrate", "reindex", "api", "frontend", "worker", "beat")]
     [string]$Component = "all",
     [ValidateSet("nvidia-rtx-pro-6000", "nvidia-l4")]
-    [string]$GpuType = "nvidia-rtx-pro-6000",
+    [string]$GpuType = "nvidia-l4",
     [switch]$ExecuteJobs
 )
 
@@ -38,9 +37,6 @@ if ([string]::IsNullOrWhiteSpace($Tag)) {
 }
 if ([string]::IsNullOrWhiteSpace($RunServiceAccount)) {
     $RunServiceAccount = "vlegal-run@$ProjectId.iam.gserviceaccount.com"
-}
-if ([string]::IsNullOrWhiteSpace($ModelBucket)) {
-    $ModelBucket = "$ProjectId-vlegal-qwen3-14b"
 }
 if ([string]::IsNullOrWhiteSpace($EmbeddingBucket)) {
     $EmbeddingBucket = "$ProjectId-vlegal-bge-m3"
@@ -100,8 +96,7 @@ function Deploy-ModelInit {
         "--image=$imageRoot/vlegal-model-init`:$Tag",
         "--service-account=$RunServiceAccount",
         "--cpu=4", "--memory=8Gi", "--task-timeout=3h", "--max-retries=3",
-        "--set-env-vars=QWEN_MODEL_REPO=Qwen/Qwen3-14B,QWEN_MODEL_REVISION=main,EMBEDDING_MODEL_REPO=BAAI/bge-m3,EMBEDDING_MODEL_REVISION=main,HF_HUB_OFFLINE=0,TRANSFORMERS_OFFLINE=0",
-        "--add-volume=mount-path=/models/qwen3,type=cloud-storage,bucket=$ModelBucket,readonly=false,mount-options=uid=10001;gid=10001",
+        "--set-env-vars=EMBEDDING_MODEL_REPO=BAAI/bge-m3,EMBEDDING_MODEL_REVISION=main,HF_HUB_OFFLINE=0,TRANSFORMERS_OFFLINE=0",
         "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=false,mount-options=uid=10001;gid=10001",
         "--quiet"
     )
@@ -170,11 +165,11 @@ function Deploy-Reindex {
 function Deploy-Api {
     $envVars = @(
         "APP_ENV=production",
-        "QWEN_MODEL_PATH=/models/qwen3",
-        "QWEN_MODEL=Qwen3-14B",
-        "QWEN_DEVICE=cuda",
-        "QWEN_DTYPE=bfloat16",
-        "QWEN_MAX_CONCURRENT_GENERATIONS=1",
+        "GEMINI_USE_ADC=true",
+        "GEMINI_PROJECT_ID=$ProjectId",
+        "GEMINI_LOCATION=global",
+        "GEMINI_MODEL=gemini-3.5-flash",
+        "GEMINI_MAX_CONCURRENT_GENERATIONS=8",
         "EMBEDDING_MODEL_PATH=/models/embedding",
         "EMBEDDING_MODEL_REPO=BAAI/bge-m3",
         "EMBEDDING_MODEL_REVISION=main",
@@ -200,7 +195,6 @@ function Deploy-Api {
         "--min=0", "--max=1", "--timeout=3600", "--no-cpu-throttling",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
         "--allow-unauthenticated",
-        "--add-volume=mount-path=/models/qwen3,type=cloud-storage,bucket=$ModelBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--set-env-vars=$envVars", "--set-secrets=$apiSecrets",
         "--quiet"
@@ -234,11 +228,11 @@ function Deploy-Frontend {
 function Deploy-Worker {
     $envVars = @(
         "APP_ENV=production",
-        "QWEN_MODEL_PATH=/models/qwen3",
-        "QWEN_MODEL=Qwen3-14B",
-        "QWEN_DEVICE=cuda",
-        "QWEN_DTYPE=bfloat16",
-        "QWEN_MAX_CONCURRENT_GENERATIONS=1",
+        "GEMINI_USE_ADC=true",
+        "GEMINI_PROJECT_ID=$ProjectId",
+        "GEMINI_LOCATION=global",
+        "GEMINI_MODEL=gemini-3.5-flash",
+        "GEMINI_MAX_CONCURRENT_GENERATIONS=8",
         "EMBEDDING_MODEL_PATH=/models/embedding",
         "EMBEDDING_MODEL_REPO=BAAI/bge-m3",
         "EMBEDDING_MODEL_REVISION=main",
@@ -260,7 +254,6 @@ function Deploy-Worker {
         "--gpu=1", "--gpu-type=$GpuType", "--no-gpu-zonal-redundancy",
         "--cpu=$gpuCpu", "--memory=$gpuMemory",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
-        "--add-volume=mount-path=/models/qwen3,type=cloud-storage,bucket=$ModelBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--set-env-vars=$envVars", "--set-secrets=$workerSecrets",
         "--quiet"

@@ -13,6 +13,7 @@ from app.external_graphrag import (
     PostgresGraphRAGStore,
 )
 from app.legal_graphrag import GraphRAGStore
+from app.services.ai import untrusted_data_block
 from app.services.embeddings import EmbeddingConfig
 
 
@@ -115,16 +116,40 @@ def serialize_source(source: dict[str, Any]) -> dict[str, Any]:
         "doc_id": str(source.get("doc_id")) if source.get("doc_id") else None,
         "node_id": str(source.get("node_id")) if source.get("node_id") else None,
         "source_url": source.get("source_url"),
+        "law_status": source.get("law_status"),
+        "law_version": source.get("law_version"),
     }
 
 
-def build_context(sources: list[dict[str, Any]], max_chars: int = 24000) -> str:
-    blocks: list[str] = []
+def select_context_sources(
+    sources: list[dict[str, Any]],
+    max_chars: int = 24000,
+) -> list[dict[str, Any]]:
+    """Return exactly the sources that fit in the model context budget."""
+
+    selected: list[dict[str, Any]] = []
     size = 0
     for source in sources:
-        block = f"[{source['source_id']}] {source['citation']}\n{source['text']}"
-        if size + len(block) > max_chars:
+        row = {
+            "source_id": str(source.get("source_id") or ""),
+            "citation": str(source.get("citation") or ""),
+            "text": str(source.get("text") or ""),
+        }
+        row_size = sum(len(value) for value in row.values())
+        if size + row_size > max_chars:
             break
-        blocks.append(block)
-        size += len(block)
-    return "\n\n".join(blocks)
+        selected.append(source)
+        size += row_size
+    return selected
+
+
+def build_context(sources: list[dict[str, Any]], max_chars: int = 24000) -> str:
+    selected = [
+        {
+            "source_id": str(source["source_id"]),
+            "citation": str(source["citation"]),
+            "text": str(source["text"]),
+        }
+        for source in select_context_sources(sources, max_chars=max_chars)
+    ]
+    return untrusted_data_block("LEGAL_SOURCES", selected)

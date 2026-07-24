@@ -29,6 +29,7 @@ class _FakeSession:
     def __init__(self, exact: LegalAnswerCache | None = None) -> None:
         self.exact = exact
         self.statements: list[object] = []
+        self.added: list[LegalAnswerCache] = []
         self.committed = False
 
     async def __aenter__(self) -> _FakeSession:
@@ -37,11 +38,25 @@ class _FakeSession:
     async def __aexit__(self, *_: object) -> None:
         return None
 
-    async def scalar(self, _: object) -> LegalAnswerCache | None:
+    async def scalar(self, statement: object) -> LegalAnswerCache | None:
+        self.statements.append(statement)
         return self.exact
 
     async def execute(self, statement: object) -> None:
         self.statements.append(statement)
+
+    async def scalars(self, statement: object):
+        self.statements.append(statement)
+
+        class _Rows:
+            @staticmethod
+            def all() -> list[LegalAnswerCache]:
+                return []
+
+        return _Rows()
+
+    def add(self, row: LegalAnswerCache) -> None:
+        self.added.append(row)
 
     async def commit(self) -> None:
         self.committed = True
@@ -54,6 +69,24 @@ def test_privacy_gate_only_accepts_context_free_public_legal_questions() -> None
     assert normalize_public_query(public) == normalize_public_query(public.upper().rstrip("?"))
     assert not is_public_cache_candidate("Tôi bị công ty sa thải, quyền của tôi là gì?")
     assert not is_public_cache_candidate("Quy định áp dụng cho email an@example.com là gì?")
+    assert not is_public_cache_candidate(
+        "Pháp luật áp dụng khi BÊN A: Nguyễn Văn An, sinh ngày 01/01/1990 bị sa thải?"
+    )
+    assert not is_public_cache_candidate(
+        "Pháp luật áp dụng khi tôi là Nguyễn Văn An, đang ở 12 Nguyễn Trãi?"
+    )
+    assert not is_public_cache_candidate(
+        "Nguyễn Văn An có quyền thừa kế theo pháp luật như thế nào?"
+    )
+    assert not is_public_cache_candidate(
+        "nguyễn văn an có quyền thừa kế theo pháp luật như thế nào?"
+    )
+    assert not is_public_cache_candidate(
+        "Công ty Cổ phần ABC có nghĩa vụ nộp thuế theo pháp luật không?"
+    )
+    assert not is_public_cache_candidate(
+        "công ty cổ phần sao mai có nghĩa vụ nộp thuế theo pháp luật không?"
+    )
 
     service = SemanticAnswerCacheService(Settings(_env_file=None), _FakeEmbeddings())
     assert service.eligible(public, has_conversation_context=False)
@@ -61,7 +94,16 @@ def test_privacy_gate_only_accepts_context_free_public_legal_questions() -> None
 
 
 def test_law_fingerprint_ignores_check_time_but_tracks_legal_state() -> None:
-    sources = [{"doc_id": "doc-1", "citation": "Điều 1", "source_url": "https://vbpl.vn/1"}]
+    sources = [
+        {
+            "source_id": "S1",
+            "doc_id": "doc-1",
+            "citation": "Điều 1",
+            "source_url": "https://vbpl.vn/1",
+            "law_version": 1,
+            "text": "Nội dung phiên bản thứ nhất.",
+        }
+    ]
     first = {
         "checked_at": "2026-01-01T00:00:00Z",
         "items": [{"code": "01/2026/QH", "status": "IN_FORCE", "source_url": "https://vbpl.vn/1"}],
@@ -74,6 +116,18 @@ def test_law_fingerprint_ignores_check_time_but_tracks_legal_state() -> None:
 
     assert legal_fingerprint(sources, first) == legal_fingerprint(sources, later)
     assert legal_fingerprint(sources, first) != legal_fingerprint(sources, expired)
+    assert legal_fingerprint(sources, first) != legal_fingerprint(
+        [{**sources[0], "text": "Nội dung đã được sửa đổi."}],
+        first,
+    )
+    assert legal_fingerprint(sources, first) != legal_fingerprint(
+        [{**sources[0], "law_version": 2}],
+        first,
+    )
+    assert legal_fingerprint(sources, first) != legal_fingerprint(
+        [{**sources[0], "source_id": "S2"}],
+        first,
+    )
 
 
 def test_exact_cache_hit_skips_embedding_inference(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,6 +135,7 @@ def test_exact_cache_hit_skips_embedding_inference(monkeypatch: pytest.MonkeyPat
     query = "Pháp luật quy định thời hạn khởi kiện là bao lâu?"
     row = LegalAnswerCache(
         id=uuid.uuid4(),
+        cache_scope_hash="d" * 64,
         query_hash="unused-by-fake-session",
         query_ciphertext=encrypt_text(normalize_public_query(query), settings),
         answer_ciphertext=encrypt_text("Thời hạn là một năm.", settings),
@@ -89,7 +144,7 @@ def test_exact_cache_hit_skips_embedding_inference(monkeypatch: pytest.MonkeyPat
         sources=[],
         verification={},
         law_fingerprint="b" * 64,
-        model_name=settings.qwen_model,
+        model_name=settings.gemini_model,
         prompt_version="legal-answer-v1",
         expires_at=datetime.now(UTC) + timedelta(hours=1),
         hit_count=0,
@@ -98,20 +153,35 @@ def test_exact_cache_hit_skips_embedding_inference(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(semantic_cache, "SessionFactory", lambda: db)
     service = SemanticAnswerCacheService(settings, _FakeEmbeddings())
 
-    lookup = asyncio.run(service.lookup(query))
+    lookup = asyncio.run(service.lookup(query, scope="user:test-user"))
 
     assert lookup.hit is not None
     assert lookup.hit.answer == "Thời hạn là một năm."
     assert lookup.hit.similarity == 1.0
     assert lookup.hit.exact_match
+    lookup_sql = str(db.statements[0].compile(dialect=postgresql.dialect()))
+    assert "cache_scope_hash" in lookup_sql
 
 
-def test_store_uses_atomic_postgresql_upsert(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cache_lookup_requires_a_nonblank_private_scope() -> None:
+    service = SemanticAnswerCacheService(
+        Settings(_env_file=None),
+        _FakeEmbeddings(),
+    )
+
+    with pytest.raises(ValueError, match="scope"):
+        asyncio.run(service.lookup("Pháp luật quy định gì?", scope="  "))
+
+
+def test_store_uses_atomic_postgresql_upsert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings = Settings(_env_file=None, session_secret="semantic-cache-store-test")
     db = _FakeSession()
     monkeypatch.setattr(semantic_cache, "SessionFactory", lambda: db)
     service = SemanticAnswerCacheService(settings, _FakeEmbeddings())
     lookup = CacheLookup(
+        scope_hash="d" * 64,
         query_hash="c" * 64,
         normalized_query="pháp luật quy định thời hạn",
         embedding=[0.25] * 1024,
@@ -131,3 +201,5 @@ def test_store_uses_atomic_postgresql_upsert(monkeypatch: pytest.MonkeyPatch) ->
     sql = str(db.statements[0].compile(dialect=postgresql.dialect()))
     assert "INSERT INTO legal_answer_cache" in sql
     assert "ON CONFLICT" in sql
+    assert "cache_scope_hash" in sql
+    assert "query_hash" in sql
