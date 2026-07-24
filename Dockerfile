@@ -23,7 +23,6 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=vlegal:vlegal app ./app
-COPY --chown=vlegal:vlegal env.json* ./
 RUN mkdir -p /app/storage \
     && chown vlegal:vlegal /app/storage
 
