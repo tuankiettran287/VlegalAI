@@ -499,7 +499,18 @@ class GeminiService:
     def _load_credentials(self) -> tuple[Credentials, str]:
         credentials_path = self.settings.gemini_credentials_local_path
         detected_project_id = ""
-        if credentials_path.is_file():
+        json_env = os.getenv("GEMINI_CREDENTIALS_JSON", "").strip()
+        if json_env:
+            try:
+                info = json.loads(json_env)
+                credentials = service_account.Credentials.from_service_account_info(
+                    info,
+                    scopes=[VERTEX_SCOPE],
+                )
+                detected_project_id = str(credentials.project_id or "").strip()
+            except Exception as exc:
+                raise GeminiError(f"Không thể đọc GEMINI_CREDENTIALS_JSON: {exc}") from exc
+        elif credentials_path.is_file():
             try:
                 credentials = service_account.Credentials.from_service_account_file(
                     credentials_path,
