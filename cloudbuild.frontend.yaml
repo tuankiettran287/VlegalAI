@@ -1,0 +1,5 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-f', 'docker/frontend.Dockerfile', '-t', 'asia-southeast1-docker.pkg.dev/idyllic-anvil-452006-k0/vlegal/vlegal-frontend:latest', '.']
+images:
+  - 'asia-southeast1-docker.pkg.dev/idyllic-anvil-452006-k0/vlegal/vlegal-frontend:latest'
