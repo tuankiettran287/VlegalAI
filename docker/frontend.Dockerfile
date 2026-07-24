@@ -2,11 +2,10 @@
 
 FROM node:22-alpine AS build
 
-ENV NODE_ENV=production
 WORKDIR /build
 
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --include=dev --no-audit --no-fund
 
 COPY frontend/ ./
 RUN npm run build
