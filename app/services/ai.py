@@ -743,6 +743,16 @@ class GeminiService:
             except httpx.HTTPError as exc:
                 last_error = GeminiError(f"Không thể kết nối Vertex AI: {exc}")
                 if attempt + 1 >= self.settings.gemini_max_retries:
+                    # Try Gemini AI Studio fallback if key is configured
+                    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+                    if api_key:
+                        fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.settings.gemini_model}:generateContent?key={api_key}"
+                        try:
+                            fb_resp = await self._client.post(fallback_url, json=payload)
+                            if fb_resp.status_code == 200:
+                                return fb_resp.json()
+                        except Exception:
+                            pass
                     raise last_error from exc
             else:
                 if response.status_code == 200:
@@ -750,6 +760,16 @@ class GeminiService:
                         response_payload = response.json()
                     except ValueError as exc:
                         raise GeminiError("Vertex AI trả về JSON phản hồi không hợp lệ.") from exc
+                else:
+                    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+                    if api_key:
+                        fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.settings.gemini_model}:generateContent?key={api_key}"
+                        try:
+                            fb_resp = await self._client.post(fallback_url, json=payload)
+                            if fb_resp.status_code == 200:
+                                return fb_resp.json()
+                        except Exception:
+                            pass
                     if not isinstance(response_payload, dict):
                         raise GeminiError("Vertex AI trả về cấu trúc phản hồi không hợp lệ.")
                     usage = response_payload.get("usageMetadata")
