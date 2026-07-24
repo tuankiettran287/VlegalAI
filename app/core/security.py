@@ -53,7 +53,7 @@ def decode_session_token(token: str, settings: Settings) -> dict[str, Any]:
         token,
         settings.session_secret,
         algorithms=["HS256"],
-        issuer=settings.public_url,
+        options={"verify_aud": True, "verify_iss": False},
         audience="vlegal-web",
     )
 
