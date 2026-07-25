@@ -22,6 +22,7 @@ server {
         proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Request-ID $request_id;
         proxy_read_timeout 180s;
+        proxy_buffering off;
     }
 
     location /assets/ {
