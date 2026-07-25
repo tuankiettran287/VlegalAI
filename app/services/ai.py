@@ -510,7 +510,11 @@ class GeminiService:
             try:
                 credentials, detected_project_id = google.auth.default(scopes=[VERTEX_SCOPE])
             except DefaultCredentialsError as exc:
+                if self.settings.gemini_api_key.strip():
+                    return None, "api_key_mode"
                 raise GeminiError(f"Không thể đọc Application Default Credentials: {exc}") from exc
+        elif self.settings.gemini_api_key.strip():
+            return None, "api_key_mode"
         else:
             raise GeminiError(
                 f"Không tìm thấy Google service-account credential tại '{credentials_path}'."
@@ -523,16 +527,18 @@ class GeminiService:
             )
         return credentials, project_id
 
-    async def _ensure_credentials(self) -> Credentials:
-        if self._credentials is not None:
+    async def _ensure_credentials(self) -> Credentials | None:
+        if self._credentials is not None or self._project_id == "api_key_mode":
             return self._credentials
         async with self._credentials_lock:
-            if self._credentials is None:
+            if self._credentials is None and self._project_id != "api_key_mode":
                 self._credentials, self._project_id = await asyncio.to_thread(self._load_credentials)
         return self._credentials
 
     async def _access_token(self, *, force_refresh: bool = False) -> str:
         credentials = await self._ensure_credentials()
+        if credentials is None:
+            return ""
         async with self._credentials_lock:
             if force_refresh or not credentials.valid:
                 try:
@@ -556,14 +562,14 @@ class GeminiService:
             if self._vertex_ready:
                 return self._project_id
             response: httpx.Response | None = None
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
             for attempt in range(2):
                 try:
                     response = await self._client.post(
                         self._model_url("countTokens"),
-                        headers={
-                            "Authorization": f"Bearer {token}",
-                            "Content-Type": "application/json",
-                        },
+                        headers=headers,
                         json={
                             "contents": [
                                 {
@@ -575,35 +581,40 @@ class GeminiService:
                     )
                 except httpx.HTTPError as exc:
                     raise GeminiError(
-                        "Không thể kết nối Vertex AI để kiểm tra readiness."
+                        "Không thể kết nối Gemini API để kiểm tra readiness."
                     ) from exc
-                if response.status_code != 401 or attempt:
+                if response.status_code != 401 or attempt or not token:
                     break
                 token = await self._access_token(force_refresh=True)
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
             if response is None:  # pragma: no cover - loop always executes
-                raise GeminiError("Không thể kiểm tra Vertex AI readiness.")
+                raise GeminiError("Không thể kiểm tra Gemini API readiness.")
             if response.status_code != 200:
                 raise self._response_error(response)
             try:
                 payload = response.json()
             except ValueError as exc:
                 raise GeminiError(
-                    "Vertex AI readiness trả về JSON không hợp lệ."
+                    "Gemini API readiness trả về JSON không hợp lệ."
                 ) from exc
             if not isinstance(payload, dict):
                 raise GeminiError(
-                    "Vertex AI readiness trả về cấu trúc không hợp lệ."
+                    "Gemini API readiness trả về cấu trúc không hợp lệ."
                 )
             self._vertex_ready = True
         return self._project_id
 
     def _model_url(self, action: str) -> str:
         if action not in {"countTokens", "generateContent"}:
-            raise GeminiError("Vertex AI action không hợp lệ.")
-        location = self.settings.gemini_location.strip() or "global"
+            raise GeminiError("Gemini action không hợp lệ.")
         model = self.settings.gemini_model.strip()
         if not model:
             raise GeminiError("GEMINI_MODEL chưa được cấu hình.")
+        api_key = self.settings.gemini_api_key.strip() or os.getenv("GEMINI_API_KEY", "").strip()
+        if (not self.settings.gemini_use_adc and api_key) or self._project_id == "api_key_mode":
+            return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{action}?key={api_key}"
+        location = self.settings.gemini_location.strip() or "global"
         return (
             f"https://{VERTEX_API_SERVICE}/v1/"
             f"projects/{self._project_id}/locations/{location}/"
@@ -714,15 +725,15 @@ class GeminiService:
         started_at = time.monotonic()
 
         for attempt in range(self.settings.gemini_max_retries):
-            token = await self._access_token(force_refresh=force_refresh)
+            token = await self._access_token(force_refresh=force_refresh) if self.settings.gemini_use_adc else ""
             force_refresh = False
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
             try:
                 response = await self._client.post(
                     self._generate_url,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=headers,
                     json=payload,
                 )
             except httpx.HTTPError as exc:
@@ -744,9 +755,9 @@ class GeminiService:
                     try:
                         response_payload = response.json()
                     except ValueError as exc:
-                        raise GeminiError("Vertex AI trả về JSON phản hồi không hợp lệ.") from exc
+                        raise GeminiError("Gemini API trả về JSON phản hồi không hợp lệ.") from exc
                 else:
-                    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+                    api_key = self.settings.gemini_api_key.strip() or os.getenv("GEMINI_API_KEY", "").strip()
                     if api_key:
                         fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.settings.gemini_model}:generateContent?key={api_key}"
                         try:
@@ -755,16 +766,15 @@ class GeminiService:
                                 return fb_resp.json()
                         except Exception:
                             pass
-                    if not isinstance(response_payload, dict):
-                        raise GeminiError("Vertex AI trả về cấu trúc phản hồi không hợp lệ.")
-                    usage = response_payload.get("usageMetadata")
-                    usage = usage if isinstance(usage, dict) else {}
-                    candidate = (
-                        response_payload.get("candidates", [None])[0]
-                        if isinstance(response_payload.get("candidates"), list)
-                        and response_payload.get("candidates")
-                        else None
-                    )
+                    raise self._response_error(response)
+
+                if not isinstance(response_payload, dict):
+                    raise GeminiError("Gemini API trả về cấu trúc phản hồi không hợp lệ.")
+                
+                candidates = response_payload.get("candidates")
+                if isinstance(candidates, list) and candidates:
+                    candidate = candidates[0]
+                    usage = response_payload.get("usageMetadata", {})
                     finish_reason = (
                         candidate.get("finishReason")
                         if isinstance(candidate, dict)

@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     # env.json. The credential path can be overridden for container/secret
     # mounts without exposing any key to the frontend.
     gemini_credentials_path: str = str(PROJECT_ROOT / "env.json")
+    gemini_api_key: str = ""
     gemini_use_adc: bool = False
     gemini_project_id: str = ""
     gemini_location: str = "global"
