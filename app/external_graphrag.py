@@ -567,7 +567,11 @@ def vector_literal(values: Iterable[float]) -> str:
 
 
 def postgres_dense_vector(text: str, config: ExternalGraphRAGConfig) -> list[float]:
-    return get_embedding_service(config.embedding_config).embed_query(text)
+    try:
+        return get_embedding_service(config.embedding_config).embed_query(text)
+    except Exception as exc:
+        logger.warning("Local embedding model unavailable for dense vector search, falling back to zero vector: %s", exc)
+        return [0.0] * config.postgres_vector_size
 
 
 def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) -> None:

@@ -278,7 +278,17 @@ class SemanticAnswerCacheService:
                     hit=self._cached_answer(exact, 1.0, exact_match=True),
                 )
 
-        embedding = await run_in_threadpool(self.embeddings.embed_query, normalized_query)
+        try:
+            embedding = await run_in_threadpool(self.embeddings.embed_query, normalized_query)
+        except Exception as exc:
+            logger.warning("Local embedding model unavailable for semantic cache: %s", exc)
+            return CacheLookup(
+                scope_hash=scope_hash,
+                query_hash=query_hash,
+                normalized_query=normalized_query,
+                embedding=None,
+                hit=None,
+            )
         distance = LegalAnswerCache.query_embedding.cosine_distance(embedding)
         async with SessionFactory() as db:
             result = await db.execute(
