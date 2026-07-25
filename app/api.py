@@ -374,7 +374,7 @@ async def _legal_sources(
     if not sources:
         sources = [{
             "source_id": "S1",
-            "citation": "Bộ luật Dân sự 2015 & Hệ thống Văn bản Phụ lực Pháp luật Việt Nam",
+            "citation": "Hệ thống Văn bản Quy phạm Pháp luật Việt Nam",
             "title": "Quy định Pháp luật Việt Nam Hiện hành",
             "text": f"Thông tin tra cứu giải đáp pháp lý về: '{query}'. Áp dụng các quy định của pháp luật Việt Nam.",
             "reasons": ["Tổng hợp căn cứ pháp lý"],
@@ -383,7 +383,7 @@ async def _legal_sources(
     try:
         retrieval_query = query
         followed_replacements: set[str] = set()
-        for _ in range(6):
+        for _ in range(2):
             try:
                 verification, updated = await freshness.verify_sources(sources)
             except Exception as exc:

@@ -156,14 +156,29 @@ class GeminiError(RuntimeError):
     """Raised when Gemini cannot generate a usable response."""
 
 
+LEGAL_EXCLUDED_TERMS_RE = re.compile(
+    r"(?i)\b(?:tiền lương|mức lương|lương làm thêm|lương làm|lương tối thiểu|lương tháng|"
+    r"lương hưu|lương khoán|chế độ lương|bảng lương|tăng lương|trả lương|hồ sơ|đào tạo)\b"
+)
+
+
 def redact_sensitive_text(value: str) -> tuple[str, int]:
     """Remove common secrets and direct identifiers before external AI/search calls."""
 
-    redacted = value
+    legal_terms: list[str] = []
+
+    def mask_match(m: re.Match[str]) -> str:
+        legal_terms.append(m.group(0))
+        return f"__LEGAL_TERM_{len(legal_terms) - 1}__"
+
+    redacted = LEGAL_EXCLUDED_TERMS_RE.sub(mask_match, value)
     replacements = 0
     for pattern, placeholder in _SENSITIVE_PATTERNS:
         redacted, count = pattern.subn(placeholder, redacted)
         replacements += count
+
+    for idx, term in enumerate(legal_terms):
+        redacted = redacted.replace(f"__LEGAL_TERM_{idx}__", term)
 
     def redact_valid_card(match: re.Match[str]) -> str:
         nonlocal replacements
