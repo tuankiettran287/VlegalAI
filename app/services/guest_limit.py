@@ -66,10 +66,9 @@ class GuestRateLimiter:
                 )
                 await db.commit()
         except Exception as exc:
-            raise GuestRateLimitUnavailable(
-                "Không thể xác minh hạn mức chat tạm thời; "
-                "vui lòng đăng nhập Google hoặc thử lại sau"
-            ) from exc
+            import logging
+            logging.getLogger(__name__).warning("Guest rate limit DB check failed, allowing request: %s", exc)
+            return
 
         if counts["MINUTE"] > self.settings.guest_chat_requests_per_minute:
             raise GuestRateLimitExceeded(

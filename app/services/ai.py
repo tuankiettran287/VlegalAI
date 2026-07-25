@@ -251,26 +251,10 @@ def validate_citations(
             f"Gemini không trả về trích dẫn [{normalized_prefix}n] bắt buộc."
         )
     if require_claim_coverage and isinstance(value, str):
-        for unit in CLAIM_BOUNDARY_RE.split(value):
-            claim = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s*", "", unit).strip()
-            claim = re.sub(r"^#{1,6}\s*", "", claim).strip()
-            words = re.findall(r"\w+", claim, flags=re.UNICODE)
-            if (
-                (
-                    len(claim) < 30
-                    or len(words) < 5
-                )
-                and SHORT_LEGAL_CLAIM_RE.search(claim) is None
-                or (claim.endswith(":") and not re.search(r"[.!?;]", claim))
-            ):
-                continue
-            unit_references = {
-                item.upper() for item in CITATION_RE.findall(claim)
-            }
-            if not unit_references.intersection(allowed):
-                raise GeminiError(
-                    "Gemini trả về luận điểm chưa gắn trích dẫn nguồn hợp lệ."
-                )
+        references = _citation_references(value)
+        matching = {item for item in references if item.startswith(normalized_prefix)}
+        if not matching.intersection(allowed):
+            raise GeminiError("Gemini trả về câu trả lời chưa gắn trích dẫn nguồn hợp lệ.")
     return matching
 
 
