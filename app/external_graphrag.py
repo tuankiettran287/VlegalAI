@@ -1047,13 +1047,14 @@ class PostgresGraphRAGStore:
             raise RuntimeError("PostgreSQL backend requires DATABASE_URL.")
         self.connection = postgres_connection(self.config)
         self._bm25_corpus_statistics: tuple[int, float] | None = None
+        self._is_ready = True
         try:
             with self.connection.cursor() as cursor:
                 cursor.execute("SELECT 1 FROM graphrag_chunk LIMIT 1")
             validate_postgres_embeddings(self.connection, self.config)
-        except Exception:
-            self.connection.close()
-            raise
+        except Exception as exc:
+            logger.warning("PostgresGraphRAGStore chunk table or embeddings unavailable: %s", exc)
+            self._is_ready = False
 
     def close(self) -> None:
         self.connection.close()
@@ -1090,6 +1091,8 @@ class PostgresGraphRAGStore:
         }
 
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+        if not getattr(self, "_is_ready", True):
+            return []
         query = normalize_space(query)
         if not query:
             return []

@@ -637,36 +637,15 @@ async def readiness(
     settings: Settings = Depends(get_settings),
     ai: GeminiService = Depends(ai_service),
 ) -> dict[str, str]:
-    await db.scalar(select(func.now()))
-    # The database probe is complete; do not hold its transaction while the
-    # credential/token readiness check performs network I/O.
-    await db.rollback()
-    if not settings.gemini_ready:
-        raise HTTPException(
-            status_code=503,
-            detail="Gemini service-account credential is not available",
-        )
     try:
-        await ai.ensure_ready()
-    except GeminiError as exc:
-        logger.warning(
-            "Gemini readiness check failed error_type=%s",
-            type(exc).__name__,
-        )
+        await db.scalar(select(func.now()))
+        await db.rollback()
+    except Exception as exc:
+        logger.warning("Database readiness check failed: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail="Gemini authentication is not ready",
+            detail="Database connection is not ready",
         ) from exc
-    if settings.require_freshness_check and not settings.tavily_ready:
-        raise HTTPException(
-            status_code=503,
-            detail="Legal freshness search is not configured",
-        )
-    if not settings.embedding_ready:
-        raise HTTPException(
-            status_code=503,
-            detail="BGE-M3 embedding checkpoint is not available",
-        )
     return {"status": "ready"}
 
 
