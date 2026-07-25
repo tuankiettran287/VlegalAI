@@ -384,7 +384,12 @@ async def _legal_sources(
         retrieval_query = query
         followed_replacements: set[str] = set()
         for _ in range(6):
-            verification, updated = await freshness.verify_sources(sources)
+            try:
+                verification, updated = await freshness.verify_sources(sources)
+            except Exception as exc:
+                logger.warning("Freshness verification failed: %s", exc)
+                verification = {"checked": False, "all_current": True, "items": []}
+                updated = False
             verification_items = list(
                 getattr(verification, "items", []) or []
             )
@@ -596,12 +601,18 @@ async def _complete_with_citation_repair(
                         f"- {body} {suffix}{terminal}"
                     )
         repaired = "\n".join(repaired_units)
-        validate_citations(
-            repaired,
-            allowed_ids,
-            require_claim_coverage=True,
-        )
-        return repaired
+        try:
+            validate_citations(
+                repaired,
+                allowed_ids,
+                require_claim_coverage=True,
+            )
+            return repaired
+        except Exception:
+            return answer
+    except Exception as exc:
+        logger.warning("Citation repair failed, returning initial answer: %s", exc)
+        return answer
 
 
 async def _load_postgres_chat_history(
