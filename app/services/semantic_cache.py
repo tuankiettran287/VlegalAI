@@ -5,9 +5,12 @@ import json
 import re
 import unicodedata
 import uuid
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import delete, func, select, update

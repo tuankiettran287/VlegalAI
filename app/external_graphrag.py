@@ -412,7 +412,10 @@ def postgres_dsn(database_url: str) -> str:
     url = make_url(database_url)
     if not url.drivername.startswith("postgresql"):
         raise ValueError("DATABASE_URL must point to PostgreSQL")
-    return url.set(drivername="postgresql").render_as_string(hide_password=False)
+    query = dict(url.query)
+    if "ssl" in query and "sslmode" not in query:
+        query["sslmode"] = query.pop("ssl")
+    return url.set(drivername="postgresql", query=query).render_as_string(hide_password=False)
 
 
 def postgres_connection(config: ExternalGraphRAGConfig):
