@@ -12,6 +12,19 @@ DEFAULT_REPO_ID = "BAAI/bge-m3"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "models" / "bge-m3"
 MARKER_FILE = ".vlegal-embedding-model.json"
 
+# Repo BGE-M3 kèm bản export ONNX (~2,2 GB) và ảnh minh hoạ cho README. Backend
+# nạp checkpoint bằng sentence-transformers từ pytorch_model.bin nên không dùng
+# tới chúng; bỏ qua để volume embedding còn khoảng một nửa dung lượng.
+IGNORE_PATTERNS = [
+    "onnx/*",
+    "imgs/*",
+    "*.onnx",
+    "*.onnx_data",
+    "*.jpg",
+    "*.jpeg",
+    "*.png",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download the local semantic embedding checkpoint.")
@@ -78,6 +91,7 @@ def main() -> int:
             revision=args.revision,
             local_dir=output_dir,
             token=args.token,
+            ignore_patterns=IGNORE_PATTERNS,
         )
         validate_checkpoint(output_dir)
         write_marker(output_dir, args.repo_id, args.revision)

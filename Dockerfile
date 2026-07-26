@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # Compatibility image for platforms that build the repository-level Dockerfile.
-# The dedicated API image lives at docker/api.Dockerfile.
+# The dedicated API image lives at docker/api.Dockerfile; keep the two in sync.
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -11,6 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     TOKENIZERS_PARALLELISM=false \
+    EMBEDDING_MODEL_PATH=/models/embedding \
     PORT=8080 \
     WEB_CONCURRENCY=1
 
@@ -23,8 +24,6 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=vlegal:vlegal app ./app
-RUN mkdir -p /app/storage \
-    && chown vlegal:vlegal /app/storage
 
 USER vlegal
 

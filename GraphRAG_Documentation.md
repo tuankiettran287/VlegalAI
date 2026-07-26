@@ -1,194 +1,340 @@
-# Tài liệu Kỹ thuật: Kiến trúc GraphRAG Đa Tầng (Multi-Layered GraphRAG)
+# Kiến trúc GraphRAG Pháp luật Lao động (LaborCare) — v3
 
-Tài liệu này chi tiết hóa cấu trúc thiết kế, các tầng tri thức, thực thể, mối quan hệ và cơ chế vận hành của hệ thống **LaborCare GraphRAG Đa Tầng** được triển khai tại dự án VlegalAI.
+Tài liệu mô tả cấu trúc đồ thị tri thức, quy tắc trích xuất, cơ chế truy hồi và quy trình đánh giá của hệ thống GraphRAG trong dự án VlegalAI.
+
+**Mã nguồn liên quan**
+
+| Thành phần | Tệp |
+| --- | --- |
+| Từ điển bản thể học (ontology) | [app/legal_ontology.py](app/legal_ontology.py) |
+| Bộ dựng đồ thị + kho truy hồi cục bộ | [app/legal_graphrag.py](app/legal_graphrag.py) |
+| Đồng bộ Neo4j + PostgreSQL/pgvector | [app/external_graphrag.py](app/external_graphrag.py) |
+| Script dựng chỉ mục | [scripts/build_graphrag.py](scripts/build_graphrag.py) |
+| Bộ câu hỏi kiểm thử | [evaluation/question_bank.json](evaluation/question_bank.json) |
+| Trình chạy đánh giá | [scripts/run_question_bank.py](scripts/run_question_bank.py) |
 
 ---
 
-## 1. Tổng quan Kiến trúc
+## 1. Tổng quan
 
-Hệ thống GraphRAG cũ chỉ tập trung vào cấu trúc hình học của văn bản luật (Chương, Điều, Khoản). Kiến trúc mới tổ chức đồ thị tri thức pháp luật lao động theo **8 lớp ngữ nghĩa xếp chồng từ đơn giản (Cú pháp/Cấu trúc văn bản) đến phức tạp (Ánh xạ tình huống thực tế và án lệ xét xử)**.
+Kho dữ liệu gồm **57 văn bản quy phạm pháp luật** (Bộ luật Lao động, Luật BHXH, Luật ATVSLĐ, Luật Công đoàn, Luật Việc làm, các nghị định hướng dẫn, nghị định xử phạt, thông tư, luật tố tụng…).
 
-Sự chuyển đổi này giúp hệ thống GraphRAG không chỉ tìm kiếm từ khóa/vector thông thường, mà còn có khả năng **suy luận bắc cầu qua nhiều tầng ngữ cảnh**, từ đó trả về câu trả lời chính xác, đầy đủ căn cứ pháp lý và thực tế nhất.
+Đồ thị được tổ chức thành **10 tầng ngữ nghĩa**, xếp từ nguồn văn bản gốc lên tới suy luận tình huống:
 
 ```
-                  ┌──────────────────────────────────────────────┐
-                  │ Tầng 8: Án lệ & Thực tế xét xử               │
-                  ├──────────────────────────────────────────────┤
-                  │ Tầng 7: Tuân thủ & Quản trị Rủi ro           │
-                  ├──────────────────────────────────────────────┤
-                  │ Tầng 6: Vòng đời NLĐ & Doanh nghiệp          │
-                  ├──────────────────────────────────────────────┤
-                  │ Tầng 5: Quy trình & Thủ tục Hành chính       │
-                  ├──────────────────────────────────────────────┤
-                  │ Tầng 4: Logic Thời gian & Thời hiệu          │
-                  ├──────────────────────────────────────────────┤
-                  │ Tầng 3: Tình huống & Thực thể Quan hệ        │
-                  ├──────────────────────────────────────────────┤
-                  │ Tầng 2: Thuật ngữ & Định nghĩa Pháp lý       │
-                  ├──────────────────────────────────────────────┤
-                  │ Tầng 1: Cấu trúc & Liên kết Văn bản          │
-                  └──────────────────────────────────────────────┘
+ Tầng 9 · Án lệ & thực tiễn xét xử
+ Tầng 8 · Vòng đời NLĐ & doanh nghiệp
+ Tầng 7 · Chế tài & rủi ro (khung phạt tiền, biện pháp khắc phục)
+ Tầng 6 · Thời gian & thời hiệu
+ Tầng 5 · Quy trình & thủ tục hành chính
+ Tầng 4 · Chủ thể & quan hệ lao động
+ Tầng 3 · TIỀN LƯƠNG & TIỀN THƯỞNG          ← tầng nghiệp vụ trọng tâm
+ Tầng 2 · Thuật ngữ & chủ đề
+ Tầng 1 · Cấu trúc văn bản (Chương/Mục/Điều/Khoản/Điểm/Bảng)
+ Tầng 0 · Nguồn & hiệu lực (văn bản, cơ quan ban hành, ngày hiệu lực)
 ```
 
----
+**Quy mô chỉ mục hiện tại**
 
-## 2. Chi tiết 8 Tầng Tri thức (Layers)
+| Chỉ số | Giá trị |
+| --- | ---: |
+| Văn bản | 57 |
+| Nút (nodes) | 25.132 |
+| Cạnh (edges) | 67.859 |
+| Chunk đã nhúng vector | 27.060 |
+| Loại nút | 41 |
+| Loại quan hệ | 33 |
 
-Dưới đây là chi tiết kỹ thuật của từng tầng tri thức được thiết kế và trích xuất tự động từ văn bản pháp luật:
-
-### Lớp 1: Cấu trúc & Liên kết Văn bản (Document Hierarchy)
-*   **Mục đích**: Bản đồ hóa cấu trúc hình học của văn bản pháp luật gốc, đảm bảo tính tra cứu chính xác đến từng căn cứ pháp lý nhỏ nhất.
-*   **Các loại Thực thể (Nodes)**:
-    *   `VănBản`: Bộ luật Lao động, Luật BHXH, các Nghị định, Thông tư...
-    *   `Chương`: Chương I, Chương II...
-    *   `Mục`: Mục 1, Mục 2...
-    *   `Điều`: Điều 36, Điều 91...
-    *   `Khoản`: Khoản 1, Khoản 2...
-    *   `Điểm`: Điểm a, Điểm b...
-    *   `CơQuanBanHành`: Quốc hội, Chính phủ, Bộ LĐ-TB&XH...
-*   **Các loại Quan hệ (Edges)**:
-    *   `THUỘC_VỀ` (`BELONGS_TO`): Liên kết thứ bậc hình học (`[Điểm] -> [Khoản] -> [Điều] -> [Chương] -> [VănBản]`).
-    *   `HƯỚNG_DẪN` (`GUIDES`): Liên kết Nghị định/Thông tư hướng dẫn cho Bộ luật/Luật.
-    *   `DẪN_CHIẾU_ĐẾN` (`CITES`): Liên kết chéo giữa các điều luật khi có tham chiếu ngữ cảnh.
-    *   `SỬA_ĐỔI` (`AMENDS`) / `THAY_THẾ` (`REPLACES`): Thể hiện vòng đời hiệu lực của văn bản.
-    *   `BAN_HÀNH` (`ISSUED_BY`): Liên kết `CơQuanBanHành -> VănBản`.
-
-### Lớp 2: Thuật ngữ & Định nghĩa Pháp lý (Legal Semantic Spectrum)
-*   **Mục đích**: Mô hình hóa các khái niệm định nghĩa gốc trong luật, phương thức tính toán chế độ và các tham số số học cụ thể.
-*   **Các loại Thực thể (Nodes)**:
-    *   `ThuậtNgữ`: Các thuật ngữ chính được định nghĩa như "người lao động", "người sử dụng lao động", "thử việc", "sa thải", "tiền lương"...
-    *   `CáchTính_CôngThức`: Cách tính lương làm thêm giờ, mức hưởng thai sản, cách tính trợ cấp thôi việc...
-    *   `ThamSố_ConSố`: Các giá trị định lượng như `150%`, `200%`, `300%`, `30 ngày`, `45 ngày`, `12 tháng`...
-*   **Các loại Quan hệ (Edges)**:
-    *   `ĐƯỢC_ĐỊNH_NGHĨA_LÀ` (`DEFINED_AS`): Liên kết giữa `ThuậtNgữ` và Điều/Khoản luật định nghĩa.
-    *   `ÁP_DỤNG_CHO` (`APPLIES_TO`): Liên kết từ `CáchTính_CôngThức` đến Điều luật quy định.
-    *   `CÓ_THAM_SỐ` (`HAS_PARAMETER`): Liên kết từ `CáchTính_CôngThức` đến các `ThamSố_ConSố` cấu thành.
-
-### Lớp 3: Tình huống & Thực thể Quan hệ (Domain Ontology)
-*   **Mục đích**: Đóng vai trò làm cầu nối (semantic mapping) dịch nghĩa từ ngôn ngữ giao tiếp đời sống của người lao động sang ngôn ngữ quy chế của luật pháp.
-*   **Các loại Thực thể (Nodes)**:
-    *   `ChủThể`: Người lao động (NLĐ), Người sử dụng lao động (NSDLĐ), Công đoàn, Thanh tra lao động...
-    *   `HợpĐồngLaoĐộng`: HĐ thử việc, HĐ xác định thời hạn, HĐ không xác định thời hạn.
-    *   `HànhVi_SựKiện`: Đi muộn, sa thải, tự ý nghỉ việc, thai sản, tai nạn lao động, khấu trừ lương...
-    *   `ChếĐộ_QuyềnLợi`: Lương tăng ca, trợ cấp thôi việc, bồi thường tai nạn, trợ cấp thai sản...
-*   **Các loại Quan hệ (Edges)**:
-    *   `KÝ_KẾT` (`SIGNS`): `[ChủThể] -> [HợpĐồngLaoĐộng]`.
-    *   `THỰC_HIỆN` (`PERFORMS`): `[ChủThể] -> [HànhVi_SựKiện]`.
-    *   `CÓ_QUYỀN_HƯỞNG` (`ENTITLED_TO`): `[ChủThể] -> [ChếĐộ_QuyềnLợi]`.
-    *   `BỊ_NẰM_TRONG_DANH_MỤC_CẤM` (`PROHIBITED_BY`): Liên kết từ `HànhVi_SựKiện` bị cấm hoặc hạn chế tới Điều luật chế tài.
-
-### Lớp 4: Logic Thời gian & Thời hiệu (Temporal & State Transition)
-*   **Mục đích**: Xử lý logic tính toán thời gian, hạn chót (deadlines), thời hiệu pháp lý và các trạng thái chuyển đổi.
-*   **Các loại Thực thể (Nodes)**:
-    *   `SựKiệnKíchHoạt`: Ngày nhận quyết định thôi việc, ngày sinh con, ngày xảy ra tai nạn...
-    *   `MốcThờiGian_LuậtĐịnh`: Các khoảng thời gian khống chế (ví dụ: `1 năm`, `30 ngày`, `15 ngày`).
-    *   `TrạngTháiPhápLý`: "Còn thời hiệu khởi kiện", "Quá hạn nộp hồ sơ", "Hợp đồng vô hiệu"...
-*   **Các loại Quan hệ (Edges)**:
-    *   `BẮT_ĐẦU_TÍNH_THỜI_HIỆU` (`STARTS_LIMITATION`): Liên kết `[SựKiệnKíchHoạt] -> [MốcThờiGian_LuậtĐịnh]`.
-    *   `CHUYỂN_TRẠNG_THÁI` (`TRANSITIONS_STATE`): `[MốcThờiGian_LuậtĐịnh] -> [TrạngTháiPhápLý]`.
-
-### Lớp 5: Quy trình & Thủ tục Hành chính (Process-Oriented)
-*   **Mục đích**: Mô hình hóa quy trình giải quyết chế độ thực tế cho doanh nghiệp và cá nhân.
-*   **Các loại Thực thể (Nodes)**:
-    *   `ThủTục_ChếĐộ`: Thủ tục rút BHXH 1 lần, hưởng trợ cấp thất nghiệp, đăng ký nội quy lao động...
-    *   `HồSơ_GiấyTờ`: Sổ BHXH, quyết định thôi việc, đơn đề nghị, nội quy lao động...
-    *   `ĐiềuKiện`: Đóng đủ 12 tháng, nghỉ việc đủ 1 năm, có từ 10 lao động trở lên...
-    *   `CơQuanGiảiQuyết`: Cơ quan BHXH Quận/Huyện, Trung tâm dịch vụ việc làm, Sở LĐ-TB&XH...
-    *   `ThờiHạn_ThờiGian`: 05 ngày làm việc, trong vòng 3 tháng...
-*   **Các loại Quan hệ (Edges)**:
-    *   `YÊU_CẦU_ĐIỀU_KIỆN` (`REQUIRES_CONDITION`): `[ThủTục_ChếĐộ] -> [ĐiềuKiện]`.
-    *   `BAO_GỒM_HỒ_SƠ` (`INCLUDES_DOSSIER`): `[ThủTục_ChếĐộ] -> [HồSơ_GiấyTờ]`.
-    *   `NỘP_TẠI` (`SUBMITTED_AT`): `[ThủTục_ChếĐộ] -> [CơQuanGiảiQuyết]`.
-    *   `CÓ_THỜI_HẠN_LÀ` (`HAS_DURATION`): `[ThủTục_ChếĐộ] -> [ThờiHạn_ThờiGian]`.
-
-### Lớp 6: Vòng đời Người lao động & Doanh nghiệp (Lifecycle-Based)
-*   **Mục đích**: Biểu diễn chuỗi hành trình tuần tự, giúp AI suy luận ngữ cảnh động và gợi ý chủ động các bước tiếp theo.
-*   **Các loại Thực thể (Nodes)**:
-    *   `GiaiĐoạn_NLĐ`: Tuyển dụng $\rightarrow$ Thử việc $\rightarrow$ Ký HĐLĐ $\rightarrow$ Thai sản/Ốm đau $\rightarrow$ Chấm dứt HĐ $\rightarrow$ Nghỉ hưu.
-    *   `GiaiĐoạn_DoanhNghiệp`: Thành lập $\rightarrow$ Tuyển dụng $\rightarrow$ Khai báo lao động $\rightarrow$ Xây dựng thang lương $\rightarrow$ Ban hành nội quy $\rightarrow$ Đóng BHXH $\rightarrow$ Giải thể.
-    *   `NghĩaVụ_ThờiĐiểm`: Đóng BHXH bắt buộc, báo cáo sử dụng lao động định kỳ...
-*   **Các loại Quan hệ (Edges)**:
-    *   `GIAI_DOẠN_TIẾP_THEO` (`NEXT_STAGE`): `[Giai đoạn trước] -> [Giai đoạn sau]`.
-    *   `KÍCH_HOẠT_NGHĨA_VỤ` (`TRIGGERS_OBLIGATION`): `[Giai đoạn] -> [NghĩaVụ_ThờiĐiểm]`.
-
-### Lớp 7: Tuân thủ & Quản trị Rủi ro (Compliance & Risk Matrix)
-*   **Mục đích**: Chuyển hóa luật thành hệ thống đo lường rủi ro pháp lý vận hành cho phòng HR doanh nghiệp.
-*   **Các loại Thực thể (Nodes)**:
-    *   `HànhViDoanhNghiệp`: Ký thử việc 3 lần, không đóng BHXH, phạt tiền thay kỷ luật sa thải...
-    *   `MứcĐộRủiRo`: Thấp (Nhắc nhở), Vừa (Phạt hành chính), Nghiêm trọng (Bồi thường lớn / Đình chỉ / Hình sự).
-    *   `BiệnPhápKhắcPhục`: Truy đóng BHXH, ban hành quy chế đối thoại, nhận lại người lao động và bồi thường...
-*   **Các loại Quan hệ (Edges)**:
-    *   `GÂY_RA_RỦI_RO` (`CAUSES_RISK`): `[HànhViDoanhNghiệp] -> [MứcĐộRủiRo]`.
-    *   `KHẮC_PHỤC_BẰNG` (`MITIGATED_BY`): `[HànhViDoanhNghiệp] -> [BiệnPhápKhắcPhục]`.
-
-### Lớp 8: Án lệ & Thực tế xét xử (Precedent & Case-Based Reasoning)
-*   **Mục đích**: So sánh tình huống thực tế của người dùng với các phán quyết lịch sử của Tòa án nhân dân Tối cao để đánh giá tỉ lệ thắng kiện.
-*   **Các loại Thực thể (Nodes)**:
-    *   `ÁnLệ`: Án lệ số 09/2016/AL, Án lệ số 50/2021/AL...
-    *   `BảnÁnMẫu`: Các bản án thực tế về sa thải, nợ lương...
-    *   `TìnhTiếtCốtLõi`: Sa thải không họp công đoàn, tự ý nghỉ việc 5 ngày cộng dồn...
-    *   `PhánQuyết`: Buộc nhận lại NLĐ, bồi thường X tháng lương, bác yêu cầu khởi kiện...
-*   **Các loại Quan hệ (Edges)**:
-    *   `ÁP_DỤNG_ĐIỀU_LUẬT` (`APPLIES_ARTICLE`): `[ÁnLệ] -> [Điều/Khoản luật]`.
-    *   `CÓ_TÌNH_TIẾT_TƯƠNG_TỰ` (`SIMILAR_FACTS`): `[ÁnLệ] -> [TìnhTiếtCốtLõi]`.
-    *   `DẪN_ĐẾN_PHÁN_QUYẾT` (`LEADS_TO_RULING`): `[TìnhTiếtCốtLõi] -> [PhánQuyết]`.
+Vector: **BAAI/bge-m3**, 1024 chiều, chạy cục bộ. Chỉ mục cục bộ lưu ở SQLite (`storage/graphrag/legal_graphrag.sqlite`) kèm FTS5 tiếng Việt; bản production đồng bộ sang Neo4j + PostgreSQL/pgvector.
 
 ---
 
-## 3. Quy tắc Trích xuất Tự động (Extraction Rules)
+## 2. Tầng 3 — Tiền lương & Tiền thưởng
 
-Tiến trình xây dựng đồ thị (`LegalGraphBuilder._extract_multi_layer_graph`) quét qua toàn bộ các node nội dung (`Điều`, `Khoản`, `Điểm`) và áp dụng các bộ luật trích xuất:
+Đây là tầng nghiệp vụ được xây dựng riêng cho miền lao động, mô hình hoá đầy đủ cấu trúc thu nhập thay vì chỉ coi "tiền lương" là một từ khoá.
 
-1.  **Nhận diện Thuật ngữ**: Quét từ khóa khớp với bộ từ điển thuật ngữ lao động (ví dụ: `người lao động`, `sa thải`). Nếu xuất hiện các mẫu câu định nghĩa (`"... là ..."`, `"... được hiểu là ..."`), hệ thống sẽ gán quan hệ `ĐƯỢC_ĐỊNH_NGHĨA_LÀ` từ thuật ngữ đến điều khoản đó.
-2.  **Nhận diện Tham số & Công thức**: Trích xuất các tỷ lệ phần trăm (`%`) hoặc con số mốc thời gian (`30 ngày`, `12 tháng`) và liên kết chúng làm tham số (`CÓ_THAM_SỐ`) của các công thức tính chế độ tương ứng.
-3.  **Nhận diện Quy trình**: Tìm kiếm các cụm từ chỉ hồ sơ (`sổ bhxh`, `quyết định thôi việc`), cơ quan thụ lý (`cơ quan bảo hiểm xã hội`, `tòa án`) để sinh cấu trúc thực thể lớp 5.
-4.  **Bản đồ hóa Rủi ro**: Phân tích các câu cấm đoán (`nghiêm cấm`, `không được phép`) hoặc mức phạt để lập hồ sơ rủi ro lớp 7 và đề xuất biện pháp khắc phục.
-5.  **Ánh xạ Án lệ**: Nhận diện mẫu ký tự án lệ (`r"Án lệ số \d+/20\d\d/AL"`) và liên kết chúng đến điều luật cơ sở tương ứng.
+### 2.1 Các loại nút
 
----
+| Nút | Ý nghĩa | Ví dụ thực tế |
+| --- | --- | --- |
+| `KhoảnThuNhập` | Một khoản cấu thành thu nhập | Tiền lương, phụ cấp lương, các khoản bổ sung khác, tiền lương làm thêm giờ, tiền lương ngừng việc, tạm ứng tiền lương, khấu trừ tiền lương, tiền thưởng, lương hưu, trợ cấp thôi việc… |
+| `LoạiThưởng` | Hình thái thưởng | Quy chế thưởng, thưởng bằng tiền, thưởng bằng tài sản, thưởng theo kết quả sản xuất kinh doanh |
+| `HìnhThứcTrảLương` | Cách trả lương | Theo thời gian, theo sản phẩm, khoán, tiền mặt, qua tài khoản ngân hàng |
+| `KỳHạnTrảLương` | Chu kỳ trả lương | Theo giờ/ngày/tuần, theo tháng, theo sản phẩm-khoán, chậm trả lương |
+| `MứcLươngTốiThiểu` | Mức lương tối thiểu theo vùng, **kèm số tiền** | Vùng I: 5.310.000 đ/tháng và 25.500 đ/giờ (NĐ 293/2025) |
+| `CănCứTínhLương` | Cơ sở để tính một khoản tiền | Đơn giá tiền lương, tiền lương thực trả, tiền lương bình quân, thang lương-bảng lương, định mức lao động |
+| `TỷLệHưởng` | Tỷ lệ luật định | 150%, 200%, 300%, 30%, 20% |
+| `CáchTính_CôngThức` | Phương pháp tính chế độ | Cách tính lương làm thêm, trợ cấp thôi việc, lương hưu |
+| `SốTiền` | Số tiền tuyệt đối bằng VNĐ | 5.310.000 đồng |
 
-## 4. Cơ chế Suy luận & Tìm kiếm Đồ thị (Retrieval & Graph Propagation)
+### 2.2 Các quan hệ đặc thù
 
-Khi người dùng gửi câu hỏi (ví dụ: *"Hết hạn thử việc công ty không ký hợp đồng chính thức và bắt thử việc tiếp có bị phạt không?"*):
+| Quan hệ | Hướng | Ý nghĩa |
+| --- | --- | --- |
+| `CẤU_THÀNH_LƯƠNG` | KhoảnThuNhập → KhoảnThuNhập | Phụ cấp lương, mức lương theo công việc, khoản bổ sung khác **cấu thành** tiền lương |
+| `CÓ_MỨC_HƯỞNG` | KhoảnThuNhập → TỷLệHưởng | Lương làm thêm ngày lễ → 300% |
+| `TRẢ_THEO_HÌNH_THỨC` | KhoảnThuNhập → HìnhThứcTrảLương | Tiền lương → trả qua tài khoản ngân hàng |
+| `CÓ_KỲ_HẠN_TRẢ` | KhoảnThuNhập → KỳHạnTrảLương | Tiền lương → trả một tháng một lần |
+| `ÁP_DỤNG_VÙNG` | MứcLươngTốiThiểu → mức vùng | Lương tối thiểu → vùng I/II/III/IV |
+| `CĂN_CỨ_TÍNH` | KhoảnThuNhập → CănCứTínhLương | Lương làm thêm → đơn giá tiền lương |
+| `BỊ_KHẤU_TRỪ_TỪ` | Khấu trừ → tiền lương | Khấu trừ tối đa 30% lương thực trả |
+| `CÓ_SỐ_TIỀN` | Thực thể → SốTiền | Lương tối thiểu vùng I → 5.310.000 đồng |
+| `QUY_ĐỊNH_TẠI` | Thực thể ngữ nghĩa → Điều/Khoản | Neo mọi khái niệm về điều luật quy định nó |
+
+### 2.3 Ví dụ đường đi trong đồ thị
 
 ```
-                                FTS & Vector Search
-                                         │
-                                         ▼ (Khớp các chunk nền tảng)
-                           ┌───────────────────────────┐
-                           │   Lớp 3: HĐ thử việc      │
-                           └─────────────┬─────────────┘
-                                         │
-                                         ▼ (Duyệt theo cạnh rủi ro)
-                           ┌───────────────────────────┐
-                           │ Lớp 7: Thử việc quá 2 lần │
-                           └─────────────┬─────────────┘
-                                         │
-                                         ▼ (Duyệt theo quan hệ khắc phục)
-                           ┌───────────────────────────┐
-                           │ Lớp 7: Phạt hành chính    │
-                           └───────────────────────────┘
+"quy chế thưởng"  (LoạiThưởng)
+      │ QUY_ĐỊNH_TẠI
+      ├──────────────► Điều 104 Bộ luật Lao động 45/2019/QH14   (nghĩa vụ gốc)
+      ├──────────────► Điều 41 Nghị định 145/2020/NĐ-CP         (hướng dẫn)
+      └──────────────► Điều 17 Nghị định 12/2022/NĐ-CP          (chế tài)
+                              │ BỊ_XỬ_PHẠT
+                              └──► Phạt tiền từ 5.000.000 đến 10.000.000 đồng
+                                          │ GÂY_RA_RỦI_RO
+                                          └──► Mức độ rủi ro: Thấp
 ```
 
-1.  **Truy xuất cơ sở**: Thực hiện tìm kiếm hỗn hợp (Hybrid Search = BM25 FTS + Qdrant Dense Vector) trên các mảnh văn bản (Chunks).
-2.  **Mở rộng Đồ thị (Graph Expansion)**: Từ các đỉnh kết quả ban đầu, hệ thống duyệt đồ thị để thu thập các nút lân cận theo các quan hệ đa tầng.
-3.  **Phép nhân Trọng số (Score Propagation)**: Điểm số của nút mở rộng được tính bằng công thức:
-    $$\text{Score}_{\text{expanded}} = \text{Score}_{\text{base}} \times \text{Weight}_{\text{relation}}$$
-    Bảng trọng số quan hệ (`relation_weight`):
-    *   `CÓ_TÌNH_TIẾT_TƯƠNG_TỰ` (`SIMILAR_FACTS`): **0.88** (Độ ưu tiên cao nhất cho án lệ tương đương).
-    *   `ĐƯỢC_ĐỊNH_NGHĨA_LÀ` (`DEFINED_AS`): **0.85** (Độ ưu tiên cao cho định nghĩa từ ngữ).
-    *   `GÂY_RA_RỦI_RO` (`CAUSES_RISK`): **0.85** (Độ ưu tiên cao cho quản trị rủi ro doanh nghiệp).
-    *   `YÊU_CẦU_ĐIỀU_KIỆN` (`REQUIRES_CONDITION`): **0.82**.
-    *   `CÓ_QUYỀN_HƯỞNG` (`ENTITLED_TO`): **0.80**.
-    *   `DẪN_CHIẾU_ĐẾN` (`CITES`): **0.72**.
-4.  **Tổng hợp ngữ cảnh**: Rerank các chunk đại diện tốt nhất cho các nút được chọn và xây dựng Context gửi sang LLM (Groq Llama-3.3-70b) để viết câu trả lời cuối cùng kèm trích dẫn nguồn `[S1]`, `[S2]`.
+Ba văn bản này **không dẫn chiếu lẫn nhau bằng văn bản**; chỉ có nút khái niệm chung mới nối được chúng. Đây là giá trị cốt lõi của GraphRAG so với RAG thuần vector.
 
 ---
 
-## 5. Cơ chế Dự phòng Cục bộ (Graceful Fallback)
+## 3. Danh mục đầy đủ các tầng
 
-Hệ thống được thiết kế để đảm bảo hoạt động **100% thời gian**, ngay cả khi xảy ra sự cố hạ tầng:
+### Tầng 0 — Nguồn & hiệu lực
+* Nút: `VănBản`, `CơQuanBanHành`, `HiệuLựcVănBản`
+* Quan hệ: `BAN_HÀNH`, `CÓ_HIỆU_LỰC_TỪ`, `HƯỚNG_DẪN`, `SỬA_ĐỔI`, `THAY_THẾ`
 
-*   Khi khởi chạy hoặc gọi các API `/api/stats`, `/api/chat`, `/api/search`: Hệ thống sẽ lần lượt kiểm tra kết nối tới **Hybrid (Neo4j + Qdrant)** $\rightarrow$ **Qdrant Solo** $\rightarrow$ **Neo4j Solo**.
-*   Nếu tất cả các cơ sở dữ liệu ngoài bị ngắt kết nối (do lỗi mạng, tường lửa, DNS), hệ thống sẽ **tự động chuyển hướng xử lý sang Local SQLite (`GraphRAGStore`)**.
-*   Trên giao diện web, hệ thống sẽ hiển thị một cảnh báo nhỏ để người dùng biết họ đang sử dụng phiên bản dự phòng ngoại tuyến (Local SQLite) và cung cấp toàn bộ thông số thống kê tương ứng của đồ thị đa tầng cục bộ.
+Ngày hiệu lực được trích tự động từ câu *"Luật này có hiệu lực thi hành từ ngày dd tháng mm năm yyyy"* (56 quan hệ `CÓ_HIỆU_LỰC_TỪ`).
+
+### Tầng 1 — Cấu trúc văn bản
+* Nút: `Chương`, `Mục`, `Điều`, `Khoản`, `Điểm`, `PhụLục_Bảng`
+* Quan hệ: `THUỘC_VỀ`, `DẪN_CHIẾU_ĐẾN`, `CÓ_BẢNG_BIỂU`
+
+`DẪN_CHIẾU_ĐẾN` phân giải được cả tham chiếu **liên văn bản**: cụm *"Điều 129 của Bộ luật này"* trỏ về chính văn bản, còn *"theo quy định của Luật Bảo hiểm xã hội"* được phân giải sang văn bản đích qua chỉ mục bí danh.
+
+### Tầng 2 — Thuật ngữ & chủ đề
+* Nút: `ThuậtNgữ` (212 thuật ngữ), `ChủĐề` (22 chủ đề)
+* Quan hệ: `ĐƯỢC_ĐỊNH_NGHĨA_LÀ`, `ĐỀ_CẬP_ĐẾN`, `THUỘC_CHỦ_ĐỀ`
+
+Thuật ngữ **không còn được viết tay**: hệ thống quét mọi điều *"Giải thích từ ngữ"* trong toàn bộ 57 văn bản và bóc tách mẫu `N. <Thuật ngữ> là <định nghĩa>`. Nhờ đó số thuật ngữ tăng từ 12 (bản cũ) lên 212 và luôn là định nghĩa chính thức của chính văn bản đó.
+
+22 chủ đề (`Hợp đồng lao động`, `Tiền lương & Tiền thưởng`, `Bảo hiểm xã hội`, `Xử phạt vi phạm hành chính`, `Tố tụng & Thi hành án`, `Cán bộ, công chức, viên chức`, …) phủ toàn bộ corpus, kể cả các mảng ngoài lao động thuần tuý.
+
+### Tầng 4 — Chủ thể & quan hệ lao động
+* Nút: `ChủThể`, `HợpĐồngLaoĐộng`, `HànhVi_SựKiện`, `ChếĐộ_QuyềnLợi`, `NghĩaVụ`
+* Quan hệ: `KÝ_KẾT`, `THỰC_HIỆN`, `CÓ_QUYỀN_HƯỞNG`, `CÓ_NGHĨA_VỤ`, `BỊ_NGHIÊM_CẤM`
+
+`BỊ_NGHIÊM_CẤM` chỉ phát sinh khi điều khoản thực sự chứa dấu hiệu cấm (*nghiêm cấm, không được, bị cấm, trái pháp luật*).
+
+### Tầng 5 — Quy trình & thủ tục
+* Nút: `ThủTục_ChếĐộ`, `HồSơ_GiấyTờ`, `ĐiềuKiện`, `CơQuanGiảiQuyết`, `ThờiHạn_ThủTục`
+* Quan hệ: `YÊU_CẦU_ĐIỀU_KIỆN`, `BAO_GỒM_HỒ_SƠ`, `NỘP_TẠI`, `CÓ_THỜI_HẠN_LÀ`
+
+### Tầng 6 — Thời gian & thời hiệu
+* Nút: `SựKiệnKíchHoạt`, `MốcThờiGian_LuậtĐịnh`, `TrạngTháiPhápLý`
+* Quan hệ: `BẮT_ĐẦU_TÍNH_THỜI_HIỆU`, `CHUYỂN_TRẠNG_THÁI`
+
+Mốc thời gian được chuẩn hoá (`30 ngày`, `06 tháng`, `01 năm`) nên các cách viết khác nhau gộp về cùng một nút.
+
+### Tầng 7 — Chế tài & rủi ro
+* Nút: `HànhViViPhạm` (52), `MứcPhạtTiền` (35), `HìnhThứcXửPhạtBổSung`, `BiệnPhápKhắcPhục`, `MứcĐộRủiRo`
+* Quan hệ: `BỊ_XỬ_PHẠT`, `GÂY_RA_RỦI_RO`, `KHẮC_PHỤC_BẰNG`, `BỊ_XỬ_PHẠT_BỔ_SUNG`
+
+Hành vi vi phạm được **khai thác tự động từ tiêu đề điều luật** của các nghị định xử phạt (mẫu *"Điều 17. Vi phạm quy định về tiền lương"*), sau đó mọi khung phạt `Phạt tiền từ X đồng đến Y đồng` nằm dưới điều đó được bóc tách thành nút `MứcPhạtTiền` có giá trị số. Khung phạt được xếp vào 4 mức rủi ro theo trần tiền phạt.
+
+### Tầng 8 — Vòng đời
+* Nút: `GiaiĐoạn_NLĐ` (8 giai đoạn), `GiaiĐoạn_DoanhNghiệp` (8 giai đoạn)
+* Quan hệ: `GIAI_ĐOẠN_TIẾP_THEO`, `KÍCH_HOẠT_NGHĨA_VỤ`
+
+### Tầng 9 — Án lệ
+* Nút: `ÁnLệ`, `TìnhTiếtCốtLõi`, `PhánQuyết`
+* Quan hệ: `ÁP_DỤNG_ĐIỀU_LUẬT`, `CÓ_TÌNH_TIẾT_TƯƠNG_TỰ`, `DẪN_ĐẾN_PHÁN_QUYẾT`
+
+Kho dữ liệu hiện tại chưa có bản án nên tầng này sẵn sàng nhưng rỗng; chỉ cần thả tệp bản án vào `Data (1)` là tầng tự sinh.
+
+---
+
+## 4. Đường ống dựng chỉ mục
+
+```
+.docx ──► docx_blocks()  ──► _parse_document()  ──► _finalize_node_text()
+             (giữ đúng          (Chương/Mục/Điều/       (chuẩn hoá, giữ
+              thứ tự văn bản      Khoản/Điểm/Bảng)       xuống dòng bảng)
+              + bảng inline)
+                                        │
+       ┌────────────────────────────────┴─────────────────────────────┐
+       ▼                                                              ▼
+_build_document_relations()   _build_effective_dates()   _build_reference_edges()
+       │                                                              │
+       └──────────────────────────┬───────────────────────────────────┘
+                                  ▼
+   _layer2_terms_and_topics() → _layer3_wage_and_bonus() → _layer4_domain_ontology()
+   → _layer5_procedures() → _layer6_temporal() → _layer7_sanctions_and_risk()
+   → _layer8_lifecycles() → _layer9_precedents()
+                                  ▼
+                _build_chunks() → _embed_chunks() (BGE-M3)
+                                  ▼
+                    SQLite + FTS5  |  JSONL export
+                                  ▼
+              sync_neo4j() / sync_postgres()  (bản production)
+```
+
+Lệnh dựng lại toàn bộ chỉ mục:
+
+```bash
+python scripts/build_graphrag.py
+```
+
+### 4.1 Bốn lỗi mất dữ liệu đã được sửa ở v3
+
+| Lỗi | Hậu quả trước đây | Cách xử lý |
+| --- | --- | --- |
+| Bảng biểu bị tách khỏi điều luật | `python-docx` đọc riêng đoạn văn và bảng, nên **toàn bộ bảng bị dồn xuống cuối văn bản**. Bảng mức lương tối thiểu vùng của NĐ 293/2025 mất liên kết với Điều 3 → không bao giờ truy hồi được số tiền. | `docx_blocks()` duyệt `iter_inner_content()` theo đúng thứ tự tài liệu; bảng trở thành nút `PhụLục_Bảng` gắn vào khoản chứa nó. |
+| Số hiệu điều luật do Word tự đánh số | Luật ATVSLĐ 84/2015 dùng auto-numbering nên `paragraph.text` **không chứa "Điều N"** → cả 93 điều biến mất, văn bản chỉ còn 15 nút. | `_numbering_key()` đọc `numPr` trong XML; khi văn bản gần như không có tiêu đề `Điều N.` tường minh thì dùng danh sách đánh số làm mốc điều. |
+| Phân loại sai loại văn bản | `detect_doc_type` chấm điểm trên nội dung, mà nghị định nào cũng trích "Bộ luật Lao động" ở phần căn cứ → phần lớn nghị định/thông tư bị gán nhãn "Bộ luật", làm hỏng quan hệ `HƯỚNG_DẪN`. | Ưu tiên tiền tố tên tệp, rồi tới mã văn bản, cuối cùng mới xét nội dung. |
+| Xuống dòng bị làm phẳng | `normalize_space` gộp mọi ký tự trắng nên `Vùng I \| 5.310.000 \| 25.500` bị trộn thành một dòng dài không phân tích được. | Thêm `normalize_block()` giữ nguyên ranh giới dòng cho nội dung bảng. |
+
+### 4.2 Quy tắc trích xuất chính
+
+1. **Định nghĩa** — quét điều *"Giải thích từ ngữ"*, bóc `N. <Thuật ngữ> là <định nghĩa>`, tạo `ThuậtNgữ` + `ĐƯỢC_ĐỊNH_NGHĨA_LÀ` tới đúng khoản.
+2. **Khung phạt** — regex `Phạt tiền từ ([\d.]+) đồng đến ([\d.]+) đồng`, chuyển thành số nguyên VNĐ.
+3. **Tỷ lệ & tham số** — bóc `%` và mốc thời gian, chỉ gắn `CÓ_MỨC_HƯỞNG` khi khoản đó thực sự nói về khoản thu nhập tương ứng (`WAGE_RATE_HINTS`).
+4. **Lương tối thiểu vùng** — đọc dòng bảng `Vùng <số La Mã> | <lương tháng> | <lương giờ>`.
+5. **Đề cập thuật ngữ** — chỉ tạo ở cấp Điều, yêu cầu thuật ngữ nằm trong tiêu đề hoặc xuất hiện ≥2 lần, và giới hạn 220 cạnh/thuật ngữ để cụm phổ biến như *"người lao động"* không nối vào nửa đồ thị.
+
+---
+
+## 5. Cơ chế truy hồi
+
+`GraphRAGStore.retrieve()` chạy 6 giai đoạn:
+
+```
+1. TRUY HỒI KÉP        BM25/FTS5  +  vector BGE-M3 (một phép nhân ma trận numpy)
+                       → pool = max(60, top_k × 8) ứng viên
+        ▼
+2. CHẤM ĐIỂM LẠI       độ phủ từ khoá · khớp chính xác "Điều N/Khoản N"
+                       · ưu tiên chunk bảng khi câu hỏi hỏi số
+                       · NHÂN TRỌNG SỐ THỨ BẬC PHÁP LÝ
+        ▼
+3. GIEO MẦM TỪ ĐỒ THỊ  · câu hỏi định nghĩa  → nhảy thẳng tới khoản định nghĩa
+                       · cụm khái niệm       → các điều QUY_ĐỊNH_TẠI khái niệm đó
+        ▼
+4. MỞ RỘNG ĐỒ THỊ      tổ tiên · cạnh ngữ nghĩa (33 quan hệ, có trọng số)
+                       · điều liền kề · nhảy 2 bước qua nút khái niệm
+        ▼
+5. BẮC CẦU VĂN BẢN     đi theo HƯỚNG_DẪN/SỬA_ĐỔI/THAY_THẾ rồi truy vấn lại
+                       trong văn bản liên quan
+        ▼
+6. ĐA DẠNG HOÁ         hạn mức theo văn bản/nút; hạ điểm chunk khái niệm
+```
+
+### 5.1 Trọng số thứ bậc pháp luật
+
+Đây là tín hiệu quan trọng nhất được thêm ở v3. Nghị định 145/2020 là văn bản dài nhất kho (581 KB) nên **luôn thắng cả BM25 lẫn vector** đơn thuần vì lặp lại nhiều từ vựng — kết quả là câu trả lời trích nghị định hướng dẫn thay vì chính điều luật gốc.
+
+| Loại văn bản | Hệ số |
+| --- | ---: |
+| Bộ luật | 1,16 |
+| Luật | 1,12 |
+| Văn bản hợp nhất | 1,04 |
+| Nghị quyết | 1,00 |
+| Nghị định | 0,94 |
+| Thông tư | 0,90 |
+
+Nếu người dùng gọi đích danh số hiệu văn bản (*"theo Nghị định 145/2020"*) thì văn bản đó được nâng lên 1,25 và trọng số thứ bậc bị vô hiệu hoá.
+
+Riêng thay đổi này nâng tỷ lệ đạt của tầng multi-abstract từ **0,267 → 0,533**.
+
+### 5.2 Gieo mầm từ đồ thị
+
+* **Câu hỏi định nghĩa** (*"… là gì"*, *"định nghĩa …"*): tra `ThuậtNgữ` khớp câu hỏi rồi đi theo `ĐƯỢC_ĐỊNH_NGHĨA_LÀ` tới đúng khoản định nghĩa, thay vì hy vọng khoản đó thắng hàng trăm điều chỉ *dùng* thuật ngữ.
+* **Câu hỏi có cụm khái niệm** (*"quy chế thưởng"*, *"thang lương, bảng lương"*): tra nút khái niệm rồi lấy các điều `QUY_ĐỊNH_TẠI` — đây chính là cách nối Điều 104 BLLĐ với Điều 17 NĐ 12/2022 và Điều 41 NĐ 145/2020.
+
+### 5.3 Trọng số quan hệ
+
+Điểm của nút mở rộng = điểm nút gốc × trọng số quan hệ. Bảng đầy đủ nằm trong `RELATIONS` của [app/legal_ontology.py](app/legal_ontology.py); một số giá trị tiêu biểu:
+
+| Quan hệ | Trọng số |
+| --- | ---: |
+| `BỊ_NGHIÊM_CẤM` | 0,90 |
+| `BỊ_XỬ_PHẠT` | 0,90 |
+| `CÓ_MỨC_HƯỞNG` | 0,88 |
+| `ĐƯỢC_ĐỊNH_NGHĨA_LÀ` | 0,88 |
+| `QUY_ĐỊNH_TẠI` | 0,86 |
+| `CẤU_THÀNH_LƯƠNG` | 0,86 |
+| `ÁP_DỤNG_VÙNG` | 0,84 |
+| `DẪN_CHIẾU_ĐẾN` | 0,74 |
+| `THUỘC_VỀ` | 0,45 |
+| `ĐỀ_CẬP_ĐẾN` | 0,34 |
+
+Đi ngược chiều một quan hệ chỉ được tính 0,85 lần trọng số xuôi chiều.
+
+### 5.4 Câu hỏi tổng hợp
+
+Khi câu hỏi chứa dấu hiệu tổng hợp (*"tổng hợp"*, *"liệt kê"*, *"so sánh"*, *"toàn bộ"*, *"các khoản"*…), hệ thống chuyển sang chế độ aggregative: cho phép đi qua các hub chủ đề lớn, lấy nhiều đích hơn mỗi hub, và nới hạn mức số chunk trên mỗi văn bản (vì câu trả lời tổng hợp thường nằm rải rác trong cùng một bộ luật).
+
+---
+
+## 6. Đánh giá
+
+### 6.1 Bộ câu hỏi
+
+[evaluation/question_bank.json](evaluation/question_bank.json) gồm **70 câu hỏi**, phân theo độ sâu suy luận:
+
+| Tầng | Số câu | Mô tả |
+| --- | ---: | --- |
+| **Single-hop** | 25 | Câu trả lời nằm gọn trong một điều/khoản (định nghĩa, con số, tỷ lệ). |
+| **Multi-hop** | 30 | Phải nối ≥2 nút: nhiều điều cùng văn bản, hoặc luật gốc ↔ nghị định hướng dẫn ↔ nghị định xử phạt. |
+| **Multi-abstract** | 15 | Không đoạn văn nào chứa sẵn câu trả lời — phải so sánh, tổng hợp hoặc trừu tượng hoá trên nhiều nguồn. |
+
+Mỗi câu khai báo:
+* `expect_any` / `expect_all` / `expect_min` — các căn cứ pháp lý bắt buộc (đã đối chiếu tay với kho văn bản);
+* `expect_text` — dữ kiện bắt buộc phải có trong **nguồn truy hồi**;
+* `answer_must_contain` — dữ kiện bắt buộc phải có trong **câu trả lời cuối cùng**.
+
+### 6.2 Chạy đánh giá
+
+```bash
+# Chỉ chấm truy hồi (nhanh, không cần LLM)
+python scripts/run_question_bank.py --top-k 16
+
+# Chạy toàn bộ đường ống: truy hồi → dựng ngữ cảnh → Gemini → chấm điểm
+GEMINI_USE_ADC=true python scripts/run_question_bank.py \
+    --mode full --judge --top-k 16 \
+    --report storage/eval/full_system.json \
+    --markdown storage/eval/BAO_CAO_DANH_GIA.md
+
+# Lọc theo tầng / chủ đề
+python scripts/run_question_bank.py --tier multi_abstract
+python scripts/run_question_bank.py --topic tien-luong-tien-thuong
+```
+
+Chỉ số được đo: `hit@k`, `citation recall`, độ phủ dữ kiện trong nguồn và trong câu trả lời, tỷ lệ trích dẫn `[Sx]` hợp lệ (phát hiện bịa nguồn), điểm LLM-judge 0–5, và độ trễ p50/p95 tách riêng cho truy hồi và sinh câu trả lời.
+
+Báo cáo kết quả mới nhất: [storage/eval/BAO_CAO_DANH_GIA.md](storage/eval/BAO_CAO_DANH_GIA.md).
+
+---
+
+## 7. Cơ chế dự phòng
+
+Thứ tự thử kết nối khi phục vụ API: **Neo4j + PostgreSQL (hybrid)** → **PostgreSQL** → **Neo4j** → **SQLite cục bộ**. Khi mọi cơ sở dữ liệu ngoài mất kết nối, hệ thống tự chuyển sang `GraphRAGStore` cục bộ và giao diện hiển thị cảnh báo đang chạy ở chế độ ngoại tuyến.
+
+Ánh xạ tên quan hệ tiếng Việt sang nhãn Neo4j được sinh trực tiếp từ `RELATIONS` trong ontology (xem `RELATION_TYPE_MAP` trong [app/external_graphrag.py](app/external_graphrag.py)), nên thêm một quan hệ mới vào ontology là đủ để nó chảy qua toàn bộ hệ thống.
+
+---
+
+## 8. Mở rộng đồ thị
+
+Thêm một khái niệm mới chỉ cần sửa dữ liệu trong [app/legal_ontology.py](app/legal_ontology.py):
+
+```python
+WAGE_COMPONENTS = (
+    ...
+    (_c("tien-an-ca", "Tiền ăn ca",
+        ["tien an ca", "ho tro tien an"],
+        "Khoản hỗ trợ bữa ăn giữa ca do hai bên thoả thuận."), "tien-luong"),
+)
+```
+
+Thêm một quan hệ mới thì khai báo trong `RELATIONS` (tên tiếng Việt, nhãn tiếng Anh, tầng, trọng số truy hồi, mô tả) rồi phát cạnh trong tầng tương ứng của builder. Không cần sửa lớp truy hồi hay lớp đồng bộ.

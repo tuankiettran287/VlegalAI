@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 from docx import Document
 
+from app import legal_ontology as onto
 from app.services.embeddings import EmbeddingConfig, get_embedding_service
 
 
@@ -22,8 +23,14 @@ DEFAULT_DATA_DIR = PROJECT_ROOT / "Data (1)"
 DEFAULT_STORAGE_DIR = PROJECT_ROOT / "storage" / "graphrag"
 DEFAULT_DB_PATH = DEFAULT_STORAGE_DIR / "legal_graphrag.sqlite"
 
+SYSTEM_DOC_ID = "he-thong"
+
 CHUNK_WINDOW_WORDS = 360
 CHUNK_OVERLAP_WORDS = 70
+
+#: A single term may not generate more MENTIONS edges than this, otherwise a
+#: ubiquitous phrase such as "người lao động" would connect to half the graph.
+MAX_MENTION_EDGES_PER_TERM = 220
 
 VN_WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", re.UNICODE)
 CHAPTER_RE = re.compile(r"^Chương\s+([IVXLCDM]+|\d+)(?:[\.\s:-]+(.+))?$", re.IGNORECASE)
@@ -38,11 +45,61 @@ ARTICLE_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: "1. Người lao động là người làm việc..." inside a "Giải thích từ ngữ" article.
+DEFINITION_RE = re.compile(
+    r"^\s*(?:\d{1,3}\.\s*)?(?P<term>[^.;:]{3,80}?)\s+(?:là|được hiểu là|được gọi là)\s+(?P<body>.{20,}?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+DEFINITION_ARTICLE_RE = re.compile(r"giải thích (?:từ ngữ|thuật ngữ)", re.IGNORECASE)
+
+#: "Phạt tiền từ 5.000.000 đồng đến 10.000.000 đồng"
+FINE_RANGE_RE = re.compile(
+    r"[Pp]hạt\s+tiền\s+từ\s+([\d\.]+)\s*đồng\s+đến\s+([\d\.]+)\s*đồng",
+    re.IGNORECASE,
+)
+#: "Phạt tiền 10.000.000 đồng" / "phạt tiền từ 2.000.000 đồng trở lên"
+FINE_SINGLE_RE = re.compile(r"[Pp]hạt\s+tiền\s+(?:từ\s+)?([\d\.]{5,})\s*đồng", re.IGNORECASE)
+MONEY_RE = re.compile(r"\b(\d{1,3}(?:\.\d{3})+)\s*đồng\b")
+PERCENT_RE = re.compile(r"\b(\d{1,3}(?:[,.]\d+)?)\s*%")
+DURATION_RE = re.compile(
+    r"\b(\d{1,4})\s*(giờ|ngày làm việc|ngày|tuần|tháng|năm)\b",
+    re.IGNORECASE,
+)
+EFFECTIVE_DATE_RE = re.compile(
+    r"có hiệu lực (?:thi hành|thực hiện)?\s*(?:kể\s+)?từ ngày\s+(\d{1,2})\s*(?:tháng|/|-)\s*(\d{1,2})\s*(?:năm|/|-)\s*(\d{4})",
+    re.IGNORECASE,
+)
+REGION_WAGE_RE = re.compile(
+    r"Vùng\s+([IVX]+)\s*\|\s*([\d\.]+)\s*\|\s*([\d\.]+)\b",
+    re.IGNORECASE,
+)
+
+DOC_TYPE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("bo-luat", "Bộ luật"),
+    ("nghi-dinh", "Nghị định"),
+    ("nghi-quyet", "Nghị quyết"),
+    ("thong-tu", "Thông tư"),
+    ("quyet-dinh", "Quyết định"),
+    ("luat", "Luật"),
+)
+
 
 def normalize_space(text: str) -> str:
     text = text.replace("\xa0", " ").replace("\t", " ")
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def normalize_block(text: str) -> str:
+    """Normalise whitespace but keep line breaks.
+
+    Table rows only mean something as rows: collapsing them onto one line turned
+    "Vùng I | 5.310.000 | 25.500" into an unparseable run-on, so wage brackets
+    and fee scales could never be read back out of the index.
+    """
+
+    lines = [normalize_space(line) for line in (text or "").splitlines()]
+    return "\n".join(line for line in lines if line)
 
 
 def strip_accents(text: str) -> str:
@@ -84,10 +141,22 @@ def token_count(text: str) -> int:
     return len(VN_WORD_RE.findall(text))
 
 
+#: Letterhead lines that precede the real title of a Vietnamese legal document.
+MASTHEAD_RE = re.compile(
+    r"^(quoc hoi|chinh phu|uy ban thuong vu quoc hoi|bo (?!luat\b)[a-z]|cong hoa xa hoi|doc lap|"
+    r"so:|luat so:|bo luat so:|nghi dinh so:|thong tu so:|nghi quyet so:|ha noi, ngay|"
+    r"[a-z\s]*, ngay \d)",
+    re.IGNORECASE,
+)
+
+
 def smart_doc_title(lines: list[str], filename: str) -> str:
     selected: list[str] = []
-    for line in lines[:12]:
+    for line in lines[:16]:
         if is_separator(line):
+            continue
+        # Table rows and mastheads carry no title information.
+        if "|" in line or MASTHEAD_RE.match(strip_accents(line).lower()):
             continue
         if re.match(r"^(Căn cứ|Theo đề nghị|Quốc hội ban hành|Chính phủ ban hành)", line, re.I):
             break
@@ -118,21 +187,86 @@ def detect_code(filename: str, lines: list[str]) -> str:
     return stem
 
 
-def detect_doc_type(filename: str, title: str) -> str:
-    blob = f"{filename} {title}".lower()
-    if "bộ-luật" in blob or "bộ luật" in blob:
-        return "Bộ luật"
-    if "nghị-định" in blob or "nghị định" in blob:
+def detect_doc_type(filename: str, title: str, code: str = "") -> str:
+    """Classify a document.
+
+    The filename prefix is authoritative: the body of a decree routinely quotes
+    "Bộ luật Lao động" in its opening lines, so scoring on body text alone
+    misfiled most Nghị định / Thông tư as "Bộ luật" and broke the HƯỚNG_DẪN
+    edges that depend on the type pair.
+    """
+
+    slug = slugify(Path(filename).stem)
+    for prefix, doc_type in DOC_TYPE_PREFIXES:
+        if slug.startswith(prefix):
+            return doc_type
+
+    code_upper = strip_accents(code or "").upper()
+    if "VBHN" in code_upper:
+        return "Văn bản hợp nhất"
+    if "ND-CP" in code_upper:
         return "Nghị định"
-    if "thông-tư" in blob or "thông tư" in blob:
+    if code_upper.startswith("TT-") or "-TT-" in code_upper or "/TT-" in code_upper:
         return "Thông tư"
-    if "nghị-quyết" in blob or "nghị quyết" in blob:
+    if "UBTVQH" in code_upper:
+        return "Nghị quyết"
+    if "QH" in code_upper:
+        return "Luật"
+
+    blob = strip_accents(f"{filename} {title}").lower()
+    if "bo luat" in blob:
+        return "Bộ luật"
+    if "nghi dinh" in blob:
+        return "Nghị định"
+    if "thong tu" in blob:
+        return "Thông tư"
+    if "nghi quyet" in blob:
         return "Nghị quyết"
     if "vbhn" in blob:
         return "Văn bản hợp nhất"
-    if "luật" in blob:
+    if "luat" in blob:
         return "Luật"
     return "Văn bản"
+
+
+def parse_money(raw: str) -> int:
+    """'5.310.000' -> 5310000. Returns 0 when the token is not a number."""
+
+    digits = re.sub(r"[^\d]", "", raw or "")
+    return int(digits) if digits else 0
+
+
+def format_money(value: int) -> str:
+    return f"{value:,}".replace(",", ".")
+
+
+def duration_to_days(quantity: int, unit: str) -> float:
+    unit = strip_accents(unit).lower().strip()
+    factors = {
+        "gio": 1 / 24,
+        "ngay": 1.0,
+        "ngay lam viec": 1.0,
+        "tuan": 7.0,
+        "thang": 30.0,
+        "nam": 365.0,
+    }
+    return quantity * factors.get(unit, 1.0)
+
+
+def canonical_duration(quantity: int, unit: str) -> tuple[str, str]:
+    """Return (canonical key, display label) for a duration mention."""
+
+    unit_key = strip_accents(unit).lower().strip()
+    labels = {
+        "gio": "giờ",
+        "ngay": "ngày",
+        "ngay lam viec": "ngày làm việc",
+        "tuan": "tuần",
+        "thang": "tháng",
+        "nam": "năm",
+    }
+    label = labels.get(unit_key, unit_key)
+    return f"{quantity}-{slugify(label)}", f"{quantity} {label}"
 
 
 def detect_issuer(code: str, filename: str) -> str:
@@ -197,21 +331,90 @@ def dot(a: Iterable[float], b: Iterable[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
-def docx_lines(path: Path) -> list[str]:
-    doc = Document(str(path))
+def _table_lines(table: Any) -> list[str]:
     lines: list[str] = []
-    for paragraph in doc.paragraphs:
-        for raw in paragraph.text.splitlines():
+    for row in table.rows:
+        values: list[str] = []
+        seen_cells: set[int] = set()
+        for cell in row.cells:
+            # Merged cells repeat the same underlying element across the row.
+            marker = id(cell._tc)
+            if marker in seen_cells:
+                continue
+            seen_cells.add(marker)
+            value = normalize_space(cell.text)
+            if value and not is_separator(value):
+                values.append(value)
+        if values:
+            lines.append(" | ".join(values))
+    return lines
+
+
+def _numbering_key(paragraph: Any) -> str:
+    """Identify a Word auto-numbering list, if the paragraph belongs to one.
+
+    Word renders the "Điều 3" prefix from list numbering, which never appears in
+    ``paragraph.text``. Some laws — Luật An toàn, vệ sinh lao động 84/2015 among
+    them — rely on it entirely, so without this the whole document parses as a
+    pile of untitled paragraphs and loses every article boundary.
+    """
+
+    try:
+        properties = paragraph._p.pPr
+        numbering = properties.numPr if properties is not None else None
+        if numbering is None or numbering.numId is None:
+            return "para"
+        level = numbering.ilvl.val if numbering.ilvl is not None else 0
+        return f"num:{numbering.numId.val}:{level}"
+    except Exception:
+        return "para"
+
+
+def docx_blocks(path: Path) -> list[tuple[str, str]]:
+    """Read a .docx as ``(kind, text)`` blocks in true document order.
+
+    ``kind`` is ``"para"``, ``"table"`` or ``"num:<listId>:<level>"``. Reading
+    paragraphs and tables separately (the previous behaviour) appended every
+    table to the end of the document, which detached crucial payloads — the
+    regional minimum-wage table of Nghị định 293/2025 for instance — from the
+    article that introduces them.
+    """
+
+    doc = Document(str(path))
+    blocks: list[tuple[str, str]] = []
+    try:
+        inner = list(doc.iter_inner_content())
+    except AttributeError:  # pragma: no cover - python-docx < 1.1
+        inner = list(doc.paragraphs) + list(doc.tables)
+
+    for item in inner:
+        if hasattr(item, "rows"):
+            for line in _table_lines(item):
+                blocks.append(("table", line))
+            continue
+        kind = _numbering_key(item)
+        for raw in (getattr(item, "text", "") or "").splitlines():
             text = normalize_space(raw)
             if text and not is_separator(text):
-                lines.append(text)
-    for table in doc.tables:
-        for row in table.rows:
-            values = [normalize_space(cell.text) for cell in row.cells]
-            values = [v for v in values if v and not is_separator(v)]
-            if values:
-                lines.append(" | ".join(values))
-    return lines
+                blocks.append((kind, text))
+    return blocks
+
+
+def docx_lines(path: Path) -> list[str]:
+    return [text for _, text in docx_blocks(path)]
+
+
+class _SyntheticArticle:
+    """Stands in for an ARTICLE_RE match when the number came from Word numbering."""
+
+    __slots__ = ("_number", "_heading")
+
+    def __init__(self, number: str, heading: str):
+        self._number = number
+        self._heading = heading
+
+    def group(self, index: int) -> str:
+        return self._number if index == 1 else self._heading
 
 
 class LegalGraphBuilder:
@@ -233,6 +436,12 @@ class LegalGraphBuilder:
         self.clause_lookup: dict[tuple[str, str, str], str] = {}
         self.point_lookup: dict[tuple[str, str, str, str], str] = {}
         self.doc_guides: dict[str, list[str]] = {}
+        self.doc_alias_index: list[tuple[str, str]] = []
+        self.mention_budget: dict[str, int] = {}
+        self._ascii_cache: dict[str, str] = {}
+        self._structural_cache: list[dict[str, Any]] | None = None
+        self._article_cache: list[dict[str, Any]] | None = None
+        self._children_index: dict[str, list[dict[str, Any]]] | None = None
 
     def build(self) -> dict[str, int]:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -244,19 +453,102 @@ class LegalGraphBuilder:
             self._parse_document(path)
 
         self._finalize_node_text()
+        self._register_system_document()
+
+        # Layer 0-1: document lifecycle, cross references, effective dates.
         self._build_document_relations()
+        self._build_effective_dates()
         self._build_reference_edges()
-        self._extract_multi_layer_graph()
+
+        # Layer 2-9: semantic lift over every structural node.
+        self._layer2_terms_and_topics()
+        self._layer3_wage_and_bonus()
+        self._layer4_domain_ontology()
+        self._layer5_procedures()
+        self._layer6_temporal()
+        self._layer7_sanctions_and_risk()
+        self._layer8_lifecycles()
+        self._layer9_precedents()
+
+        self._refresh_path_labels()
         self._build_chunks()
         self._embed_chunks()
         self._write_sqlite()
         self._write_jsonl()
+        return self.summary()
+
+    def summary(self) -> dict[str, Any]:
+        node_types: dict[str, int] = {}
+        for node in self.nodes.values():
+            node_types[node["node_type"]] = node_types.get(node["node_type"], 0) + 1
+        relations: dict[str, int] = {}
+        for edge in self.edges.values():
+            relations[edge["relation"]] = relations.get(edge["relation"], 0) + 1
         return {
             "documents": len(self.docs),
             "nodes": len(self.nodes),
             "edges": len(self.edges),
             "chunks": len(self.chunks),
+            "node_types": dict(sorted(node_types.items(), key=lambda kv: -kv[1])),
+            "relations": dict(sorted(relations.items(), key=lambda kv: -kv[1])),
         }
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _ascii(self, text: str) -> str:
+        cached = self._ascii_cache.get(text)
+        if cached is None:
+            # Lexicon patterns are single-line phrases; flatten line breaks so a
+            # phrase split across two source paragraphs still matches.
+            cached = strip_accents(normalize_space(text)).lower()
+            if len(self._ascii_cache) > 40000:
+                self._ascii_cache.clear()
+            self._ascii_cache[text] = cached
+        return cached
+
+    def _semantic_nodes(self) -> list[dict[str, Any]]:
+        """Structural nodes, snapshotted once: the layer passes add nodes while
+        iterating, and every pass would otherwise rescan the whole graph."""
+
+        if self._structural_cache is None:
+            self._structural_cache = [
+                node for node in self.nodes.values() if node["node_type"] in {"Điều", "Khoản", "Điểm"}
+            ]
+        return self._structural_cache
+
+    def _article_nodes(self) -> list[dict[str, Any]]:
+        if self._article_cache is None:
+            self._article_cache = [node for node in self.nodes.values() if node["node_type"] == "Điều"]
+        return self._article_cache
+
+    def _owning_article(self, node: dict[str, Any]) -> str:
+        cursor: str | None = node["node_id"]
+        seen: set[str] = set()
+        while cursor and cursor in self.nodes and cursor not in seen:
+            seen.add(cursor)
+            current = self.nodes[cursor]
+            if current["node_type"] == "Điều":
+                return cursor
+            cursor = current.get("parent_id")
+        return node["node_id"]
+
+    def _concept_node(
+        self,
+        prefix: str,
+        concept: onto.Concept,
+        node_type: str,
+        doc_id: str = SYSTEM_DOC_ID,
+    ) -> str:
+        node_id = f"{prefix}:{concept.key}"
+        self._add_node(node_id, doc_id, node_type, concept.label, "", concept.label, None, 0)
+        if not self.nodes[node_id]["text"]:
+            self.nodes[node_id]["text"] = f"{concept.label}. {concept.description}"
+        return node_id
+
+    def _link_regulation(self, concept_node_id: str, node: dict[str, Any], relation: str = "QUY_ĐỊNH_TẠI") -> None:
+        self._add_edge(concept_node_id, node["node_id"], relation, f"Quy định tại {node['path_label'] or node['label']}")
 
     def _add_node(
         self,
@@ -304,11 +596,13 @@ class LegalGraphBuilder:
             }
 
     def _parse_document(self, path: Path) -> None:
-        lines = docx_lines(path)
+        blocks = docx_blocks(path)
+        lines = [text for _, text in blocks]
+        paragraphs = [text for kind, text in blocks if kind != "table"]
         filename = path.name
         code = detect_code(filename, lines)
-        doc_type = detect_doc_type(filename, " ".join(lines[:5]))
-        title = smart_doc_title(lines, filename)
+        title = smart_doc_title(paragraphs, filename)
+        doc_type = detect_doc_type(filename, title, code)
         issuer = detect_issuer(code, filename)
         doc_id = slugify(Path(filename).stem)
         doc_node_id = f"doc:{doc_id}"
@@ -330,6 +624,9 @@ class LegalGraphBuilder:
         self._add_node(issuer_id, None, "CơQuanBanHành", issuer, "", issuer, None, 0)
         self._add_edge(issuer_id, doc_node_id, "BAN_HÀNH", issuer)
 
+        kinds = [kind for kind, _ in blocks]
+        auto_article_kind = self._auto_article_kind(blocks)
+        auto_article_number = 0
         current_chapter: str | None = None
         current_section: str | None = None
         current_article: str | None = None
@@ -337,10 +634,31 @@ class LegalGraphBuilder:
         current_point: str | None = None
         current_article_number = ""
         intro: list[str] = []
+        table_seq = 0
         ordinal = 1
         i = 0
         while i < len(lines):
             text = lines[i]
+
+            if kinds[i] == "table":
+                start = i
+                while i < len(lines) and kinds[i] == "table":
+                    i += 1
+                rows = lines[start:i]
+                anchor = current_clause or current_article
+                table_seq += 1
+                ordinal = self._attach_table(
+                    doc_id, doc_node_id, anchor, rows, table_seq, ordinal
+                )
+                if anchor:
+                    payload = "\n".join(rows)
+                    self._append_node_text(current_article, payload)
+                    self._append_node_text(current_clause, payload)
+                    self._append_node_text(current_point, payload)
+                else:
+                    intro.extend(rows)
+                continue
+
             chapter = CHAPTER_RE.match(text)
             if chapter:
                 number = chapter.group(1).upper()
@@ -381,6 +699,9 @@ class LegalGraphBuilder:
                 continue
 
             article = ARTICLE_RE.match(text)
+            if article is None and auto_article_kind and kinds[i] == auto_article_kind:
+                auto_article_number += 1
+                article = _SyntheticArticle(str(auto_article_number), text)
             if article:
                 number = article.group(1)
                 heading = normalize_space(article.group(2))
@@ -450,11 +771,87 @@ class LegalGraphBuilder:
         if intro:
             self._append_node_text(doc_node_id, "\n".join(intro[:50]))
 
+    @staticmethod
+    def _auto_article_kind(blocks: list[tuple[str, str]]) -> str | None:
+        """Pick the Word numbering list that stands in for "Điều N" headings.
+
+        Only used when the document has almost no literal ``Điều N.`` lines, so
+        normally-formatted documents are untouched.
+        """
+
+        explicit = sum(1 for kind, text in blocks if kind != "table" and ARTICLE_RE.match(text))
+        if explicit >= 5:
+            return None
+        counts: dict[str, int] = {}
+        for kind, text in blocks:
+            if not kind.startswith("num:") or not kind.endswith(":0"):
+                continue
+            if len(text) > 250 or CLAUSE_RE.match(text) or POINT_RE.match(text):
+                continue
+            counts[kind] = counts.get(kind, 0) + 1
+        if not counts:
+            return None
+        kind, total = max(counts.items(), key=lambda item: item[1])
+        return kind if total >= 5 else None
+
+    def _attach_table(
+        self,
+        doc_id: str,
+        doc_node_id: str,
+        anchor_id: str | None,
+        rows: list[str],
+        table_seq: int,
+        ordinal: int,
+    ) -> int:
+        """Materialise a table as its own node hanging off the enclosing clause.
+
+        Boilerplate tables (letterheads, "Nơi nhận" distribution lists) carry no
+        legal payload and are skipped so they never pollute retrieval.
+        """
+
+        payload = "\n".join(rows).strip()
+        if not payload or len(rows) < 2:
+            return ordinal
+        ascii_payload = strip_accents(payload).lower()
+        boilerplate = ("noi nhan:", "cong hoa xa hoi chu nghia viet nam", "tm. chinh phu", "luu: vt")
+        if any(marker in ascii_payload for marker in boilerplate) and "vung" not in ascii_payload:
+            return ordinal
+
+        parent = anchor_id or doc_node_id
+        node_id = f"bang:{doc_id}:{table_seq}"
+        caption = self.nodes[parent]["label"] if parent in self.nodes else "Bảng dữ liệu"
+        label = f"Bảng dữ liệu ({caption})"
+        self._add_node(node_id, doc_id, "PhụLục_Bảng", label, str(table_seq), caption, parent, ordinal)
+        self._append_node_text(node_id, payload)
+        self._add_edge(parent, node_id, "CÓ_BẢNG_BIỂU", f"Bảng biểu kèm theo {caption}")
+        self._add_edge(node_id, parent, "THUỘC_VỀ", label)
+        return ordinal + 1
+
     def _finalize_node_text(self) -> None:
         for node in self.nodes.values():
-            node["text"] = normalize_space("\n".join(node.pop("_parts", [])))
+            node["text"] = normalize_block("\n".join(node.pop("_parts", [])))
+        self._refresh_path_labels()
+
+    def _refresh_path_labels(self) -> None:
         for node_id in list(self.nodes):
             self.nodes[node_id]["path_label"] = self._path_label(node_id)
+
+    def _register_system_document(self) -> None:
+        """Synthetic document that owns every cross-corpus semantic entity."""
+
+        self.docs[SYSTEM_DOC_ID] = {
+            "doc_id": SYSTEM_DOC_ID,
+            "filename": "system",
+            "path": "",
+            "title": "Bản đồ tri thức LaborCare",
+            "code": "SYS",
+            "doc_type": "Hệ thống",
+            "issuer": "LaborCare",
+            "text": (
+                "Tập hợp thực thể ngữ nghĩa dùng chung cho toàn bộ đồ thị: thuật ngữ, chủ đề, "
+                "khoản thu nhập, thủ tục, chế tài, giai đoạn vòng đời."
+            ),
+        }
 
     def _path_label(self, node_id: str) -> str:
         chain: list[str] = []
@@ -469,23 +866,70 @@ class LegalGraphBuilder:
         return " > ".join(reversed(chain))
 
     def _doc_aliases(self, doc: dict[str, Any]) -> set[str]:
-        title = strip_accents(doc["title"]).lower()
-        aliases = {title}
+        """Strings that unambiguously name this document inside another one."""
+
+        title = normalize_space(strip_accents(doc["title"]).lower())
+        aliases: set[str] = set()
         code = doc.get("code") or ""
         if code:
             aliases.add(strip_accents(code).lower())
             aliases.add(strip_accents(code.replace("/", "-")).lower())
-        compact = re.sub(r"^(bo luat|luat|nghi dinh|thong tu)\s+", "", title).strip()
-        if compact:
-            aliases.add(compact)
-        return {a for a in aliases if len(a) >= 6}
+
+        type_prefix = strip_accents(doc.get("doc_type") or "").lower()
+        if 10 <= len(title) <= 90 and title.startswith(("bo luat", "luat", "nghi dinh", "thong tu", "nghi quyet")):
+            aliases.add(title)
+        # A bare subject such as "bao hiem xa hoi" appears in every social
+        # insurance document, so the short name is only usable when it is
+        # qualified by the document type: "luat bao hiem xa hoi".
+        compact = re.sub(r"^(bo luat|luat|nghi dinh|thong tu|nghi quyet)\s+", "", title).strip()
+        noise = ("quy dinh", "sua doi", "huong dan", "bo sung", "ban hanh", "ve viec")
+        if type_prefix and 6 <= len(compact) <= 70 and not compact.startswith(noise):
+            aliases.add(f"{type_prefix} {compact}")
+        return {alias for alias in aliases if len(alias) >= 8}
+
+    def _build_alias_index(self) -> None:
+        """Longest-first alias list used to resolve "Điều X của <văn bản>" refs."""
+
+        entries: list[tuple[str, str]] = []
+        for doc_id, doc in self.docs.items():
+            if doc_id == SYSTEM_DOC_ID:
+                continue
+            for alias in self._doc_aliases(doc):
+                entries.append((alias, doc_id))
+        entries.sort(key=lambda item: len(item[0]), reverse=True)
+        self.doc_alias_index = entries
+
+    def _resolve_referenced_doc(self, window_ascii: str, source_doc_id: str) -> str | None:
+        """Which document does a citation window point at, if not the current one."""
+
+        if "bo luat nay" in window_ascii or "luat nay" in window_ascii or "nghi dinh nay" in window_ascii:
+            return source_doc_id
+        for alias, doc_id in self.doc_alias_index:
+            if doc_id != source_doc_id and alias in window_ascii:
+                return doc_id
+        return None
 
     def _build_document_relations(self) -> None:
-        doc_aliases = {doc_id: self._doc_aliases(doc) for doc_id, doc in self.docs.items()}
+        self._build_alias_index()
+        doc_aliases = {
+            doc_id: self._doc_aliases(doc)
+            for doc_id, doc in self.docs.items()
+            if doc_id != SYSTEM_DOC_ID
+        }
         for source_id, source_doc in self.docs.items():
-            source_text = strip_accents(source_doc["text"][:8000]).lower()
+            if source_id == SYSTEM_DOC_ID:
+                continue
+            source_text = normalize_space(strip_accents(source_doc["text"][:12000]).lower())
+            source_title = normalize_space(strip_accents(source_doc["title"]).lower())
             guide_targets: list[str] = []
-            source_type = source_doc["doc_type"].lower()
+            source_type = source_doc["doc_type"]
+            source_node = f"doc:{source_id}"
+            # An amending document announces itself in its own title
+            # ("Luật Sửa đổi, bổ sung một số điều của Luật Bảo hiểm y tế"), so
+            # the title is a far cleaner signal than scanning the body.
+            is_amendment = bool(re.search(r"sua doi|bo sung", source_title))
+            is_replacement = "thay the" in source_title
+
             for target_id, aliases in doc_aliases.items():
                 if source_id == target_id:
                     continue
@@ -493,17 +937,36 @@ class LegalGraphBuilder:
                 found_alias = next((alias for alias in aliases if alias in source_text), "")
                 if not found_alias:
                     continue
-                source_node = f"doc:{source_id}"
                 target_node = f"doc:{target_id}"
-                evidence = found_alias
-                if source_type in {"nghị định", "thông tư"} and target_doc["doc_type"] in {"Luật", "Bộ luật"}:
-                    self._add_edge(source_node, target_node, "HƯỚNG_DẪN", evidence)
+                named_in_title = any(alias in source_title for alias in aliases)
+
+                if is_amendment and named_in_title:
+                    self._add_edge(source_node, target_node, "SỬA_ĐỔI", found_alias)
+                if is_replacement and named_in_title:
+                    self._add_edge(source_node, target_node, "THAY_THẾ", found_alias)
+
+                is_subordinate = source_type in {"Nghị định", "Thông tư", "Quyết định"}
+                is_primary_target = target_doc["doc_type"] in {"Luật", "Bộ luật", "Nghị định"}
+                if is_subordinate and is_primary_target and target_doc["doc_type"] != source_type:
+                    self._add_edge(source_node, target_node, "HƯỚNG_DẪN", found_alias)
                     guide_targets.append(target_id)
-                elif re.search(r"(sua doi|bo sung)", source_text) and target_doc["doc_type"] in {"Luật", "Bộ luật"}:
-                    self._add_edge(source_node, target_node, "SỬA_ĐỔI", evidence)
-                elif "thay the" in source_text:
-                    self._add_edge(source_node, target_node, "THAY_THẾ", evidence)
             self.doc_guides[source_id] = guide_targets
+
+    def _build_effective_dates(self) -> None:
+        for doc_id, doc in self.docs.items():
+            if doc_id == SYSTEM_DOC_ID:
+                continue
+            match = EFFECTIVE_DATE_RE.search(doc["text"])
+            if not match:
+                continue
+            day, month, year = match.group(1).zfill(2), match.group(2).zfill(2), match.group(3)
+            iso = f"{year}-{month}-{day}"
+            node_id = f"hieuluc:{iso}"
+            label = f"Hiệu lực từ {day}/{month}/{year}"
+            self._add_node(node_id, SYSTEM_DOC_ID, "HiệuLựcVănBản", label, iso, label, None, 0)
+            self.nodes[node_id]["text"] = f"Mốc thời điểm văn bản có hiệu lực thi hành: ngày {day}/{month}/{year}."
+            self._add_edge(f"doc:{doc_id}", node_id, "CÓ_HIỆU_LỰC_TỪ", normalize_space(match.group(0)))
+            doc["effective_date"] = iso
 
     def _build_reference_edges(self) -> None:
         for node_id, node in self.nodes.items():
@@ -513,359 +976,779 @@ class LegalGraphBuilder:
             if not text:
                 continue
             source_doc_id = node["doc_id"]
-            target_docs = [source_doc_id] + [d for d in self.doc_guides.get(source_doc_id, []) if d != source_doc_id]
+            guides = [d for d in self.doc_guides.get(source_doc_id, []) if d != source_doc_id]
             for match in ARTICLE_REF_RE.finditer(text):
                 point_no, clause_no, article_no = match.groups()
                 article_key = article_no.lower()
-                window = text[max(0, match.start() - 90) : match.end() + 120]
-                if "Điều này" in window:
+                window = text[max(0, match.start() - 110) : match.end() + 140]
+                if "Điều này" in window[: 110 + len(match.group(0)) + 12]:
                     continue
+                window_ascii = strip_accents(window).lower()
+
+                # An explicit "… của Bộ luật Lao động" wins over the local
+                # document; otherwise fall back to self, then to guided laws.
+                explicit = self._resolve_referenced_doc(window_ascii, source_doc_id)
+                if explicit:
+                    target_docs = [explicit]
+                else:
+                    target_docs = [source_doc_id, *guides]
+
                 for target_doc_id in target_docs:
                     target_id = None
-                    if clause_no:
-                        target_id = self.clause_lookup.get((target_doc_id, article_key, clause_no))
                     if point_no and clause_no:
-                        target_id = self.point_lookup.get((target_doc_id, article_key, clause_no, point_no.lower()))
+                        target_id = self.point_lookup.get(
+                            (target_doc_id, article_key, clause_no, point_no.lower())
+                        )
+                    if not target_id and clause_no:
+                        target_id = self.clause_lookup.get((target_doc_id, article_key, clause_no))
                     if not target_id:
                         target_id = self.article_lookup.get((target_doc_id, article_key))
                     if target_id:
                         self._add_edge(node_id, target_id, "DẪN_CHIẾU_ĐẾN", normalize_space(window))
+                        break
 
-    def _extract_multi_layer_graph(self) -> None:
-        # Create a system document to avoid orphaned references
-        self.docs["he-thong"] = {
-            "doc_id": "he-thong",
-            "filename": "system",
-            "path": "",
-            "title": "Hệ thống tri thức số",
-            "code": "SYS",
-            "doc_type": "Hệ thống",
-            "issuer": "LaborCare",
-            "text": "Định nghĩa và thực thể hệ thống phục vụ cho đa tầng GraphRAG."
-        }
+    # ------------------------------------------------------------------
+    # Layer 2 - legal terms mined from the corpus + topic map
+    # ------------------------------------------------------------------
 
-        structural_nodes = [node for node in self.nodes.values() if node["node_type"] in {"Điều", "Khoản", "Điểm"}]
-        
-        # Layer 6: Employee Lifecycle stages
-        stages_nld = [
-            ("lifecycle_nld:tuyen-dung", "Tuyển dụng", "Giai đoạn bắt đầu tìm kiếm và tuyển chọn nhân sự."),
-            ("lifecycle_nld:thu-viec", "Thử việc", "Giai đoạn thử thách, kiểm tra tay nghề và mức độ phù hợp."),
-            ("lifecycle_nld:ky-hdld", "Ký HĐLĐ chính thức", "Giai đoạn xác lập quan hệ lao động chính thức bằng văn bản."),
-            ("lifecycle_nld:lam-viec", "Làm việc & Hưởng chế độ", "Giai đoạn thực hiện công việc và nhận lương, BHXH, công đoàn."),
-            ("lifecycle_nld:thai-san-om-dau", "Thai sản / Ốm đau", "Giai đoạn nghỉ hưởng chế độ bảo hiểm xã hội."),
-            ("lifecycle_nld:cham-dut-hdld", "Chấm dứt HĐLĐ", "Giai đoạn dừng quan hệ lao động (hợp pháp hoặc đơn phương)."),
-            ("lifecycle_nld:nghi-huu", "Nghỉ hưu", "Giai đoạn kết thúc độ tuổi lao động và hưởng lương hưu.")
+    def _layer2_terms_and_topics(self) -> None:
+        term_nodes = self._mine_definitions()
+        self._seed_missing_terms(term_nodes)
+        self._link_term_mentions(term_nodes)
+        self._build_topic_map()
+
+    def _mine_definitions(self) -> dict[str, str]:
+        """Harvest "X là ..." definitions from every "Giải thích từ ngữ" article.
+
+        This replaces the previous hand-written dictionary of 12 terms: every
+        law in the corpus carries its own glossary article, so the graph now
+        learns hundreds of authoritative definitions straight from the source.
+        """
+
+        term_nodes: dict[str, str] = {}
+        definition_articles = [
+            node for node in self._article_nodes() if DEFINITION_ARTICLE_RE.search(node["title"] or node["label"])
         ]
-        for node_id, label, text in stages_nld:
-            self._add_node(node_id, doc_id="he-thong", node_type="GiaiĐoạn_NLĐ", label=label, title=label, parent_id=None)
-            self.nodes[node_id]["text"] = text
-            
-        for idx in range(len(stages_nld) - 1):
-            self._add_edge(stages_nld[idx][0], stages_nld[idx + 1][0], "GIAI_DOẠN_TIẾP_THEO", f"{stages_nld[idx][1]} sang {stages_nld[idx + 1][1]}")
+        for article in definition_articles:
+            for clause_id, clause in self._children_of(article["node_id"], "Khoản"):
+                body = clause.get("text") or ""
+                match = DEFINITION_RE.match(body)
+                if not match:
+                    continue
+                term = normalize_space(match.group("term"))
+                term = re.sub(r"^\d{1,3}[\.\)]\s*", "", term).strip()
+                if not (3 <= len(term) <= 80) or term.lower().startswith(("trong ", "các từ ngữ")):
+                    continue
+                definition = normalize_space(match.group("body"))[:900]
+                key = slugify(term)
+                node_id = f"thuatngu:{key}"
+                created = node_id not in self.nodes
+                self._add_node(node_id, SYSTEM_DOC_ID, "ThuậtNgữ", term, "", term, None, 0)
+                if created or not self.nodes[node_id]["text"]:
+                    self.nodes[node_id]["text"] = f"{term} là {definition}"
+                self._add_edge(
+                    node_id,
+                    clause_id,
+                    "ĐƯỢC_ĐỊNH_NGHĨA_LÀ",
+                    f"Định nghĩa tại {clause['path_label'] or clause['label']}",
+                )
+                self._add_edge(node_id, article["node_id"], "ĐƯỢC_ĐỊNH_NGHĨA_LÀ", article["label"])
+                term_nodes[self._ascii(term)] = node_id
+        return term_nodes
 
-        # Layer 6: Company Lifecycle stages
-        stages_dn = [
-            ("lifecycle_dn:thanh-lap", "Thành lập", "Giai đoạn bắt đầu thành lập doanh nghiệp."),
-            ("lifecycle_dn:tuyen-dung-ld", "Tuyển dụng lao động", "Giai đoạn tuyển dụng nhân sự."),
-            ("lifecycle_dn:khai-bao-ld", "Khai báo sử dụng lao động", "Khai báo tình hình sử dụng lao động với cơ quan quản lý."),
-            ("lifecycle_dn:thang-bang-luong", "Xây dựng thang bảng lương", "Xây dựng hệ thống thang lương, bảng lương."),
-            ("lifecycle_dn:ban-hanh-noi-quy", "Ban hành nội quy", "Xây dựng và đăng ký nội quy lao động."),
-            ("lifecycle_dn:dong-bhxh", "Đóng bảo hiểm xã hội", "Đóng bảo hiểm xã hội bắt buộc cho người lao động."),
-            ("lifecycle_dn:giai-the", "Giải thể / Phá sản", "Chấm dứt hoạt động của doanh nghiệp.")
+    def _children_of(self, parent_id: str, node_type: str) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            (node_id, node)
+            for node_id, node in self.nodes.items()
+            if node.get("parent_id") == parent_id and node["node_type"] == node_type
         ]
-        for node_id, label, text in stages_dn:
-            self._add_node(node_id, doc_id="he-thong", node_type="GiaiĐoạn_DoanhNghiệp", label=label, title=label, parent_id=None)
-            self.nodes[node_id]["text"] = text
-            
-        for idx in range(len(stages_dn) - 1):
-            self._add_edge(stages_dn[idx][0], stages_dn[idx + 1][0], "GIAI_DOẠN_TIẾP_THEO", f"{stages_dn[idx][1]} sang {stages_dn[idx + 1][1]}")
 
-        # Layer 7: Risk Levels
-        risk_levels = [
-            ("ruiro:thap", "Mức độ rủi ro: Thấp", "Nhắc nhở hoặc phạt hành chính nhẹ."),
-            ("ruiro:vua", "Mức độ rủi ro: Vừa", "Phạt tiền hành chính ở mức trung bình."),
-            ("ruiro:nghiem-trong", "Mức độ rủi ro: Nghiêm trọng", "Bồi thường thiệt hại lớn, đình chỉ hoạt động hoặc xử lý hình sự.")
-        ]
-        for node_id, label, text in risk_levels:
-            self._add_node(node_id, doc_id="he-thong", node_type="MứcĐộRủiRo", label=label, title=label, parent_id=None)
-            self.nodes[node_id]["text"] = text
+    def _seed_missing_terms(self, term_nodes: dict[str, str]) -> None:
+        for term, definition in onto.SEED_TERMS.items():
+            ascii_term = self._ascii(term)
+            if ascii_term in term_nodes:
+                continue
+            node_id = f"thuatngu:{slugify(term)}"
+            self._add_node(node_id, SYSTEM_DOC_ID, "ThuậtNgữ", term.title(), "", term.title(), None, 0)
+            if not self.nodes[node_id]["text"]:
+                self.nodes[node_id]["text"] = f"{term.title()} là {definition}"
+            term_nodes[ascii_term] = node_id
 
-        TERMS = {
-            "người lao động": "Người làm việc cho người sử dụng lao động theo thỏa thuận, được trả lương và chịu sự quản lý, điều hành, giám sát.",
-            "người sử dụng lao động": "Doanh nghiệp, cơ quan, tổ chức, hợp tác xã, hộ gia đình, cá nhân có thuê mướn, sử dụng lao động làm việc cho mình theo thỏa thuận.",
-            "hợp đồng lao động": "Sự thỏa thuận giữa người lao động và người sử dụng lao động về việc làm có trả công, tiền lương, điều kiện lao động, quyền và nghĩa vụ của mỗi bên.",
-            "thử việc": "Thỏa thuận về việc làm thử, quyền và nghĩa vụ của hai bên trong thời gian thử việc.",
-            "tiền lương": "Số tiền mà người sử dụng lao động trả cho người lao động để thực hiện công việc theo thỏa thuận.",
-            "lương tối thiểu": "Mức lương thấp nhất được trả cho người lao động làm công việc giản đơn nhất trong điều kiện lao động bình thường.",
-            "kỷ luật lao động": "Những quy định về việc tuân theo thời gian, công nghệ và điều hành sản xuất, kinh doanh do người sử dụng lao động ban hành.",
-            "sa thái": "Hình thức xử lý kỷ luật sa thái đối với người lao động có hành vi vi phạm nghiêm trọng.",
-            "trợ cấp thôi việc": "Khoản trợ cấp trả cho người lao động đã làm việc thường xuyên từ đủ 12 tháng trở lên khi chấm dứt hợp đồng lao động hợp pháp.",
-            "trợ cấp mất việc làm": "Khoản trợ cấp trả cho người lao động đã làm việc thường xuyên từ đủ 12 tháng trở lên bị mất việc làm do thay đổi cơ cấu, công nghệ.",
-            "bảo hiểm xã hội": "Sự bảo đảm thay thế hoặc bù đắp một phần thu nhập của người lao động khi họ bị giảm hoặc mất thu nhập do ốm đau, thai sản, tai nạn lao động, bệnh nghề nghiệp, hết tuổi lao động hoặc chết.",
-            "công đoàn": "Tổ chức chính trị - xã hội rộng lớn của giai cấp công nhân và của người lao động được thành lập trên cơ sở tự nguyện."
-        }
+    def _link_term_mentions(self, term_nodes: dict[str, str]) -> None:
+        """Connect terms to the articles that *use* them.
 
-        for term, desc in TERMS.items():
-            t_id = f"thuatngu:{slugify(term)}"
-            self._add_node(t_id, doc_id="he-thong", node_type="ThuậtNgữ", label=term.title(), title=term.title(), parent_id=None)
-            self.nodes[t_id]["text"] = desc
+        Mentions are a weak signal, so they are capped per term and only drawn
+        at article level - the old builder emitted 10k DEFINED_AS edges for
+        plain mentions, which drowned the real definitions during expansion.
+        """
 
-        for node in structural_nodes:
-            text = node["text"]
-            doc_id = node["doc_id"]
-            node_id = node["node_id"]
-            text_lower = text.lower()
-            
-            # --- LAYER 2: Legal Semantic Spectrum ---
-            for term, desc in TERMS.items():
-                if term in text_lower:
-                    t_id = f"thuatngu:{slugify(term)}"
-                    if any(pattern in text_lower for pattern in [f"{term} là", f"{term} được hiểu là", f"định nghĩa {term}"]):
-                        self._add_edge(t_id, node_id, "ĐƯỢC_ĐỊNH_NGHĨA_LÀ", f"Định nghĩa tại {node['label']}")
-                    else:
-                        self._add_edge(t_id, node_id, "ĐƯỢC_ĐỊNH_NGHĨA_LÀ", f"Sử dụng thuật ngữ tại {node['label']}")
+        ranked = sorted(term_nodes.items(), key=lambda kv: -len(kv[0]))
+        for ascii_term, node_id in ranked:
+            if len(ascii_term) < 8:
+                continue
+            used = 0
+            for article in self._article_nodes():
+                if used >= MAX_MENTION_EDGES_PER_TERM:
+                    break
+                haystack = self._ascii(f"{article['label']} {article.get('text') or ''}")
+                if ascii_term not in haystack:
+                    continue
+                in_title = ascii_term in self._ascii(article["label"])
+                if not in_title and haystack.count(ascii_term) < 2:
+                    continue
+                self._add_edge(node_id, article["node_id"], "ĐỀ_CẬP_ĐẾN", article["label"])
+                used += 1
 
-            formulas = [
-                ("tiền lương làm thêm giờ", "Cách tính lương làm thêm giờ"),
-                ("trợ cấp thôi việc", "Cách tính trợ cấp thôi việc"),
-                ("trợ cấp mất việc", "Cách tính trợ cấp mất việc làm"),
-                ("thai sản", "Mức hưởng chế độ thai sản"),
-                ("hưu trí", "Cách tính lương hưu"),
-                ("lương tối thiểu", "Áp dụng lương tối thiểu vùng")
+    def _build_topic_map(self) -> None:
+        topic_ids: dict[str, str] = {}
+        for topic in onto.TOPICS:
+            node_id = self._concept_node("chude", topic, "ChủĐề")
+            topic_ids[topic.key] = node_id
+
+        doc_topic_hits: dict[str, dict[str, int]] = {}
+        for article in self._article_nodes():
+            haystack = self._ascii(f"{article['label']} {article.get('text') or ''}")
+            scored: list[tuple[int, onto.Concept]] = []
+            for topic in onto.TOPICS:
+                hits = sum(haystack.count(pattern) for pattern in topic.patterns)
+                if hits:
+                    scored.append((hits, topic))
+            scored.sort(key=lambda item: -item[0])
+            for hits, topic in scored[:3]:
+                self._add_edge(
+                    article["node_id"], topic_ids[topic.key], "THUỘC_CHỦ_ĐỀ", f"{hits} lần đề cập"
+                )
+                bucket = doc_topic_hits.setdefault(article["doc_id"], {})
+                bucket[topic.key] = bucket.get(topic.key, 0) + hits
+
+        for doc_id, hits in doc_topic_hits.items():
+            for topic_key, count in sorted(hits.items(), key=lambda kv: -kv[1])[:4]:
+                self._add_edge(
+                    f"doc:{doc_id}", topic_ids[topic_key], "THUỘC_CHỦ_ĐỀ", f"{count} lần đề cập trong văn bản"
+                )
+
+    # ------------------------------------------------------------------
+    # Layer 3 - tiền lương & tiền thưởng
+    # ------------------------------------------------------------------
+
+    def _layer3_wage_and_bonus(self) -> None:
+        component_ids: dict[str, str] = {}
+        for concept, parent_key in onto.WAGE_COMPONENTS:
+            component_ids[concept.key] = self._concept_node("thunhap", concept, "KhoảnThuNhập")
+        for concept, parent_key in onto.WAGE_COMPONENTS:
+            if parent_key and parent_key in component_ids:
+                self._add_edge(
+                    component_ids[concept.key],
+                    component_ids[parent_key],
+                    "CẤU_THÀNH_LƯƠNG",
+                    f"{concept.label} là một cấu phần của {parent_key.replace('-', ' ')}",
+                )
+
+        bonus_ids = {c.key: self._concept_node("thuong", c, "LoạiThưởng") for c in onto.BONUS_TYPES}
+        form_ids = {c.key: self._concept_node("hinhthuctra", c, "HìnhThứcTrảLương") for c in onto.PAY_FORMS}
+        period_ids = {c.key: self._concept_node("kyhantra", c, "KỳHạnTrảLương") for c in onto.PAY_PERIODS}
+        base_ids = {c.key: self._concept_node("cancutinh", c, "CănCứTínhLương") for c in onto.WAGE_BASES}
+        formula_ids = {c.key: self._concept_node("cachtinh", c, "CáchTính_CôngThức") for c in onto.WAGE_FORMULAS}
+
+        rate_hints = {key: hints for key, hints in onto.WAGE_RATE_HINTS}
+        wage_topic = "chude:tien-luong-tien-thuong"
+
+        for node in self._semantic_nodes():
+            if node["node_type"] == "Điểm":
+                continue
+            text = node.get("text") or ""
+            if not text:
+                continue
+            ascii_text = self._ascii(f"{node['label']} {text}")
+            if "luong" not in ascii_text and "thuong" not in ascii_text:
+                continue
+
+            matched_components: list[str] = []
+            for concept, _parent in onto.WAGE_COMPONENTS:
+                if concept.matches(ascii_text):
+                    matched_components.append(concept.key)
+                    self._link_regulation(component_ids[concept.key], node)
+
+            for concept in onto.BONUS_TYPES:
+                if concept.matches(ascii_text):
+                    self._link_regulation(bonus_ids[concept.key], node)
+                    self._add_edge(
+                        bonus_ids[concept.key],
+                        component_ids["tien-thuong"],
+                        "CẤU_THÀNH_LƯƠNG",
+                        "Hình thái của tiền thưởng",
+                    )
+
+            for concept in onto.PAY_FORMS:
+                if concept.matches(ascii_text):
+                    self._link_regulation(form_ids[concept.key], node)
+                    self._add_edge(
+                        component_ids["tien-luong"], form_ids[concept.key], "TRẢ_THEO_HÌNH_THỨC", node["label"]
+                    )
+
+            for concept in onto.PAY_PERIODS:
+                if concept.matches(ascii_text):
+                    self._link_regulation(period_ids[concept.key], node)
+                    self._add_edge(
+                        component_ids["tien-luong"], period_ids[concept.key], "CÓ_KỲ_HẠN_TRẢ", node["label"]
+                    )
+
+            for concept in onto.WAGE_BASES:
+                if concept.matches(ascii_text):
+                    self._link_regulation(base_ids[concept.key], node)
+                    for component_key in matched_components:
+                        self._add_edge(
+                            component_ids[component_key],
+                            base_ids[concept.key],
+                            "CĂN_CỨ_TÍNH",
+                            f"Căn cứ tính nêu tại {node['label']}",
+                        )
+
+            for concept in onto.WAGE_FORMULAS:
+                if not concept.matches(ascii_text):
+                    continue
+                if not any(marker in ascii_text for marker in ("tinh", "muc huong", "bang", "binh quan", "%")):
+                    continue
+                formula_id = formula_ids[concept.key]
+                self._add_edge(formula_id, node["node_id"], "ÁP_DỤNG_CHO", f"Quy định tại {node['label']}")
+                self._attach_parameters(formula_id, text, node)
+
+            self._attach_wage_rates(node, text, ascii_text, matched_components, rate_hints, component_ids)
+
+            if "khau tru" in ascii_text and "luong" in ascii_text:
+                self._add_edge(
+                    component_ids["khau-tru-tien-luong"],
+                    component_ids["tien-luong"],
+                    "BỊ_KHẤU_TRỪ_TỪ",
+                    node["label"],
+                )
+
+            if matched_components:
+                self._add_edge(node["node_id"], wage_topic, "THUỘC_CHỦ_ĐỀ", "Nội dung về tiền lương/tiền thưởng")
+
+        self._parse_minimum_wage_tables(component_ids)
+
+    def _attach_wage_rates(
+        self,
+        node: dict[str, Any],
+        text: str,
+        ascii_text: str,
+        matched_components: list[str],
+        rate_hints: dict[str, tuple[str, ...]],
+        component_ids: dict[str, str],
+    ) -> None:
+        percents = {match.group(1).replace(",", ".") for match in PERCENT_RE.finditer(text)}
+        if not percents:
+            return
+        for component_key in matched_components:
+            hints = rate_hints.get(component_key)
+            if not hints or not any(hint in ascii_text for hint in hints):
+                continue
+            for percent in sorted(percents):
+                label = f"{percent}%"
+                rate_id = f"tyle:{slugify(label)}"
+                self._add_node(rate_id, SYSTEM_DOC_ID, "TỷLệHưởng", label, label, label, None, 0)
+                if not self.nodes[rate_id]["text"]:
+                    self.nodes[rate_id]["text"] = f"Tỷ lệ luật định {label}."
+                self._add_edge(
+                    component_ids[component_key],
+                    rate_id,
+                    "CÓ_MỨC_HƯỞNG",
+                    normalize_space(f"{label} theo {node['label']}"),
+                )
+                self._link_regulation(rate_id, node)
+
+    def _attach_parameters(self, formula_id: str, text: str, node: dict[str, Any]) -> None:
+        for match in PERCENT_RE.finditer(text):
+            label = f"{match.group(1).replace(',', '.')}%"
+            param_id = f"thamso:{slugify(label)}"
+            self._add_node(param_id, SYSTEM_DOC_ID, "ThamSố_ConSố", label, label, label, None, 0)
+            if not self.nodes[param_id]["text"]:
+                self.nodes[param_id]["text"] = f"Tham số tỷ lệ phần trăm luật định: {label}."
+            self._add_edge(formula_id, param_id, "CÓ_THAM_SỐ", f"Tỷ lệ {label} tại {node['label']}")
+        for match in DURATION_RE.finditer(text):
+            quantity = int(match.group(1))
+            if quantity > 400:
+                continue
+            key, label = canonical_duration(quantity, match.group(2))
+            param_id = f"thamso:{key}"
+            self._add_node(param_id, SYSTEM_DOC_ID, "ThamSố_ConSố", label, str(quantity), label, None, 0)
+            if not self.nodes[param_id]["text"]:
+                self.nodes[param_id]["text"] = f"Tham số thời gian luật định: {label}."
+            self._add_edge(formula_id, param_id, "CÓ_THAM_SỐ", f"Mốc {label} tại {node['label']}")
+
+    def _parse_minimum_wage_tables(self, component_ids: dict[str, str]) -> None:
+        """Turn "Vùng I | 5.310.000 | 25.500" rows into queryable wage nodes."""
+
+        for node in list(self.nodes.values()):
+            if node["node_type"] != "PhụLục_Bảng":
+                continue
+            text = node.get("text") or ""
+            if "Vùng" not in text:
+                continue
+            doc = self.docs.get(node["doc_id"], {})
+            code = doc.get("code") or node["doc_id"]
+            for match in REGION_WAGE_RE.finditer(text):
+                region = match.group(1).upper()
+                monthly = parse_money(match.group(2))
+                hourly = parse_money(match.group(3))
+                if monthly < 1_000_000:
+                    continue
+                node_id = f"luongtoithieu:{slugify(code)}:vung-{region.lower()}"
+                label = f"Lương tối thiểu vùng {region} theo {code}"
+                self._add_node(node_id, node["doc_id"], "MứcLươngTốiThiểu", label, region, label, node["node_id"], 0)
+                self.nodes[node_id]["text"] = (
+                    f"Mức lương tối thiểu vùng {region} theo {code}: "
+                    f"{format_money(monthly)} đồng/tháng và {format_money(hourly)} đồng/giờ."
+                )
+                self._add_edge(
+                    component_ids["muc-luong-toi-thieu"],
+                    node_id,
+                    "ÁP_DỤNG_VÙNG",
+                    f"Vùng {region}: {format_money(monthly)} đồng/tháng",
+                )
+                self._add_edge(node_id, node["node_id"], "QUY_ĐỊNH_TẠI", node["label"])
+                for amount, unit in ((monthly, "đồng/tháng"), (hourly, "đồng/giờ")):
+                    if amount <= 0:
+                        continue
+                    amount_id = f"sotien:{amount}"
+                    amount_label = f"{format_money(amount)} đồng"
+                    self._add_node(amount_id, SYSTEM_DOC_ID, "SốTiền", amount_label, str(amount), amount_label, None, 0)
+                    if not self.nodes[amount_id]["text"]:
+                        self.nodes[amount_id]["text"] = f"Số tiền {amount_label}."
+                    self._add_edge(node_id, amount_id, "CÓ_SỐ_TIỀN", f"{amount_label} ({unit})")
+
+    # ------------------------------------------------------------------
+    # Layer 4 - subjects, contracts, events, benefits, obligations
+    # ------------------------------------------------------------------
+
+    def _layer4_domain_ontology(self) -> None:
+        subject_ids = {c.key: self._concept_node("chuthe", c, "ChủThể") for c in onto.SUBJECTS}
+        contract_ids = {c.key: self._concept_node("hopdong", c, "HợpĐồngLaoĐộng") for c in onto.CONTRACT_TYPES}
+        event_ids = {c.key: self._concept_node("hanhvi", c, "HànhVi_SựKiện") for c in onto.EVENTS}
+        benefit_ids = {c.key: self._concept_node("chedo", c, "ChếĐộ_QuyềnLợi") for c in onto.BENEFITS}
+        obligation_ids = {c.key: self._concept_node("nghiavu", c, "NghĩaVụ") for c in onto.OBLIGATIONS}
+
+        prohibition_markers = ("nghiem cam", "khong duoc", "bi cam", "cam nguoi su dung lao dong", "trai phap luat")
+
+        for node in self._semantic_nodes():
+            if node["node_type"] == "Điểm":
+                continue
+            text = node.get("text") or ""
+            if not text:
+                continue
+            ascii_text = self._ascii(f"{node['label']} {text}")
+
+            active_subjects = [
+                key for key, concept in ((c.key, c) for c in onto.SUBJECTS) if concept.matches(ascii_text)
             ]
-            for kw, name in formulas:
-                if kw in text_lower and any(calc in text_lower for calc in ["tính", "công thức", "mức hưởng", "bình quân", "phần trăm"]):
-                    f_id = f"cachtinh:{doc_id}:{slugify(kw)}"
-                    self._add_node(f_id, doc_id=doc_id, node_type="CáchTính_CôngThức", label=name, title=name, parent_id=node_id)
-                    self.nodes[f_id]["text"] = f"Phương pháp/cách tính {name} được quy định tại {node['label']}."
-                    self._add_edge(f_id, node_id, "ÁP_DỤNG_CHO", f"Quy định tại {node['label']}")
+            for key in active_subjects:
+                self._link_regulation(subject_ids[key], node)
 
-                    for pct in re.findall(r"\b\d+%\b", text):
-                        p_id = f"thamso:{slugify(pct)}"
-                        self._add_node(p_id, doc_id=doc_id, node_type="ThamSố_ConSố", label=pct, title=pct, parent_id=f_id)
-                        self.nodes[p_id]["text"] = f"Mức tỷ lệ phần trăm quy định: {pct}"
-                        self._add_edge(f_id, p_id, "CÓ_THAM_SỐ", f"Mức tỷ lệ {pct}")
+            active_contracts = [c.key for c in onto.CONTRACT_TYPES if c.matches(ascii_text)]
+            for key in active_contracts:
+                self._link_regulation(contract_ids[key], node)
+                for subject_key in active_subjects:
+                    if subject_key in {"nguoi-lao-dong", "nguoi-su-dung-lao-dong"}:
+                        self._add_edge(
+                            subject_ids[subject_key], contract_ids[key], "KÝ_KẾT", node["label"]
+                        )
 
-                    for dur in re.findall(r"\b\d+\s*(?:ngày|tháng|năm|giờ)\b", text_lower):
-                        p_id = f"thamso:{slugify(dur)}"
-                        self._add_node(p_id, doc_id=doc_id, node_type="ThamSố_ConSố", label=dur.strip(), title=dur.strip(), parent_id=f_id)
-                        self.nodes[p_id]["text"] = f"Mốc thời gian luật định: {dur.strip()}"
-                        self._add_edge(f_id, p_id, "CÓ_THAM_SỐ", f"Mốc thời hạn {dur}")
+            is_prohibition = any(marker in ascii_text for marker in prohibition_markers)
+            for concept in onto.EVENTS:
+                if not concept.matches(ascii_text):
+                    continue
+                event_id = event_ids[concept.key]
+                self._link_regulation(event_id, node)
+                for subject_key in active_subjects:
+                    self._add_edge(subject_ids[subject_key], event_id, "THỰC_HIỆN", node["label"])
+                if is_prohibition:
+                    self._add_edge(
+                        event_id, node["node_id"], "BỊ_NGHIÊM_CẤM", normalize_space(text[:220])
+                    )
 
-            # --- LAYER 3: Domain Ontology ---
-            subjects = {
-                "người lao động": "chuthe:nguoi-lao-dong",
-                "người sử dụng lao động": "chuthe:nguoi-su-dung-lao-dong",
-                "công đoàn": "chuthe:cong-doan",
-                "thanh tra lao động": "chuthe:thanh-tra-lao-dong",
-                "bảo hiểm xã hội": "chuthe:co-quan-bhxh"
-            }
-            active_subjects = []
-            for name, s_id in subjects.items():
-                if name in text_lower:
-                    active_subjects.append(s_id)
-                    self._add_node(s_id, doc_id="he-thong", node_type="ChủThể", label=name.title(), title=name.title())
-                    self.nodes[s_id]["text"] = f"Chủ thể pháp lý lao động: {name.title()}"
-                    
-            contracts = {
-                "không xác định thời hạn": "hopdong:khong-xac-dinh-thoi-han",
-                "xác định thời hạn": "hopdong:xac-dinh-thoi-han",
-                "thử việc": "hopdong:thu-viec"
-            }
-            active_contracts = []
-            for c_name, c_id in contracts.items():
-                if c_name in text_lower:
-                    active_contracts.append(c_id)
-                    self._add_node(c_id, doc_id=doc_id, node_type="HợpĐồngLaoĐộng", label=f"HĐ {c_name.title()}", title=f"Hợp đồng {c_name}")
-                    self.nodes[c_id]["text"] = f"Loại hợp đồng lao động: {c_name.title()}"
-                    self._add_edge(c_id, node_id, "BỊ_NẰM_TRONG_DANH_MỤC_CẤM", f"Quy định tại {node['label']}")
+            for concept in onto.BENEFITS:
+                if not concept.matches(ascii_text):
+                    continue
+                benefit_id = benefit_ids[concept.key]
+                self._link_regulation(benefit_id, node)
+                self._add_edge(
+                    subject_ids["nguoi-lao-dong"], benefit_id, "CÓ_QUYỀN_HƯỞNG", node["label"]
+                )
 
-            for s_id in active_subjects:
-                for c_id in active_contracts:
-                    self._add_edge(s_id, c_id, "KÝ_KẾT", f"Ký kết hợp đồng quy định tại {node['label']}")
+            for concept in onto.OBLIGATIONS:
+                if not concept.matches(ascii_text):
+                    continue
+                obligation_id = obligation_ids[concept.key]
+                self._link_regulation(obligation_id, node)
+                holder = "nguoi-su-dung-lao-dong" if "nguoi su dung lao dong" in ascii_text else None
+                if holder:
+                    self._add_edge(subject_ids[holder], obligation_id, "CÓ_NGHĨA_VỤ", node["label"])
 
-            actions = ["sa thái", "đi muộn", "nghỉ việc", "thai sản", "tai nạn lao động", "khấu trừ lương", "đơn phương chấm dứt"]
-            benefits = ["lương tăng ca", "trợ cấp thôi việc", "trợ cấp mất việc", "trợ cấp thai sản", "bồi thường tai nạn", "lương hưu"]
-            
-            for act in actions:
-                if act in text_lower:
-                    a_id = f"hanhvi:{slugify(act)}"
-                    self._add_node(a_id, doc_id=doc_id, node_type="HànhVi_SựKiện", label=act.title(), title=act.title(), parent_id=node_id)
-                    self.nodes[a_id]["text"] = f"Hành vi/Sự kiện thực tế: {act.title()}"
-                    self._add_edge(a_id, node_id, "BỊ_NẰM_TRONG_DANH_MỤC_CẤM", f"Quy chiếu đến {node['label']}")
-                    
-                    for s_id in active_subjects:
-                        self._add_edge(s_id, a_id, "THỰC_HIỆN", f"Chủ thể thực hiện {act}")
-                    
-                    if any(prohib in text_lower for prohib in ["nghiêm cấm", "không được", "bị cấm", "trái pháp luật"]):
-                        self._add_edge(a_id, node_id, "BỊ_NẰM_TRONG_DANH_MỤC_CẤM", f"Bị nghiêm cấm tại {node['label']}")
+    # ------------------------------------------------------------------
+    # Layer 5 - administrative procedures
+    # ------------------------------------------------------------------
 
-            for ben in benefits:
-                if ben in text_lower:
-                    b_id = f"chedo:{slugify(ben)}"
-                    self._add_node(b_id, doc_id=doc_id, node_type="ChếĐộ_QuyềnLợi", label=ben.title(), title=ben.title(), parent_id=node_id)
-                    self.nodes[b_id]["text"] = f"Chế độ/Quyền lợi được hưởng: {ben.title()}"
-                    self._add_edge(b_id, node_id, "BỊ_NẰM_TRONG_DANH_MỤC_CẤM", f"Quy định tại {node['label']}")
-                    
-                    if "chuthe:nguoi-lao-dong" in active_subjects:
-                        self._add_edge("chuthe:nguoi-lao-dong", b_id, "CÓ_QUYỀN_HƯỞNG", f"Quyền lợi người lao động")
+    def _layer5_procedures(self) -> None:
+        procedure_ids = {c.key: self._concept_node("thutuc", c, "ThủTục_ChếĐộ") for c in onto.PROCEDURES}
+        dossier_ids = {c.key: self._concept_node("hoso", c, "HồSơ_GiấyTờ") for c in onto.DOSSIERS}
+        condition_ids = {c.key: self._concept_node("dieukien", c, "ĐiềuKiện") for c in onto.CONDITIONS}
+        agency_ids = {c.key: self._concept_node("coquan", c, "CơQuanGiảiQuyết") for c in onto.AGENCIES}
 
-            # --- LAYER 4: Temporal & State Transition ---
-            if "kể từ" in text_lower or "thời hiệu" in text_lower or "thời hạn" in text_lower:
-                triggers = [
-                    ("chấm dứt hợp đồng", "Sự kiện: Chấm dứt hợp đồng"),
-                    ("quyết định kỷ luật", "Sự kiện: Kỷ luật lao động"),
-                    ("sinh con", "Sự kiện: Sinh con"),
-                    ("tai nạn", "Sự kiện: Tai nạn lao động")
-                ]
-                for kw, name in triggers:
-                    if kw in text_lower:
-                        ev_id = f"sukien_kichhoat:{slugify(kw)}"
-                        self._add_node(ev_id, doc_id=doc_id, node_type="SựKiệnKíchHoạt", label=name, title=name, parent_id=node_id)
-                        self.nodes[ev_id]["text"] = f"Sự kiện kích hoạt mốc thời gian: {name}"
-                        
-                        for dur in re.findall(r"\b\d+\s*(?:ngày|tháng|năm)\b", text_lower):
-                            mo_id = f"mocthoigian:{slugify(dur)}"
-                            self._add_node(mo_id, doc_id=doc_id, node_type="MốcThờiGian_LuậtĐịnh", label=dur, title=dur, parent_id=node_id)
-                            self.nodes[mo_id]["text"] = f"Mốc thời gian luật định: {dur}"
-                            self._add_edge(ev_id, mo_id, "BẮT_ĐẦU_TÍNH_THỜI_HIỆU", f"Bắt đầu tính {dur} kể từ khi {kw}")
+        for node in self._semantic_nodes():
+            if node["node_type"] == "Điểm":
+                continue
+            text = node.get("text") or ""
+            if not text:
+                continue
+            ascii_text = self._ascii(f"{node['label']} {text}")
 
-                            if "thời hiệu khởi kiện" in text_lower:
-                                st_id = "trangthai:het-thoi-hieu-khoi-kien"
-                                self._add_node(st_id, doc_id=doc_id, node_type="TrạngTháiPhápLý", label="Hết thời hiệu khởi kiện", title="Hết thời hiệu khởi kiện")
-                                self.nodes[st_id]["text"] = "Trạng thái pháp lý: Quá hạn thời hiệu khởi kiện của vụ việc."
-                                self._add_edge(mo_id, st_id, "CHUYỂN_TRẠNG_THÁI", "Hết thời hiệu sau mốc thời gian")
+            active_procedures = [c.key for c in onto.PROCEDURES if c.matches(ascii_text)]
+            if not active_procedures:
+                continue
+            for key in active_procedures:
+                self._link_regulation(procedure_ids[key], node)
 
-            # --- LAYER 5: Process-Oriented ---
-            if any(p_kw in text_lower for p_kw in ["thủ tục", "hồ sơ", "giải quyết chế độ", "đơn đề nghị"]):
-                procs = [
-                    ("trợ cấp thất nghiệp", "Thủ tục nhận trợ cấp thất nghiệp"),
-                    ("bảo hiểm xã hội một lần", "Thủ tục rút BHXH 1 lần"),
-                    ("đăng ký nội quy", "Thủ tục đăng ký nội quy lao động"),
-                    ("chế độ thai sản", "Thủ tục hưởng chế độ thai sản")
-                ]
-                for kw, name in procs:
-                    if kw in text_lower:
-                        pr_id = f"thutuc:{slugify(kw)}"
-                        self._add_node(pr_id, doc_id=doc_id, node_type="ThủTục_ChếĐộ", label=name, title=name, parent_id=node_id)
-                        self.nodes[pr_id]["text"] = f"Quy trình thực hiện: {name}"
-                        
-                        docs = [
-                            ("sổ bảo hiểm xã hội", "Sổ bảo hiểm xã hội"),
-                            ("sổ bhxh", "Sổ BHXH"),
-                            ("quyết định thôi việc", "Quyết định thôi việc/chấm dứt HĐLĐ"),
-                            ("đơn đề nghị", "Đơn đề nghị hưởng chế độ"),
-                            ("nội quy lao động", "Văn bản nội quy lao động")
-                        ]
-                        for d_kw, d_name in docs:
-                            if d_kw in text_lower:
-                                doc_node_id = f"hoso:{slugify(d_kw)}"
-                                self._add_node(doc_node_id, doc_id=doc_id, node_type="HồSơ_GiấyTờ", label=d_name, title=d_name, parent_id=node_id)
-                                self.nodes[doc_node_id]["text"] = f"Giấy tờ cần chuẩn bị: {d_name}"
-                                self._add_edge(pr_id, doc_node_id, "BAO_GỒM_HỒ_SƠ", f"Hồ sơ bao gồm {d_name}")
-                                
-                        conds = [
-                            ("đóng đủ 12 tháng", "Điều kiện đóng bảo hiểm từ đủ 12 tháng trở lên"),
-                            ("nghỉ việc đủ 1 năm", "Điều kiện nghỉ việc đủ 1 năm không đóng tiếp"),
-                            ("có từ 10 lao động", "Điều kiện sử dụng từ 10 lao động trở lên")
-                        ]
-                        for c_kw, c_name in conds:
-                            if c_kw in text_lower:
-                                co_id = f"dieukien:{slugify(c_kw)}"
-                                self._add_node(co_id, doc_id=doc_id, node_type="ĐiềuKiện", label=c_name, title=c_name, parent_id=node_id)
-                                self.nodes[co_id]["text"] = f"Điều kiện đáp ứng: {c_name}"
-                                self._add_edge(pr_id, co_id, "YÊU_CẦU_ĐIỀU_KIỆN", f"Yêu cầu điều kiện {c_name}")
-                                
-                        orgs = [
-                            ("cơ quan bảo hiểm xã hội", "Cơ quan Bảo hiểm xã hội"),
-                            ("trung tâm dịch vụ việc làm", "Trung tâm dịch vụ việc làm"),
-                            ("sở lao động", "Sở Lao động - Thương binh và Xã hội"),
-                            ("tòa án", "Tòa án nhân dân")
-                        ]
-                        for o_kw, o_name in orgs:
-                            if o_kw in text_lower:
-                                og_id = f"coquan:{slugify(o_kw)}"
-                                self._add_node(og_id, doc_id=doc_id, node_type="CơQuanGiảiQuyết", label=o_name, title=o_name, parent_id=node_id)
-                                self.nodes[og_id]["text"] = f"Thẩm quyền giải quyết: {o_name}"
-                                self._add_edge(pr_id, og_id, "NỘP_TẠI", f"Nộp hồ sơ tại {o_name}")
+            for concept in onto.DOSSIERS:
+                if concept.matches(ascii_text):
+                    self._link_regulation(dossier_ids[concept.key], node)
+                    for key in active_procedures:
+                        self._add_edge(
+                            procedure_ids[key], dossier_ids[concept.key], "BAO_GỒM_HỒ_SƠ", node["label"]
+                        )
 
-            # --- LAYER 6: Lifecycle stage links ---
-            if "thử việc" in text_lower:
-                self._add_edge("lifecycle_nld:thu-viec", node_id, "KÍCH_HOẠT_NGHĨA_VỤ", f"Quy định thử việc tại {node['label']}")
-                self._add_edge("lifecycle_dn:tuyen-dung-ld", "lifecycle_nld:thu-viec", "GIAI_DOẠN_TIẾP_THEO", "Tuyển dụng sang thử việc")
-            if "ký hợp đồng" in text_lower or "ký kết hợp đồng" in text_lower:
-                self._add_edge("lifecycle_nld:ky-hdld", node_id, "KÍCH_HOẠT_NGHĨA_VỤ", f"Quy định ký hợp đồng tại {node['label']}")
-            if "đóng bảo hiểm" in text_lower or "đóng bhxh" in text_lower:
-                self._add_edge("lifecycle_nld:lam-viec", node_id, "KÍCH_HOẠT_NGHĨA_VỤ", f"Nghĩa vụ đóng bảo hiểm xã hội")
-                self._add_edge("lifecycle_dn:dong-bhxh", node_id, "KÍCH_HOẠT_NGHĨA_VỤ", f"Nghĩa vụ đóng BHXH của DN")
-            if "nội quy lao động" in text_lower:
-                self._add_edge("lifecycle_dn:ban-hanh-noi-quy", node_id, "KÍCH_HOẠT_NGHĨA_VỤ", f"Ban hành nội quy lao động")
+            for concept in onto.CONDITIONS:
+                if concept.matches(ascii_text):
+                    self._link_regulation(condition_ids[concept.key], node)
+                    for key in active_procedures:
+                        self._add_edge(
+                            procedure_ids[key], condition_ids[concept.key], "YÊU_CẦU_ĐIỀU_KIỆN", node["label"]
+                        )
 
-            # --- LAYER 7: Compliance & Risk Matrix ---
-            if any(vi_kw in text_lower for vi_kw in ["phạt tiền", "bị phạt", "vi phạm", "nghiêm cấm"]):
-                violations = [
-                    ("không đăng ký nội quy lao động", "Không đăng ký nội quy lao động"),
-                    ("không đóng bảo hiểm xã hội", "Không đóng bảo hiểm xã hội bắt buộc"),
-                    ("phạt tiền thay kỷ luật", "Phạt tiền thay cho xử lý kỷ luật"),
-                    ("thử việc quá 2 lần", "Ký hợp đồng thử việc quá 02 lần"),
-                    ("sa thái lao động mang thai", "Sa thái trái pháp luật lao động mang thai")
-                ]
-                for v_kw, v_name in violations:
-                    if v_kw in text_lower:
-                        vp_id = f"vipham:{slugify(v_kw)}"
-                        self._add_node(vp_id, doc_id=doc_id, node_type="HànhViDoanhNghiệp", label=v_name, title=v_name, parent_id=node_id)
-                        self.nodes[vp_id]["text"] = f"Hành vi vi phạm của doanh nghiệp: {v_name}"
-                        
-                        if any(sev in text_lower for sev in ["hình sự", "truy cứu", "đình chỉ"]):
-                            self._add_edge(vp_id, "ruiro:nghiem-trong", "GÂY_RA_RỦI_RO", "Vi phạm đặc biệt nghiêm trọng")
-                        elif "phạt tiền" in text_lower:
-                            self._add_edge(vp_id, "ruiro:vua", "GÂY_RA_RỦI_RO", "Vi phạm hành chính chịu phạt tiền")
-                        else:
-                            self._add_edge(vp_id, "ruiro:thap", "GÂY_RA_RỦI_RO", "Vi phạm nhẹ bị nhắc nhở")
+            for concept in onto.AGENCIES:
+                if concept.matches(ascii_text):
+                    self._link_regulation(agency_ids[concept.key], node)
+                    for key in active_procedures:
+                        self._add_edge(procedure_ids[key], agency_ids[concept.key], "NỘP_TẠI", node["label"])
 
-                        fixes = [
-                            ("truy đóng bhxh", "Truy đóng đủ số tiền bảo hiểm xã hội"),
-                            ("nhận lại người lao động", "Nhận người lao động trở lại làm việc và bồi thường"),
-                            ("quy chế đối thoại", "Xây dựng và thực hiện quy chế đối thoại"),
-                            ("hoàn trả tiền", "Hoàn trả tiền hoặc tài sản đã phạt trái luật")
-                        ]
-                        for f_kw, f_name in fixes:
-                            if f_kw in text_lower:
-                                fix_id = f"khacphuc:{slugify(f_kw)}"
-                                self._add_node(fix_id, doc_id=doc_id, node_type="BiệnPhápKhắcPhục", label=f_name, title=f_name, parent_id=node_id)
-                                self.nodes[fix_id]["text"] = f"Biện pháp khắc phục hậu quả: {f_name}"
-                                self._add_edge(vp_id, fix_id, "KHẮC_PHỤC_BẰNG", f"Biện pháp sửa sai: {f_name}")
+            if any(marker in ascii_text for marker in ("thoi han", "trong thoi gian", "ke tu ngay nhan du ho so")):
+                for match in DURATION_RE.finditer(text):
+                    quantity = int(match.group(1))
+                    if quantity > 120:
+                        continue
+                    key, label = canonical_duration(quantity, match.group(2))
+                    deadline_id = f"thoihan:{key}"
+                    self._add_node(
+                        deadline_id, SYSTEM_DOC_ID, "ThờiHạn_ThủTục", label, str(quantity), label, None, 0
+                    )
+                    if not self.nodes[deadline_id]["text"]:
+                        self.nodes[deadline_id]["text"] = f"Thời hạn xử lý thủ tục: {label}."
+                    for procedure_key in active_procedures:
+                        self._add_edge(
+                            procedure_ids[procedure_key],
+                            deadline_id,
+                            "CÓ_THỜI_HẠN_LÀ",
+                            normalize_space(f"{label} theo {node['label']}"),
+                        )
 
-            # --- LAYER 8: Precedent & Case-Based Reasoning ---
-            for m in re.finditer(r"(Án lệ số \d+/20\d\d/AL|Án lệ số \d+|Bản án số \d+/20\d\d/[A-ZĐ0-9\-]+)", text, re.I):
-                ref = m.group(0)
-                an_id = f"anle:{slugify(ref)}"
-                self._add_node(an_id, doc_id=doc_id, node_type="ÁnLệ", label=ref, title=ref, parent_id=node_id)
-                self.nodes[an_id]["text"] = f"Án lệ/Bản án thực tế của Tòa án nhân dân tối cao: {ref}"
-                self._add_edge(an_id, node_id, "ÁP_DỤNG_ĐIỀU_LUẬT", f"Áp dụng quy định tại {node['label']}")
+    # ------------------------------------------------------------------
+    # Layer 6 - temporal reasoning
+    # ------------------------------------------------------------------
 
-                facts = [
-                    ("tranh chấp học nghề", "Tranh chấp về hợp đồng học nghề"),
-                    ("sa thái trái pháp luật", "Sa thái người lao động trái luật"),
-                    ("đơn phương chấm dứt hợp đồng lao động", "Đơn phương chấm dứt hợp đồng lao động trái pháp luật"),
-                    ("nợ lương", "Doanh nghiệp chậm trả/nợ lương người lao động")
-                ]
-                for f_kw, f_name in facts:
-                    if f_kw in text_lower:
-                        fact_id = f"tinh-tiet:{slugify(f_kw)}"
-                        self._add_node(fact_id, doc_id=doc_id, node_type="TìnhTiếtCốtLõi", label=f_name, title=f_name, parent_id=an_id)
-                        self.nodes[fact_id]["text"] = f"Tình tiết cốt lõi vụ án: {f_name}"
-                        
-                        pq_id = f"phanquyet:{slugify(f_kw)}"
-                        self._add_node(pq_id, doc_id=doc_id, node_type="PhánQuyết", label=f"Phán quyết về {f_kw}", title=f"Phán quyết về {f_kw}", parent_id=an_id)
-                        self.nodes[pq_id]["text"] = f"Phán quyết của Tòa án đối với hành vi {f_kw}."
-                        
-                        self._add_edge(fact_id, pq_id, "DẪN_ĐẾN_PHÁN_QUYẾT", "Phán quyết dựa trên tình tiết cốt lõi")
-                        self._add_edge(an_id, fact_id, "CÓ_TÌNH_TIẾT_TƯƠNG_TỰ", "Tình tiết cấu thành án lệ")
+    def _layer6_temporal(self) -> None:
+        trigger_ids = {c.key: self._concept_node("sukien", c, "SựKiệnKíchHoạt") for c in onto.TIME_TRIGGERS}
+        state_ids = {c.key: self._concept_node("trangthai", c, "TrạngTháiPhápLý") for c in onto.LEGAL_STATES}
 
-        # Regenerate path labels for everything to build deep breadcrumbs
-        for node_id in list(self.nodes):
-            self.nodes[node_id]["path_label"] = self._path_label(node_id)
+        for node in self._semantic_nodes():
+            if node["node_type"] == "Điểm":
+                continue
+            text = node.get("text") or ""
+            if not text:
+                continue
+            ascii_text = self._ascii(f"{node['label']} {text}")
+            if not any(marker in ascii_text for marker in ("ke tu", "thoi hieu", "thoi han", "trong thoi han")):
+                continue
+
+            active_triggers = [c.key for c in onto.TIME_TRIGGERS if c.matches(ascii_text)]
+            if not active_triggers:
+                continue
+            for key in active_triggers:
+                self._link_regulation(trigger_ids[key], node)
+
+            durations: list[tuple[str, str]] = []
+            for match in DURATION_RE.finditer(text):
+                quantity = int(match.group(1))
+                if quantity > 400:
+                    continue
+                durations.append(canonical_duration(quantity, match.group(2)))
+            for key, label in durations[:6]:
+                milestone_id = f"mocthoigian:{key}"
+                self._add_node(
+                    milestone_id, SYSTEM_DOC_ID, "MốcThờiGian_LuậtĐịnh", label, key, label, None, 0
+                )
+                if not self.nodes[milestone_id]["text"]:
+                    self.nodes[milestone_id]["text"] = f"Mốc thời gian luật định: {label}."
+                self._link_regulation(milestone_id, node)
+                for trigger_key in active_triggers:
+                    self._add_edge(
+                        trigger_ids[trigger_key],
+                        milestone_id,
+                        "BẮT_ĐẦU_TÍNH_THỜI_HIỆU",
+                        normalize_space(f"{label} kể từ {trigger_key.replace('sk-', '').replace('-', ' ')}"),
+                    )
+                for concept in onto.LEGAL_STATES:
+                    if concept.matches(ascii_text):
+                        self._add_edge(
+                            milestone_id, state_ids[concept.key], "CHUYỂN_TRẠNG_THÁI", node["label"]
+                        )
+                        self._link_regulation(state_ids[concept.key], node)
+
+    # ------------------------------------------------------------------
+    # Layer 7 - sanctions, fines and risk
+    # ------------------------------------------------------------------
+
+    def _layer7_sanctions_and_risk(self) -> None:
+        risk_ids: dict[str, str] = {}
+        for key, label, description in onto.RISK_LEVELS:
+            node_id = f"ruiro:{key}"
+            self._add_node(node_id, SYSTEM_DOC_ID, "MứcĐộRủiRo", label, key, label, None, 0)
+            self.nodes[node_id]["text"] = f"{label}. {description}"
+            risk_ids[key] = node_id
+
+        violation_ids = {c.key: self._concept_node("vipham", c, "HànhViViPhạm") for c in onto.VIOLATIONS}
+        remedy_ids = {c.key: self._concept_node("khacphuc", c, "BiệnPhápKhắcPhục") for c in onto.REMEDIES}
+        extra_ids = {c.key: self._concept_node("xpbosung", c, "HìnhThứcXửPhạtBổSung") for c in onto.EXTRA_SANCTIONS}
+
+        self._mine_penalty_articles(risk_ids, remedy_ids, extra_ids)
+
+        for node in self._semantic_nodes():
+            text = node.get("text") or ""
+            if not text:
+                continue
+            ascii_text = self._ascii(f"{node['label']} {text}")
+            fines = self._extract_fines(text)
+            active_violations = [c.key for c in onto.VIOLATIONS if c.matches(ascii_text)]
+            has_sanction_context = bool(fines) or any(
+                marker in ascii_text
+                for marker in ("nghiem cam", "vi pham", "xu phat", "bien phap khac phuc hau qua")
+            )
+            if not active_violations or not has_sanction_context:
+                continue
+
+            for key in active_violations:
+                violation_id = violation_ids[key]
+                self._link_regulation(violation_id, node)
+
+                for low, high in fines:
+                    fine_id = f"phat:{low}-{high}"
+                    label = f"Phạt tiền từ {format_money(low)} đến {format_money(high)} đồng"
+                    self._add_node(fine_id, SYSTEM_DOC_ID, "MứcPhạtTiền", label, str(low), label, None, 0)
+                    if not self.nodes[fine_id]["text"]:
+                        self.nodes[fine_id]["text"] = (
+                            f"{label}. Mức phạt với tổ chức thường bằng 02 lần mức phạt với cá nhân."
+                        )
+                    self._add_edge(violation_id, fine_id, "BỊ_XỬ_PHẠT", normalize_space(node["label"]))
+                    self._link_regulation(fine_id, node)
+                    self._add_edge(violation_id, risk_ids[self._risk_bucket(high, ascii_text)], "GÂY_RA_RỦI_RO", label)
+
+                if not fines:
+                    self._add_edge(
+                        violation_id, risk_ids[self._risk_bucket(0, ascii_text)], "GÂY_RA_RỦI_RO", node["label"]
+                    )
+
+                for concept in onto.REMEDIES:
+                    if concept.matches(ascii_text):
+                        self._add_edge(violation_id, remedy_ids[concept.key], "KHẮC_PHỤC_BẰNG", node["label"])
+                        self._link_regulation(remedy_ids[concept.key], node)
+
+                for concept in onto.EXTRA_SANCTIONS:
+                    if concept.matches(ascii_text):
+                        self._add_edge(
+                            violation_id, extra_ids[concept.key], "BỊ_XỬ_PHẠT_BỔ_SUNG", node["label"]
+                        )
+                        self._link_regulation(extra_ids[concept.key], node)
+
+    def _mine_penalty_articles(
+        self,
+        risk_ids: dict[str, str],
+        remedy_ids: dict[str, str],
+        extra_ids: dict[str, str],
+    ) -> None:
+        """Read the sanction decrees end to end.
+
+        Penalty articles name their own offence in the heading — "Điều 17. Vi
+        phạm quy định về tiền lương" — and place each fine bracket in a clause
+        or point beneath. Mining those headings covers every offence in Nghị
+        định 12/2022 instead of the handful the curated lexicon anticipated.
+        """
+
+        for article in self._article_nodes():
+            heading = article["title"] or article["label"]
+            match = re.match(
+                r"^(?:Vi phạm (?:quy định|các quy định)?\s*(?:về|đối với|trong)?|Hành vi vi phạm)\s+(.{4,140})$",
+                heading,
+                re.IGNORECASE,
+            )
+            if not match:
+                continue
+            subject = normalize_space(match.group(1)).rstrip(".")
+            doc = self.docs.get(article["doc_id"], {})
+            code = doc.get("code") or article["doc_id"]
+            violation_id = f"vipham:{slugify(article['doc_id'])}:{slugify(subject)[:60]}"
+            label = f"Vi phạm quy định về {subject}"
+            self._add_node(
+                violation_id, article["doc_id"], "HànhViViPhạm", label, "", label, article["node_id"], 0
+            )
+            if not self.nodes[violation_id]["text"]:
+                self.nodes[violation_id]["text"] = f"{label} — chế tài quy định tại {article['label']} ({code})."
+            self._link_regulation(violation_id, article)
+
+            # Attach every fine bracket declared under this article.
+            for descendant in self._descendants_of(article["node_id"]):
+                text = descendant.get("text") or ""
+                fines = self._extract_fines(text)
+                if not fines:
+                    continue
+                ascii_text = self._ascii(text)
+                for low, high in fines:
+                    fine_id = f"phat:{low}-{high}"
+                    fine_label = f"Phạt tiền từ {format_money(low)} đến {format_money(high)} đồng"
+                    self._add_node(fine_id, SYSTEM_DOC_ID, "MứcPhạtTiền", fine_label, str(low), fine_label, None, 0)
+                    if not self.nodes[fine_id]["text"]:
+                        self.nodes[fine_id]["text"] = (
+                            f"{fine_label}. Mức phạt tiền với tổ chức thường bằng 02 lần mức phạt với cá nhân."
+                        )
+                    self._add_edge(
+                        violation_id,
+                        fine_id,
+                        "BỊ_XỬ_PHẠT",
+                        normalize_space(f"{fine_label} tại {descendant['path_label'] or descendant['label']}"),
+                    )
+                    self._link_regulation(fine_id, descendant)
+                    self._add_edge(
+                        violation_id,
+                        risk_ids[self._risk_bucket(high, ascii_text)],
+                        "GÂY_RA_RỦI_RO",
+                        fine_label,
+                    )
+                for concept in onto.REMEDIES:
+                    if concept.matches(ascii_text):
+                        self._add_edge(violation_id, remedy_ids[concept.key], "KHẮC_PHỤC_BẰNG", descendant["label"])
+                        self._link_regulation(remedy_ids[concept.key], descendant)
+                for concept in onto.EXTRA_SANCTIONS:
+                    if concept.matches(ascii_text):
+                        self._add_edge(
+                            violation_id, extra_ids[concept.key], "BỊ_XỬ_PHẠT_BỔ_SUNG", descendant["label"]
+                        )
+
+    def _descendants_of(self, root_id: str) -> list[dict[str, Any]]:
+        if self._children_index is None:
+            index: dict[str, list[dict[str, Any]]] = {}
+            for node in self.nodes.values():
+                parent = node.get("parent_id")
+                if parent:
+                    index.setdefault(parent, []).append(node)
+            self._children_index = index
+        collected: list[dict[str, Any]] = []
+        stack = list(self._children_index.get(root_id, []))
+        while stack:
+            node = stack.pop()
+            collected.append(node)
+            stack.extend(self._children_index.get(node["node_id"], []))
+        return collected
+
+    @staticmethod
+    def _extract_fines(text: str) -> list[tuple[int, int]]:
+        ranges: list[tuple[int, int]] = []
+        for match in FINE_RANGE_RE.finditer(text):
+            low, high = parse_money(match.group(1)), parse_money(match.group(2))
+            if low and high and low <= high:
+                ranges.append((low, high))
+        return ranges[:6]
+
+    @staticmethod
+    def _risk_bucket(ceiling: int, ascii_text: str) -> str:
+        if any(marker in ascii_text for marker in ("truy cuu trach nhiem hinh su", "dinh chi hoat dong", "truc xuat")):
+            return "nghiem-trong"
+        for threshold, key in onto.RISK_THRESHOLDS:
+            if ceiling and ceiling < threshold:
+                return key
+        return "cao" if ceiling else "thap"
+
+    # ------------------------------------------------------------------
+    # Layer 8 - lifecycles
+    # ------------------------------------------------------------------
+
+    def _layer8_lifecycles(self) -> None:
+        for prefix, node_type, stages in (
+            ("lifecycle_nld", "GiaiĐoạn_NLĐ", onto.LIFECYCLE_NLD),
+            ("lifecycle_dn", "GiaiĐoạn_DoanhNghiệp", onto.LIFECYCLE_DN),
+        ):
+            stage_ids: list[str] = []
+            for key, label, description, _patterns in stages:
+                node_id = f"{prefix}:{key}"
+                self._add_node(node_id, SYSTEM_DOC_ID, node_type, label, "", label, None, 0)
+                self.nodes[node_id]["text"] = f"{label}. {description}"
+                stage_ids.append(node_id)
+            for previous, following in zip(stage_ids, stage_ids[1:]):
+                self._add_edge(
+                    previous,
+                    following,
+                    "GIAI_ĐOẠN_TIẾP_THEO",
+                    f"{self.nodes[previous]['label']} → {self.nodes[following]['label']}",
+                )
+
+            budgets: dict[str, int] = {}
+            for article in self._article_nodes():
+                haystack = self._ascii(f"{article['label']} {article.get('text') or ''}")
+                for key, label, _description, patterns in stages:
+                    node_id = f"{prefix}:{key}"
+                    if budgets.get(key, 0) >= 160:
+                        continue
+                    if any(pattern in haystack for pattern in patterns):
+                        self._add_edge(
+                            node_id, article["node_id"], "KÍCH_HOẠT_NGHĨA_VỤ", article["label"]
+                        )
+                        budgets[key] = budgets.get(key, 0) + 1
+
+    # ------------------------------------------------------------------
+    # Layer 9 - precedents (populated when a case-law corpus is added)
+    # ------------------------------------------------------------------
+
+    def _layer9_precedents(self) -> None:
+        facts = (
+            ("tranh chap hoc nghe", "Tranh chấp về hợp đồng học nghề"),
+            ("sa thai trai phap luat", "Sa thải người lao động trái luật"),
+            ("don phuong cham dut hop dong lao dong trai phap luat", "Đơn phương chấm dứt HĐLĐ trái pháp luật"),
+            ("no luong", "Doanh nghiệp chậm trả, nợ lương người lao động"),
+        )
+        pattern = re.compile(r"(Án lệ số \d+/20\d\d/AL|Án lệ số \d+|Bản án số \d+/20\d\d/[A-ZĐ0-9\-]+)", re.I)
+        for node in self._semantic_nodes():
+            text = node.get("text") or ""
+            if "án lệ" not in text.lower() and "bản án số" not in text.lower():
+                continue
+            ascii_text = self._ascii(text)
+            for match in pattern.finditer(text):
+                reference = normalize_space(match.group(0))
+                case_id = f"anle:{slugify(reference)}"
+                self._add_node(case_id, SYSTEM_DOC_ID, "ÁnLệ", reference, "", reference, None, 0)
+                if not self.nodes[case_id]["text"]:
+                    self.nodes[case_id]["text"] = f"Án lệ/bản án được viện dẫn: {reference}."
+                self._add_edge(case_id, node["node_id"], "ÁP_DỤNG_ĐIỀU_LUẬT", node["label"])
+                for keyword, label in facts:
+                    if keyword not in ascii_text:
+                        continue
+                    fact_id = f"tinhtiet:{slugify(keyword)}"
+                    ruling_id = f"phanquyet:{slugify(keyword)}"
+                    self._add_node(fact_id, SYSTEM_DOC_ID, "TìnhTiếtCốtLõi", label, "", label, None, 0)
+                    self.nodes[fact_id]["text"] = f"Tình tiết cốt lõi: {label}."
+                    self._add_node(
+                        ruling_id, SYSTEM_DOC_ID, "PhánQuyết", f"Phán quyết về {label.lower()}", "", label, None, 0
+                    )
+                    self.nodes[ruling_id]["text"] = f"Hướng phán quyết của toà án đối với tình tiết: {label}."
+                    self._add_edge(case_id, fact_id, "CÓ_TÌNH_TIẾT_TƯƠNG_TỰ", label)
+                    self._add_edge(fact_id, ruling_id, "DẪN_ĐẾN_PHÁN_QUYẾT", label)
+
 
     def _add_chunk(
         self,
@@ -876,7 +1759,7 @@ class LegalGraphBuilder:
         ordinal: int,
         title: str = "",
     ) -> None:
-        text = normalize_space(text)
+        text = normalize_block(text)
         if not text or token_count(text) < 4:
             return
         node = self.nodes[node_id]
@@ -912,7 +1795,36 @@ class LegalGraphBuilder:
             for row in rows:
                 row["vector"] = zero_vec
 
+    def _semantic_chunk_text(self, node_id: str, node: dict[str, Any], outgoing: dict[str, list[str]]) -> str:
+        """Give a concept node a body worth embedding.
+
+        A bare "Tiền lương. Số tiền …" line is too thin to win a vector search.
+        Folding in the citations the concept points at turns each concept node
+        into a navigable hub chunk: the retriever can land on "Tiền lương" and
+        immediately see Điều 90, 95, 97, 104 …
+        """
+
+        base = node.get("text") or node["label"]
+        citations = outgoing.get(node_id) or []
+        if not citations:
+            return base
+        listed = "; ".join(dict.fromkeys(citations))[:1200]
+        return f"{base} Căn cứ pháp lý liên quan: {listed}."
+
     def _build_chunks(self) -> None:
+        relevant = {"QUY_ĐỊNH_TẠI", "ĐƯỢC_ĐỊNH_NGHĨA_LÀ", "ÁP_DỤNG_CHO", "BỊ_NGHIÊM_CẤM", "KÍCH_HOẠT_NGHĨA_VỤ"}
+        outgoing: dict[str, list[str]] = {}
+        for edge in self.edges.values():
+            if edge["relation"] not in relevant:
+                continue
+            target = self.nodes.get(edge["target_id"])
+            if not target:
+                continue
+            label = target.get("path_label") or target["label"]
+            bucket = outgoing.setdefault(edge["source_id"], [])
+            if len(bucket) < 14:
+                bucket.append(label)
+
         ordinal = 0
         for node_id, node in self.nodes.items():
             doc_id = node["doc_id"]
@@ -945,8 +1857,13 @@ class LegalGraphBuilder:
             elif node_type == "Điểm":
                 self._add_chunk(doc_id, node_id, "point", text, ordinal)
                 ordinal += 1
+            elif node_type == "PhụLục_Bảng":
+                self._add_chunk(doc_id, node_id, "table", text, ordinal)
+                ordinal += 1
             else:
-                self._add_chunk(doc_id, node_id, "semantic", text, ordinal)
+                self._add_chunk(
+                    doc_id, node_id, "semantic", self._semantic_chunk_text(node_id, node, outgoing), ordinal
+                )
                 ordinal += 1
 
     def _write_sqlite(self) -> None:
@@ -1083,6 +2000,13 @@ class GraphRAGStore:
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._vectors: list[tuple[str, bytes]] | None = None
+        self._matrix: Any = None
+        self._matrix_ids: list[str] = []
+        self._terms: list[tuple[str, str]] | None = None
+        self._doc_bridges: dict[str, list[str]] | None = None
+        self._node_chunk_cache: dict[str, sqlite3.Row | None] = {}
+        self._doc_types: dict[str, tuple[str, str]] | None = None
+        self._concepts: list[tuple[str, str]] | None = None
         try:
             self._validate_embedding_metadata()
         except Exception:
@@ -1137,12 +2061,16 @@ class GraphRAGStore:
         combined: dict[str, float] = {}
         reasons: dict[str, list[str]] = {}
 
-        for rank, row in enumerate(self._fts_search(query, limit=max(24, top_k * 4)), start=1):
+        # A wide candidate pool costs almost nothing now that vector scoring is
+        # a single matmul, and it gives the graph stages far more to work with
+        # on synthesis questions that need many articles at once.
+        pool = max(60, top_k * 8)
+        for rank, row in enumerate(self._fts_search(query, limit=pool), start=1):
             score = 1.0 / (rank + 2)
             combined[row["chunk_id"]] = combined.get(row["chunk_id"], 0.0) + score * 1.25
             reasons.setdefault(row["chunk_id"], []).append("FTS")
 
-        for rank, (chunk_id, score) in enumerate(self._vector_search(query, limit=max(24, top_k * 4)), start=1):
+        for rank, (chunk_id, score) in enumerate(self._vector_search(query, limit=pool), start=1):
             combined[chunk_id] = combined.get(chunk_id, 0.0) + max(score, 0.0) * (1.0 / math.sqrt(rank + 1))
             reasons.setdefault(chunk_id, []).append("vector")
 
@@ -1154,6 +2082,7 @@ class GraphRAGStore:
         article_numbers = {m.group(1).lower() for m in re.finditer(r"Điều\s+(\d+[a-zA-Z]?)", query, re.I)}
         clause_numbers = {m.group(1) for m in re.finditer(r"khoản\s+(\d{1,3})", query, re.I)}
 
+        doc_priors = self._document_priors(query_ascii)
         rows_by_id = self._chunks_by_ids(combined.keys())
         for chunk_id, row in rows_by_id.items():
             haystack_raw = f"{row['title']} {row['citation']} {row['text'][:600]}"
@@ -1179,8 +2108,20 @@ class GraphRAGStore:
             if any(term in query_ascii for term in ["lao dong", "hop dong", "nguoi lao dong", "nguoi su dung"]):
                 if "lao dong" in haystack_ascii or "hop dong lao dong" in haystack_ascii:
                     combined[chunk_id] += 0.18
+            prior = doc_priors.get(str(row["doc_id"]), 1.0)
+            if prior != 1.0:
+                combined[chunk_id] *= prior
             if row["chunk_type"] in {"article", "clause", "point"}:
                 combined[chunk_id] += 0.08
+            if row["chunk_type"] == "table":
+                # Tables carry the payload numbers (wage brackets, fee scales)
+                # that a paraphrased article never repeats.
+                combined[chunk_id] += 0.22
+            if row["chunk_type"] == "semantic":
+                combined[chunk_id] -= 0.10
+            if any(token in query_ascii for token in ("bao nhieu", "muc", "toi thieu", "phan tram", "%")):
+                if re.search(r"\d", row["text"] or ""):
+                    combined[chunk_id] += 0.14
             for number in article_numbers:
                 if re.search(rf"điều\s+{re.escape(number)}\b", haystack, re.I):
                     combined[chunk_id] += 0.75
@@ -1190,13 +2131,315 @@ class GraphRAGStore:
                     combined[chunk_id] += 0.45
                     reasons.setdefault(chunk_id, []).append("exact-clause")
 
+        best_base = max(combined.values(), default=0.0)
+        self._seed_definitions(query, query_ascii, combined, reasons, best_base)
+        self._seed_concepts(query_ascii, query_terms, combined, reasons, best_base)
+        aggregative = self._is_aggregative(query_ascii)
+
         base_ids = [cid for cid, _ in sorted(combined.items(), key=lambda x: x[1], reverse=True)[: max(top_k * 2, 12)]]
-        expanded = self._expand_graph(base_ids, combined, reasons)
-        selected = sorted(expanded.values(), key=lambda row: row["score"], reverse=True)[:top_k]
+        expanded = self._expand_graph(base_ids, combined, reasons, query_terms, aggregative)
+        self._bridge_documents(query, base_ids, expanded, best_base)
+        selected = self._diversify(expanded, top_k, aggregative)
         for idx, row in enumerate(selected, start=1):
             row["source_id"] = f"S{idx}"
             row["score"] = round(float(row["score"]), 4)
         return selected
+
+    #: Vietnamese legal hierarchy. A code article states the rule; the decree
+    #: only implements it, so when a question does not name the decree the
+    #: primary legislation should be cited first. Without this the single
+    #: largest implementing decree wins every lexical and vector contest purely
+    #: because it is long and repeats the same vocabulary.
+    DOC_TYPE_PRIOR = {
+        "Bộ luật": 1.16,
+        "Luật": 1.12,
+        "Văn bản hợp nhất": 1.04,
+        "Nghị quyết": 1.0,
+        "Nghị định": 0.94,
+        "Thông tư": 0.90,
+        "Hệ thống": 0.90,
+    }
+
+    def _document_priors(self, query_ascii: str) -> dict[str, float]:
+        """Per-document score multipliers, neutralised for explicitly named documents."""
+
+        if self._doc_types is None:
+            rows = self.conn.execute("SELECT doc_id, doc_type, code FROM docs").fetchall()
+            self._doc_types = {
+                str(row["doc_id"]): (str(row["doc_type"] or ""), strip_accents(str(row["code"] or "")).lower())
+                for row in rows
+            }
+        priors: dict[str, float] = {}
+        for doc_id, (doc_type, code) in self._doc_types.items():
+            if code and len(code) >= 6 and code in query_ascii:
+                priors[doc_id] = 1.25  # the user asked for this document by name
+                continue
+            priors[doc_id] = self.DOC_TYPE_PRIOR.get(doc_type, 1.0)
+        return priors
+
+    #: Queries that ask for a synthesis rather than a single rule.
+    AGGREGATIVE_MARKERS = (
+        "tong hop", "liet ke", "day du", "toan bo", "tat ca", "so sanh", "phan biet",
+        "nhung khoan", "cac khoan", "nhung nghia vu", "cac nghia vu", "nhung quyen",
+        "gom nhung gi", "bao gom nhung", "cac buoc", "nhung truong hop", "cac che do",
+        "nhung han h vi", "cac hanh vi", "moc thoi hieu", "ho so rui ro",
+    )
+
+    def _is_aggregative(self, query_ascii: str) -> bool:
+        return any(marker in query_ascii for marker in self.AGGREGATIVE_MARKERS)
+
+    def _diversify(
+        self,
+        expanded: dict[str, dict[str, Any]],
+        top_k: int,
+        aggregative: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Fill the answer window without letting one document own every slot.
+
+        Vietnamese legal corpora contain a few enormous implementing decrees;
+        on a purely score-ordered list they crowd out the very code article the
+        question is about. Capping per document forces the cross-document
+        evidence a legal answer needs — except for synthesis questions, where
+        the answer legitimately lives in many articles of the same code.
+        """
+
+        # A concept node's own chunk is a navigation stub ("Thang lương, bảng
+        # lương" plus a citation list). It is what leads the walk to the real
+        # articles, but it is not evidence, so it must not consume the slots
+        # those articles need.
+        for row in expanded.values():
+            if str(row.get("chunk_type")) == "semantic":
+                row["score"] *= 0.5
+
+        ranked = sorted(expanded.values(), key=lambda row: row["score"], reverse=True)
+        if aggregative:
+            doc_cap = max(4, int(top_k * 0.7))
+            node_cap = 1
+        else:
+            doc_cap = max(3, int(top_k * 0.45))
+            node_cap = 2
+        semantic_cap = 1
+        selected: list[dict[str, Any]] = []
+        per_doc: dict[str, int] = {}
+        per_node: dict[str, int] = {}
+        semantic_used = 0
+        deferred: list[dict[str, Any]] = []
+
+        for row in ranked:
+            doc_id = str(row.get("doc_id") or "")
+            node_id = str(row.get("node_id") or "")
+            is_semantic = str(row.get("chunk_type")) == "semantic"
+            if is_semantic and semantic_used >= semantic_cap:
+                deferred.append(row)
+                continue
+            if per_doc.get(doc_id, 0) >= doc_cap or per_node.get(node_id, 0) >= node_cap:
+                deferred.append(row)
+                continue
+            selected.append(row)
+            per_doc[doc_id] = per_doc.get(doc_id, 0) + 1
+            per_node[node_id] = per_node.get(node_id, 0) + 1
+            semantic_used += int(is_semantic)
+            if len(selected) >= top_k:
+                return selected
+
+        # Not enough distinct documents to fill the window - relax the caps.
+        for row in deferred:
+            selected.append(row)
+            if len(selected) >= top_k:
+                break
+        return selected
+
+    def _load_terms(self) -> list[tuple[str, str]]:
+        if self._terms is None:
+            rows = self.conn.execute(
+                "SELECT node_id, label FROM nodes WHERE node_type = 'ThuậtNgữ'"
+            ).fetchall()
+            terms = [(strip_accents(row["label"]).lower(), row["node_id"]) for row in rows]
+            self._terms = sorted(terms, key=lambda item: -len(item[0]))
+        return self._terms
+
+    def _seed_definitions(
+        self,
+        query: str,
+        query_ascii: str,
+        combined: dict[str, float],
+        reasons: dict[str, list[str]],
+        best_base: float,
+    ) -> None:
+        """Answer "X là gì?" from the mined definition layer, not from keywords.
+
+        Layer 2 knows which clause officially defines each term, so a definition
+        question can jump straight there instead of hoping the glossary clause
+        happens to out-rank the hundred articles that merely use the term.
+        """
+
+        markers = ("la gi", "dinh nghia", "duoc hieu la", "duoc hieu nhu the nao", "khai niem")
+        if not any(marker in query_ascii for marker in markers):
+            return
+        matches = [node_id for term, node_id in self._load_terms() if len(term) >= 6 and term in query_ascii]
+        if not matches:
+            return
+        placeholders = ",".join("?" for _ in matches[:5])
+        rows = self.conn.execute(
+            f"""
+            SELECT c.* FROM edges e
+            JOIN chunks c ON c.node_id = e.target_id
+            WHERE e.source_id IN ({placeholders}) AND e.relation = 'ĐƯỢC_ĐỊNH_NGHĨA_LÀ'
+            """,
+            matches[:5],
+        ).fetchall()
+        boost = max(best_base, 1.0) * 1.15
+        for row in rows:
+            chunk_id = row["chunk_id"]
+            # A clause is the precise definition; the whole glossary article is
+            # useful context but should not outrank it.
+            weight = 1.0 if row["chunk_type"] == "clause" else 0.72
+            combined[chunk_id] = max(combined.get(chunk_id, 0.0), boost * weight)
+            reasons.setdefault(chunk_id, []).append("definition")
+
+    #: Semantic node types worth matching against the raw question text.
+    SEEDABLE_CONCEPT_TYPES = (
+        "KhoảnThuNhập", "LoạiThưởng", "HìnhThứcTrảLương", "KỳHạnTrảLương", "CănCứTínhLương",
+        "MứcLươngTốiThiểu", "CáchTính_CôngThức", "ChếĐộ_QuyềnLợi", "NghĩaVụ", "HợpĐồngLaoĐộng",
+        "HànhVi_SựKiện", "ThủTục_ChếĐộ", "HồSơ_GiấyTờ", "ĐiềuKiện", "CơQuanGiảiQuyết",
+        "HànhViViPhạm", "BiệnPhápKhắcPhục", "TrạngTháiPhápLý", "SựKiệnKíchHoạt",
+    )
+
+    def _load_concepts(self) -> list[tuple[str, str]]:
+        if self._concepts is None:
+            placeholders = ",".join("?" for _ in self.SEEDABLE_CONCEPT_TYPES)
+            rows = self.conn.execute(
+                f"SELECT node_id, label FROM nodes WHERE node_type IN ({placeholders})",
+                list(self.SEEDABLE_CONCEPT_TYPES),
+            ).fetchall()
+            concepts = [
+                (strip_accents(str(row["label"])).lower(), str(row["node_id"]))
+                for row in rows
+                if len(str(row["label"])) >= 8
+            ]
+            self._concepts = sorted(concepts, key=lambda item: -len(item[0]))
+        return self._concepts
+
+    def _seed_concepts(
+        self,
+        query_ascii: str,
+        query_terms: list[str],
+        combined: dict[str, float],
+        reasons: dict[str, list[str]],
+        best_base: float,
+    ) -> None:
+        """Pull in the articles the ontology says govern a phrase in the question.
+
+        When a user writes "quy chế thưởng" the graph already records exactly
+        which articles regulate it — Điều 104 of the Labour Code, Điều 17 of the
+        sanction decree, Điều 41 of the implementing decree. Seeding from the
+        concept is far more reliable than hoping all three win a keyword contest
+        against a longer, wordier document.
+        """
+
+        matched = [node_id for label, node_id in self._load_concepts() if label in query_ascii]
+        if not matched:
+            return
+        boost = max(best_base, 1.0)
+        for hub_id in matched[:6]:
+            targets = self.conn.execute(
+                """
+                SELECT target_id FROM edges
+                WHERE source_id = ? AND relation IN ('QUY_ĐỊNH_TẠI', 'BỊ_XỬ_PHẠT', 'ÁP_DỤNG_CHO')
+                """,
+                (hub_id,),
+            ).fetchall()
+            node_ids = [
+                str(row["target_id"])
+                for row in targets
+                if str(row["target_id"]).startswith(("dieu:", "khoan:"))
+            ]
+            if not node_ids or len(node_ids) > self.HUB_FANOUT_LIMIT:
+                continue
+            scored: list[tuple[float, sqlite3.Row]] = []
+            for chunk in self._best_chunks_for_nodes(list(dict.fromkeys(node_ids))).values():
+                haystack = strip_accents(f"{chunk['title']} {chunk['text'][:500]}").lower()
+                coverage = sum(1 for term in query_terms if term in haystack) / min(len(query_terms), 10)
+                scored.append((coverage, chunk))
+            scored.sort(key=lambda item: -item[0])
+            for coverage, chunk in scored[:4]:
+                chunk_id = chunk["chunk_id"]
+                score = boost * (0.55 + 0.35 * coverage)
+                if combined.get(chunk_id, 0.0) < score:
+                    combined[chunk_id] = score
+                    reasons.setdefault(chunk_id, []).append("concept")
+
+    def _load_doc_bridges(self) -> dict[str, list[str]]:
+        """doc_id -> documents linked by GUIDES / AMENDS / REPLACES, both ways."""
+
+        if self._doc_bridges is None:
+            bridges: dict[str, list[str]] = {}
+            rows = self.conn.execute(
+                "SELECT source_id, target_id FROM edges WHERE relation IN ('HƯỚNG_DẪN', 'SỬA_ĐỔI', 'THAY_THẾ')"
+            ).fetchall()
+            for row in rows:
+                source = str(row["source_id"]).removeprefix("doc:")
+                target = str(row["target_id"]).removeprefix("doc:")
+                bridges.setdefault(source, []).append(target)
+                bridges.setdefault(target, []).append(source)
+            self._doc_bridges = {key: list(dict.fromkeys(value)) for key, value in bridges.items()}
+        return self._doc_bridges
+
+    def _bridge_documents(
+        self,
+        query: str,
+        base_ids: list[str],
+        expanded: OrderedDict[str, dict[str, Any]],
+        best_base: float,
+    ) -> None:
+        """Re-query the linked law when the hits all sit in one decree.
+
+        A question like "trả lương chậm bị phạt bao nhiêu" is answered by the
+        sanction decree *and* the code article it enforces. Following the
+        document-level GUIDES edge and running a second, document-scoped search
+        pulls the missing half in at article granularity.
+        """
+
+        expression = self._fts_query(query)
+        if not expression:
+            return
+        base_rows = self._chunks_by_ids(base_ids)
+        present = {str(row["doc_id"]) for row in base_rows.values()}
+        bridges = self._load_doc_bridges()
+        candidates: list[str] = []
+        for doc_id in present:
+            for linked in bridges.get(doc_id, []):
+                if linked not in present and linked not in candidates:
+                    candidates.append(linked)
+        if not candidates:
+            return
+
+        for doc_id in candidates[:4]:
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT c.*, bm25(chunk_fts) AS rank
+                    FROM chunk_fts
+                    JOIN chunks c ON c.chunk_id = chunk_fts.chunk_id
+                    WHERE chunk_fts MATCH ? AND c.doc_id = ? AND c.chunk_type IN ('article', 'clause', 'table')
+                    ORDER BY rank
+                    LIMIT 2
+                    """,
+                    (expression, doc_id),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                continue
+            for position, row in enumerate(rows):
+                chunk_id = row["chunk_id"]
+                score = best_base * (0.62 - position * 0.06)
+                current = expanded.get(chunk_id)
+                if current and current["score"] >= score:
+                    continue
+                payload = dict(row)
+                payload.pop("rank", None)
+                payload["score"] = score
+                payload["reasons"] = ["bridge:HƯỚNG_DẪN"]
+                expanded[chunk_id] = payload
 
     def _fts_query(self, query: str) -> str:
         tokens = [t for t in VN_WORD_RE.findall(query.lower()) if len(t) >= 2]
@@ -1254,8 +2497,48 @@ class GraphRAGStore:
             self._vectors = [(row["chunk_id"], row["vector"]) for row in rows]
         return self._vectors
 
+    def _load_matrix(self) -> Any:
+        """Stack every chunk vector once so a query is a single matmul.
+
+        Scoring 27k chunks with a Python loop cost ~2.5s per query; as one numpy
+        product it is a few milliseconds, which is the difference between a
+        usable interactive latency and a visible stall.
+        """
+
+        if self._matrix is not None:
+            return self._matrix
+        try:
+            import numpy as np
+        except ImportError:  # pragma: no cover - numpy is a hard dependency of torch
+            self._matrix = False
+            return self._matrix
+
+        rows = self._load_vectors()
+        dimensions = self.embedding_config.dimensions
+        matrix = np.empty((len(rows), dimensions), dtype=np.float32)
+        for index, (chunk_id, blob) in enumerate(rows):
+            vector = np.frombuffer(blob, dtype=np.float32)
+            if vector.size != dimensions:
+                raise RuntimeError(
+                    f"Chunk {chunk_id} has {vector.size} embedding dimensions; rebuild the index."
+                )
+            matrix[index] = vector
+        self._matrix = matrix
+        self._matrix_ids = [chunk_id for chunk_id, _ in rows]
+        return self._matrix
+
     def _vector_search(self, query: str, limit: int) -> list[tuple[str, float]]:
         qvec = get_embedding_service(self.embedding_config).embed_query(query)
+        matrix = self._load_matrix()
+        if matrix is not False:
+            import numpy as np
+
+            scores = matrix @ np.asarray(qvec, dtype=np.float32)
+            count = min(limit, scores.shape[0])
+            top = np.argpartition(-scores, count - 1)[:count]
+            top = top[np.argsort(-scores[top])]
+            return [(self._matrix_ids[index], float(scores[index])) for index in top]
+
         scored = []
         for chunk_id, blob in self._load_vectors():
             vector = blob_to_vector(blob)
@@ -1275,13 +2558,50 @@ class GraphRAGStore:
         rows = self.conn.execute(f"SELECT * FROM chunks WHERE chunk_id IN ({placeholders})", ids).fetchall()
         return {row["chunk_id"]: row for row in rows}
 
+    CHUNK_PRIORITY = ["point", "clause", "article", "table", "sliding", "document_intro", "structure", "semantic"]
+
+    def _rank_chunk(self, row: sqlite3.Row) -> tuple[int, int]:
+        chunk_type = row["chunk_type"]
+        order = self.CHUNK_PRIORITY.index(chunk_type) if chunk_type in self.CHUNK_PRIORITY else 99
+        return order, row["ordinal"]
+
     def _best_chunk_for_node(self, node_id: str) -> sqlite3.Row | None:
-        priority = ["point", "clause", "article", "sliding", "document_intro", "structure", "semantic"]
+        """Representative chunk for a node, memoised per store instance.
+
+        Graph expansion asks for this thousands of times per query; without the
+        cache each ask was a separate SQLite round trip.
+        """
+
+        if node_id in self._node_chunk_cache:
+            return self._node_chunk_cache[node_id]
         rows = self.conn.execute("SELECT * FROM chunks WHERE node_id = ?", (node_id,)).fetchall()
-        if not rows:
-            return None
-        rows = sorted(rows, key=lambda row: (priority.index(row["chunk_type"]) if row["chunk_type"] in priority else 99, row["ordinal"]))
-        return rows[0]
+        best = min(rows, key=self._rank_chunk) if rows else None
+        self._node_chunk_cache[node_id] = best
+        return best
+
+    def _best_chunks_for_nodes(self, node_ids: list[str]) -> dict[str, sqlite3.Row]:
+        """Batched form of :meth:`_best_chunk_for_node` for wide fan-outs."""
+
+        missing = [node_id for node_id in node_ids if node_id not in self._node_chunk_cache]
+        for start in range(0, len(missing), 400):
+            window = missing[start : start + 400]
+            placeholders = ",".join("?" for _ in window)
+            rows = self.conn.execute(
+                f"SELECT * FROM chunks WHERE node_id IN ({placeholders})", window
+            ).fetchall()
+            grouped: dict[str, sqlite3.Row] = {}
+            for row in rows:
+                node_id = row["node_id"]
+                current = grouped.get(node_id)
+                if current is None or self._rank_chunk(row) < self._rank_chunk(current):
+                    grouped[node_id] = row
+            for node_id in window:
+                self._node_chunk_cache[node_id] = grouped.get(node_id)
+        return {
+            node_id: self._node_chunk_cache[node_id]
+            for node_id in node_ids
+            if self._node_chunk_cache.get(node_id) is not None
+        }
 
     def _ancestor_nodes(self, node_id: str) -> list[str]:
         ancestors: list[str] = []
@@ -1300,20 +2620,125 @@ class GraphRAGStore:
         if not node_ids:
             return []
         placeholders = ",".join("?" for _ in node_ids)
+        reverse_rels = sorted(onto.REVERSIBLE_RELATIONS)
+        reverse_placeholders = ",".join("?" for _ in reverse_rels)
         return self.conn.execute(
             f"""
             SELECT * FROM edges
             WHERE source_id IN ({placeholders})
-               OR (target_id IN ({placeholders}) AND relation IN ('HƯỚNG_DẪN', 'SỬA_ĐỔI', 'THAY_THẾ'))
+               OR (target_id IN ({placeholders}) AND relation IN ({reverse_placeholders}))
             """,
-            node_ids + node_ids,
+            node_ids + node_ids + reverse_rels,
         ).fetchall()
+
+    def _sibling_articles(self, node_id: str, limit: int = 2) -> list[sqlite3.Row]:
+        """Articles immediately before/after this one under the same parent.
+
+        Related rules are written side by side - trợ cấp thôi việc (Điều 46) and
+        trợ cấp mất việc làm (Điều 47), điều kiện hưởng lương hưu and mức lương
+        hưu - so a question that contrasts two of them needs both.
+        """
+
+        row = self.conn.execute(
+            "SELECT parent_id, ordinal, node_type FROM nodes WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        if not row or row["node_type"] != "Điều" or not row["parent_id"]:
+            return []
+        return self.conn.execute(
+            """
+            SELECT node_id, label, ordinal FROM nodes
+            WHERE parent_id = ? AND node_type = 'Điều' AND node_id != ?
+            ORDER BY ABS(ordinal - ?) LIMIT ?
+            """,
+            (row["parent_id"], node_id, row["ordinal"], limit),
+        ).fetchall()
+
+    #: A concept linked to more articles than this is a generic hub ("người lao
+    #: động" touches 2.7k articles) and says nothing about relevance.
+    HUB_FANOUT_LIMIT = 60
+
+    def _expand_through_hubs(
+        self,
+        node_ids: list[str],
+        base_score: float,
+        query_terms: list[str],
+        add: Any,
+        aggregative: bool = False,
+    ) -> None:
+        """Two-hop jump: article → shared concept → the other articles about it.
+
+        This is what lets "quy chế thưởng" connect Điều 104 of the Labour Code
+        to Điều 17 of the sanction decree and Điều 41 of the implementing
+        decree, none of which cite each other textually.
+
+        For an aggregative question ("tổng hợp…", "so sánh…") the broad topic
+        hubs are exactly the right structure — they enumerate every article on a
+        subject — so the fan-out guard is relaxed and more targets are taken.
+        """
+
+        placeholders = ",".join("?" for _ in node_ids)
+        hub_relations = ("QUY_ĐỊNH_TẠI", "BỊ_XỬ_PHẠT", "ĐƯỢC_ĐỊNH_NGHĨA_LÀ", "ÁP_DỤNG_CHO", "THUỘC_CHỦ_ĐỀ")
+        rel_placeholders = ",".join("?" for _ in hub_relations)
+        hubs = self.conn.execute(
+            f"""
+            SELECT DISTINCT source_id AS hub FROM edges
+            WHERE target_id IN ({placeholders}) AND relation IN ({rel_placeholders})
+            UNION
+            SELECT DISTINCT target_id AS hub FROM edges
+            WHERE source_id IN ({placeholders}) AND relation = 'THUỘC_CHỦ_ĐỀ'
+            """,
+            list(node_ids) + list(hub_relations) + list(node_ids),
+        ).fetchall()
+        hub_ids = list(dict.fromkeys(str(row["hub"]) for row in hubs))[:10]
+        if not hub_ids:
+            return
+
+        fanout_limit = 4000 if aggregative else self.HUB_FANOUT_LIMIT
+        take = 5 if aggregative else 2
+        seen = set(node_ids)
+        for hub_id in hub_ids:
+            is_topic = hub_id.startswith("chude:")
+            if is_topic and not aggregative:
+                # Topic hubs are too broad to help a specific question.
+                continue
+            targets = self.conn.execute(
+                """
+                SELECT source_id, target_id, relation FROM edges
+                WHERE (source_id = ? AND relation IN ('QUY_ĐỊNH_TẠI', 'BỊ_XỬ_PHẠT', 'ĐƯỢC_ĐỊNH_NGHĨA_LÀ'))
+                   OR (target_id = ? AND relation = 'THUỘC_CHỦ_ĐỀ')
+                """,
+                (hub_id, hub_id),
+            ).fetchall()
+            if not targets or len(targets) > fanout_limit:
+                continue
+            candidates = [
+                str(row["target_id"] if row["relation"] != "THUỘC_CHỦ_ĐỀ" else row["source_id"])
+                for row in targets
+            ]
+            candidates = [
+                node_id
+                for node_id in dict.fromkeys(candidates)
+                if node_id not in seen and node_id.startswith(("dieu:", "khoan:"))
+            ][:600]
+            scored: list[tuple[float, sqlite3.Row]] = []
+            for chunk in self._best_chunks_for_nodes(candidates).values():
+                haystack = strip_accents(f"{chunk['title']} {chunk['text'][:500]}").lower()
+                coverage = sum(1 for term in query_terms if term in haystack) / min(len(query_terms), 10)
+                if coverage < (0.2 if aggregative else 0.25):
+                    continue
+                scored.append((coverage, chunk))
+            scored.sort(key=lambda item: -item[0])
+            weight_base = 0.50 if aggregative else 0.44
+            for coverage, chunk in scored[:take]:
+                add(chunk, base_score * (weight_base + 0.18 * coverage), f"hub:{hub_id.split(':')[0]}")
 
     def _expand_graph(
         self,
         base_ids: list[str],
         base_scores: dict[str, float],
         reasons: dict[str, list[str]],
+        query_terms: list[str] | None = None,
+        aggregative: bool = False,
     ) -> OrderedDict[str, dict[str, Any]]:
         expanded: OrderedDict[str, dict[str, Any]] = OrderedDict()
         base_rows = self._chunks_by_ids(base_ids)
@@ -1355,34 +2780,31 @@ class GraphRAGStore:
                     continue
                 edge_chunk = self._best_chunk_for_node(other_id)
                 if edge_chunk:
-                    relation_weight = {
-                        "DẪN_CHIẾU_ĐẾN": 0.72,
-                        "HƯỚNG_DẪN": 0.62,
-                        "SỬA_ĐỔI": 0.58,
-                        "THAY_THẾ": 0.58,
-                        "THUỘC_VỀ": 0.45,
-                        "ĐƯỢC_ĐỊNH_NGHĨA_LÀ": 0.85,
-                        "ÁP_DỤNG_CHO": 0.75,
-                        "CÓ_THAM_SỐ": 0.70,
-                        "KÝ_KẾT": 0.65,
-                        "THỰC_HIỆN": 0.72,
-                        "CÓ_QUYỀN_HƯỞNG": 0.80,
-                        "BỊ_NẰM_TRONG_DANH_MỤC_CẤM": 0.85,
-                        "BẮT_ĐẦU_TÍNH_THỜI_HIỆU": 0.78,
-                        "CHUYỂN_TRẠNG_THÁI": 0.75,
-                        "YÊU_CẦU_ĐIỀU_KIỆN": 0.82,
-                        "BAO_GỒM_HỒ_SƠ": 0.80,
-                        "NỘP_TẠI": 0.70,
-                        "CÓ_THỜI_HẠN_LÀ": 0.75,
-                        "GIAI_DOẠN_TIẾP_THEO": 0.68,
-                        "KÍCH_HOẠT_NGHĨA_VỤ": 0.80,
-                        "GÂY_RA_RỦI_RO": 0.85,
-                        "KHẮC_PHỤC_BẰNG": 0.82,
-                        "ÁP_DỤNG_ĐIỀU_LUẬT": 0.85,
-                        "CÓ_TÌNH_TIẾT_TƯƠNG_TỰ": 0.88,
-                        "DẪN_ĐẾN_PHÁN_QUYẾT": 0.85,
-                    }.get(edge["relation"], 0.4)
-                    add(edge_chunk, base_score * relation_weight, f"edge:{edge['relation']}")
+                    weight = onto.relation_weight(edge["relation"])
+                    if reverse:
+                        # Walking a relation backwards is a weaker signal than
+                        # following it in its declared direction.
+                        weight *= 0.85
+                    add(edge_chunk, base_score * weight, f"edge:{edge['relation']}")
+
+            if query_terms:
+                self._expand_through_hubs(node_ids, base_score, query_terms, add, aggregative)
+
+            article_id = next(
+                (nid for nid in node_ids if str(nid).startswith("dieu:")), None
+            )
+            if article_id and query_terms:
+                for sibling in self._sibling_articles(article_id, limit=4):
+                    sibling_chunk = self._best_chunk_for_node(sibling["node_id"])
+                    if not sibling_chunk:
+                        continue
+                    haystack = strip_accents(
+                        f"{sibling_chunk['title']} {sibling_chunk['text'][:400]}"
+                    ).lower()
+                    matched = sum(1 for term in query_terms if term in haystack)
+                    if matched / min(len(query_terms), 10) < 0.3:
+                        continue
+                    add(sibling_chunk, base_score * 0.58, "sibling")
 
         return expanded
 

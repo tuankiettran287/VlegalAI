@@ -18,59 +18,45 @@ from psycopg.rows import dict_row
 from sqlalchemy.engine import make_url
 
 from app.legal_graphrag import DEFAULT_DB_PATH, blob_to_vector, key_terms, normalize_space, strip_accents
+from app.legal_ontology import RELATIONS as LEGAL_RELATIONS
+from app.legal_ontology import REVERSIBLE_RELATIONS as LEGAL_REVERSIBLE_RELATIONS
 from app.services.embeddings import EmbeddingConfig, get_embedding_service
 
 
 logger = logging.getLogger(__name__)
 
 
+#: Accent-stripped Vietnamese relation -> Neo4j relationship type.
+#: Derived from ``app.legal_ontology.RELATIONS`` so the two stay in step; the
+#: literal spellings below are the accent-stripped forms produced by
+#: ``relation_type()`` at sync time.
 RELATION_TYPE_MAP = {
-    "THUOC_VE": "BELONGS_TO",
-    "HUONG_DAN": "GUIDES",
-    "DAN_CHIEU_DEN": "CITES",
-    "SUA_DOI": "AMENDS",
-    "THAY_THE": "REPLACES",
-    "BAN_HANH": "ISSUED_BY",
-    # Layer 2: Legal Semantic Spectrum
-    "DUOC_DINH_NGHIA_LA": "DEFINED_AS",
-    "AP_DUNG_CHO": "APPLIES_TO",
-    "CO_THAM_SO": "HAS_PARAMETER",
-    # Layer 3: Domain Ontology
-    "KY_KET": "SIGNS",
-    "THUC_HIEN": "PERFORMS",
-    "CO_QUYEN_HUONG": "ENTITLED_TO",
-    "BI_NAM_TRONG_DANH_MUC_CAM": "PROHIBITED_BY",
-    # Layer 4: Temporal & State Transition
-    "BAT_DAU_TINH_THOI_HIEU": "STARTS_LIMITATION",
-    "CHUYEN_TRANG_THAI": "TRANSITIONS_STATE",
-    # Layer 5: Process-Oriented
-    "YEU_CAU_DIEU_KIEN": "REQUIRES_CONDITION",
-    "BAO_GOM_HO_SO": "INCLUDES_DOSSIER",
-    "NOP_TAI": "SUBMITTED_AT",
-    "CO_THOI_HAN_LA": "HAS_DURATION",
-    # Layer 6: Lifecycle-Based
-    "GIAI_DOAN_TIEP_THEO": "NEXT_STAGE",
-    "KICH_HOAT_NGHIA_VU": "TRIGGERS_OBLIGATION",
-    # Layer 7: Compliance & Risk Matrix
-    "GAY_RA_RUI_RO": "CAUSES_RISK",
-    "KHAC_PHUC_BANG": "MITIGATED_BY",
-    # Layer 8: Precedent & Case-Based Reasoning
-    "AP_DUNG_DIEU_LUAT": "APPLIES_ARTICLE",
-    "CO_TINH_TIET_TUONG_TU": "SIMILAR_FACTS",
-    "DAN_DEN_PHAN_QUYET": "LEADS_TO_RULING",
+    strip_accents(relation).upper(): english
+    for relation, (english, _layer, _weight, _doc) in LEGAL_RELATIONS.items()
 }
+#: Relations emitted by older index builds, kept so a stale SQLite snapshot
+#: still syncs into Neo4j with a meaningful type instead of RELATED_TO.
+RELATION_TYPE_MAP.update(
+    {
+        "BI_NAM_TRONG_DANH_MUC_CAM": "PROHIBITED_BY",
+        "GIAI_DOAN_TIEP_THEO": "NEXT_STAGE",
+    }
+)
 
-GRAPH_EXPAND_RELS = [
-    "BELONGS_TO", "CITES", "GUIDES", "AMENDS", "REPLACES",
-    "DEFINED_AS", "APPLIES_TO", "HAS_PARAMETER",
-    "SIGNS", "PERFORMS", "ENTITLED_TO", "PROHIBITED_BY",
-    "STARTS_LIMITATION", "TRANSITIONS_STATE",
-    "REQUIRES_CONDITION", "INCLUDES_DOSSIER", "SUBMITTED_AT", "HAS_DURATION",
-    "NEXT_STAGE", "TRIGGERS_OBLIGATION",
-    "CAUSES_RISK", "MITIGATED_BY",
-    "APPLIES_ARTICLE", "SIMILAR_FACTS", "LEADS_TO_RULING"
-]
-GRAPH_REVERSE_RELS = ["GUIDES", "AMENDS", "REPLACES"]
+GRAPH_EXPAND_RELS = sorted(
+    {english for english, _layer, _weight, _doc in LEGAL_RELATIONS.values()} - {"ISSUED_BY"}
+)
+GRAPH_REVERSE_RELS = sorted(
+    {
+        LEGAL_RELATIONS[relation][0]
+        for relation in LEGAL_REVERSIBLE_RELATIONS
+        if relation in LEGAL_RELATIONS
+    }
+)
+#: Expansion weights keyed by Neo4j relationship type.
+GRAPH_RELATION_WEIGHTS = {
+    english: weight for english, _layer, weight, _doc in LEGAL_RELATIONS.values()
+}
 
 POSTGRES_LEXICAL_TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", re.UNICODE)
 POSTGRES_TEXT_SEARCH_EXPRESSION = (

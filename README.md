@@ -38,6 +38,12 @@ thái từng văn bản, URL chính thức và việc chỉ mục có vừa đư
 - `app/models.py`: SQLAlchemy PostgreSQL models.
 - `app/services/freshness.py`: kiểm tra hiệu lực bắt buộc trước kết quả pháp lý.
 - `app/services/indexer.py`: tải luật mới, chunk, cập nhật PostgreSQL/pgvector và Neo4j.
+- `app/legal_ontology.py`: bản thể học 10 tầng của đồ thị pháp luật (loại nút, quan hệ,
+  trọng số truy hồi, từ điển tiền lương/tiền thưởng, chế tài, chủ đề).
+- `app/legal_graphrag.py`: bộ dựng đồ thị từ `.docx` và kho truy hồi cục bộ SQLite + FTS5.
+- `evaluation/question_bank.json` + `scripts/run_question_bank.py`: bộ 70 câu hỏi phân tầng
+  single-hop → multi-hop → multi-abstract và trình chạy đo độ chính xác, độ trễ.
+  Chi tiết kiến trúc: [GraphRAG_Documentation.md](GraphRAG_Documentation.md).
 - `app/worker.py`: Celery refresh toàn bộ kho luật theo lịch.
 - `migrations/`: Alembic PostgreSQL migrations.
 - `compose.gcp.yml`: build/tag các image `linux/amd64` cho Google Artifact Registry.
@@ -91,8 +97,8 @@ khoản và secret phổ biến được che trước khi gửi ra Vertex AI/Tav
 Chỉ đặt `allow` khi tổ chức đã phê duyệt rõ chính sách dữ liệu tương ứng.
 
 Một cấu hình model duy nhất được dùng cho hỏi đáp, kiểm tra hiệu lực, tạo/review/
-so sánh hợp đồng, nghiên cứu bài viết, tóm tắt bộ nhớ hội thoại và RAGAS judge.
-Chỉ embedding truy xuất/cache tiếp tục dùng BGE-M3 local.
+so sánh hợp đồng, nghiên cứu bài viết, tóm tắt bộ nhớ hội thoại và LLM-judge của
+bộ đánh giá. Chỉ embedding truy xuất/cache tiếp tục dùng BGE-M3 local.
 
 Chức năng Bài viết tìm đồng thời bằng Tavily và Google Search grounding. Các URL
 do Google tìm thấy được Tavily Extract bổ sung nội dung khi có thể; frontend hiển
@@ -151,6 +157,11 @@ PostgreSQL/pgvector là dịch vụ được quản lý bên ngoài và được
 `DATABASE_URL` trong file env; Compose không khởi động database. Neo4j lưu graph.
 Migration phải thành công trước khi API và worker khởi động.
 
+`api` và `worker` phục vụ mọi request từ PostgreSQL/pgvector và Neo4j nên chỉ
+mount `env.json` và checkpoint BGE-M3. Corpus `.docx` và chỉ mục SQLite cục bộ
+chỉ được mount vào `reindex` — image duy nhất dựng chỉ mục — đúng như cấu hình
+Cloud Run, nơi chỉ job reindex mount corpus bucket.
+
 Chạy local toàn bộ stack (đặt `env.json` ở thư mục gốc trước khi chạy):
 
 ```bash
@@ -166,9 +177,9 @@ docker compose run --rm migrate
 docker compose --profile jobs run --rm reindex --reset-postgres --reset-neo4j
 ```
 
-Lần đầu cần đủ dung lượng đĩa và thời gian tải BGE-M3. Theo dõi riêng bằng
-`docker compose logs -f model-init`; các lần sau checkpoint embedding được dùng
-lại từ Docker volume.
+Lần đầu cần đủ dung lượng đĩa và thời gian tải BGE-M3 (~2,1 GB). Theo dõi riêng
+bằng `docker compose logs -f model-init`; các lần sau checkpoint embedding được
+dùng lại từ Docker volume.
 
 Xem [hướng dẫn Cloud Run](deploy-gcp-cloud-run.md) để build và triển khai lên GCP.
 API/frontend là hai service riêng dùng URL `run.app`; worker/beat là Worker Pool,

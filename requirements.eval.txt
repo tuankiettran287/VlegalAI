@@ -1,6 +1,0 @@
--r requirements.txt
-ragas==0.2.15
-langchain-community==0.3.31
-langchain-google-vertexai>=2.0,<3
-datasets>=5.0.0
-pandas>=3.0.0

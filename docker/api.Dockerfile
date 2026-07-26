@@ -2,6 +2,9 @@
 
 FROM python:3.12-slim-bookworm
 
+# API truy hồi qua PostgreSQL/pgvector và Neo4j (RETRIEVER_BACKEND=hybrid_rag),
+# không mở chỉ mục SQLite cục bộ và không đọc corpus .docx. Vì vậy image chỉ cần
+# mã ứng dụng và checkpoint BGE-M3 mount từ ngoài vào /models/embedding.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -9,6 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     TOKENIZERS_PARALLELISM=false \
+    EMBEDDING_MODEL_PATH=/models/embedding \
     PORT=8080 \
     WEB_CONCURRENCY=1
 
@@ -21,8 +25,6 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=vlegal:vlegal app ./app
-RUN mkdir -p /app/storage \
-    && chown vlegal:vlegal /app/storage
 
 USER vlegal
 

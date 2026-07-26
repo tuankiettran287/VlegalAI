@@ -17,6 +17,7 @@ beautifulsoup4>=4.12.3
 pypdf>=5.1.0
 neo4j
 psycopg[binary]>=3.2.3
+numpy>=1.26,<3
 torch>=2.5,<3
 transformers>=4.51,<6
 accelerate>=1.2,<2
