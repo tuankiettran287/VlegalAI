@@ -7,7 +7,7 @@ import math
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
@@ -294,12 +294,15 @@ class ExternalGraphRAGConfig:
     database_url: str = "postgresql+asyncpg://vlegal:vlegal@localhost:5432/vlegal"
     postgres_vector_size: int = 1024
     batch_size: int = 256
+    embedding_provider: str = "vertex"
     embedding_model: str = "gemini-embedding-001"
     embedding_project_id: str = ""
     embedding_location: str = "asia-southeast1"
     embedding_credentials_path: str = "env.json"
     embedding_use_adc: bool = False
+    embedding_api_key: str = field(default="", repr=False)
     embedding_max_concurrency: int = 8
+    embedding_batch_size: int = 20
     embedding_timeout_seconds: float = 60.0
     embedding_max_retries: int = 3
     embedding_auto_truncate: bool = True
@@ -323,6 +326,7 @@ class ExternalGraphRAGConfig:
             ),
             postgres_vector_size=int(os.getenv("POSTGRES_VECTOR_SIZE", "1024")),
             batch_size=int(os.getenv("EXTERNAL_SYNC_BATCH_SIZE", "256")),
+            embedding_provider=os.getenv("EMBEDDING_PROVIDER", "vertex"),
             embedding_model=os.getenv("EMBEDDING_MODEL", "gemini-embedding-001"),
             embedding_project_id=os.getenv("GEMINI_PROJECT_ID", ""),
             embedding_location=os.getenv(
@@ -335,9 +339,11 @@ class ExternalGraphRAGConfig:
             ),
             embedding_use_adc=os.getenv("GEMINI_USE_ADC", "").strip().lower()
             in {"1", "true", "yes", "on"},
+            embedding_api_key=os.getenv("GEMINI_API_KEY", ""),
             embedding_max_concurrency=int(
                 os.getenv("EMBEDDING_MAX_CONCURRENCY", "8")
             ),
+            embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "20")),
             embedding_timeout_seconds=float(
                 os.getenv("EMBEDDING_TIMEOUT_SECONDS", "60")
             ),
@@ -361,13 +367,16 @@ class ExternalGraphRAGConfig:
     @property
     def embedding_config(self) -> EmbeddingConfig:
         return EmbeddingConfig(
+            provider=self.embedding_provider,
             model=self.embedding_model,
             project_id=self.embedding_project_id,
             location=self.embedding_location,
             credentials_path=self.embedding_credentials_path,
             use_adc=self.embedding_use_adc,
+            api_key=self.embedding_api_key,
             dimensions=self.postgres_vector_size,
             max_concurrency=self.embedding_max_concurrency,
+            batch_size=self.embedding_batch_size,
             timeout_seconds=self.embedding_timeout_seconds,
             max_retries=self.embedding_max_retries,
             auto_truncate=self.embedding_auto_truncate,

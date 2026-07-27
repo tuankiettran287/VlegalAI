@@ -4,10 +4,10 @@ Luồng này chỉ dành cho `vlegal-api`. Frontend tiếp tục dùng image Ngi
 Backend được build từ source bằng Google Buildpacks với `Procfile` và
 `.python-version`; không cần thêm Dockerfile backend.
 
-Script đồng thời truyền thẳng `GOOGLE_PYTHON_VERSION=3.13.x` và
-`GOOGLE_ENTRYPOINT` vào Buildpacks. Đây là lớp bảo vệ cho lỗi đã thấy trong log:
-Cloud Build từng bỏ qua hai file cấu hình, tự chọn Python 3.14 và dừng ở
-`google.python.missing-entrypoint`.
+Script truyền `GOOGLE_PYTHON_VERSION=3.13.x` và chủ động gỡ build variable
+`GOOGLE_ENTRYPOINT` cũ để Buildpacks đọc đủ các process trong `Procfile`
+(`web`, `migrate`, `reindex`). Đây là lớp bảo vệ cho lỗi đã thấy trong log:
+Cloud Build từng tự chọn Python 3.14 hoặc bỏ qua các process phụ.
 
 Python 3.13 được dùng đồng nhất với backend Dockerfile và GitHub Actions. Builder
 Cloud Run hiện tại không còn cung cấp Python 3.12, nên ép `3.12.x` sẽ dừng ở bước
@@ -82,9 +82,29 @@ nhận diện và gỡ đúng các biến đó trong một revision không nhậ
 bind Secret Manager. Bản source mới cũng được deploy không traffic, kiểm tra
 `live`/`ready` qua URL có tag, rồi mới chuyển 100% traffic sang revision mới.
 
-Production giữ `GEMINI_USE_ADC=true` để Gemini generation và
-`gemini-embedding-001` dùng Cloud Run service identity. `GEMINI_API_KEY` vẫn được
-lưu và bind từ Secret Manager theo cấu hình hiện tại, nhưng không được commit.
+Production giữ `GEMINI_USE_ADC=true` cho Gemini generation trên Vertex AI.
+Embedding dùng `EMBEDDING_PROVIDER=gemini-api` và lấy `GEMINI_API_KEY` từ Secret
+Manager. Batch 20 văn bản giúp tránh quota Vertex AI 5 request/phút nhưng vẫn giữ
+nguyên model `gemini-embedding-001` và vector 1024 chiều.
+
+## Chạy reindex sau khi deploy API
+
+Script dưới đây tự lấy image từ revision API mới nhất, cấu hình job 4 CPU/8 GiB,
+chạy migration GraphRAG reset/reindex và chỉ refresh API sau khi job thành công:
+
+```bash
+chmod +x scripts/gcp/run-reindex-buildpacks.sh
+
+./scripts/gcp/run-reindex-buildpacks.sh \
+  --project idyllic-anvil-452006-k0 \
+  --region asia-southeast1 \
+  --neo4j-uri neo4j+s://YOUR_INSTANCE.databases.neo4j.io \
+  --neo4j-user neo4j \
+  --neo4j-database neo4j
+```
+
+Không cần nhập lại API key; job bind version `latest` của
+`vlegal-gemini-api-key` từ Secret Manager.
 
 ## Xem lỗi build
 

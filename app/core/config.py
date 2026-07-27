@@ -91,14 +91,16 @@ class Settings(BaseSettings):
     gemini_thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     gemini_data_policy: Literal["redact", "deny", "allow"] = "redact"
 
-    # Semantic embeddings use Gemini Embedding 001 through Vertex AI. The
-    # reduced 1024-dimensional output remains compatible with the pgvector
-    # schema and is normalized by the application before storage/search.
+    # Semantic embeddings can use Vertex AI or the Gemini Developer API. The
+    # provider is independent from GEMINI_USE_ADC so generation can remain on
+    # Vertex while bulk embedding uses the API-key-backed batch endpoint.
+    embedding_provider: Literal["vertex", "gemini-api"] = "vertex"
     embedding_model: str = "gemini-embedding-001"
     embedding_location: str = "asia-southeast1"
     embedding_max_concurrency: int = Field(default=8, ge=1, le=64)
+    embedding_batch_size: int = Field(default=20, ge=1, le=100)
     embedding_timeout_seconds: int = Field(default=60, ge=5, le=600)
-    embedding_max_retries: int = Field(default=3, ge=1, le=3)
+    embedding_max_retries: int = Field(default=3, ge=1, le=10)
     embedding_auto_truncate: bool = True
 
     tavily_api_key: str = ""

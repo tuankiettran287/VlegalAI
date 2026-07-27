@@ -9,6 +9,7 @@ import pytest
 
 from app.services.embeddings import (
     EMBEDDING_PROVIDER_REVISION,
+    GEMINI_API_PROVIDER_REVISION,
     EmbeddingConfig,
     EmbeddingModelError,
     VertexAIEmbeddingService,
@@ -127,6 +128,94 @@ def test_embedding_config_identity_tracks_vertex_provider() -> None:
     assert config.identity == "gemini-embedding-001@vertex-ai-v1:redact"
     assert 128 <= config.dimensions <= 3072
     assert math.isfinite(config.timeout_seconds)
+
+
+def test_gemini_api_batches_documents_and_preserves_order() -> None:
+    requests: list[httpx.Request] = []
+    vectors = {
+        "one": [1.0, 0.0, 0.0],
+        "two": [0.0, 2.0, 0.0],
+        "three": [0.0, 0.0, 3.0],
+        "four": [1.0, 1.0, 0.0],
+        "five": [1.0, 0.0, 1.0],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = json.loads(request.content)
+        embed_requests = body.get("requests", [body])
+        embeddings = [
+            {
+                "values": vectors[
+                    embed_request["content"]["parts"][0]["text"]
+                ]
+            }
+            for embed_request in embed_requests
+        ]
+        if len(embed_requests) == 1:
+            return httpx.Response(200, json={"embedding": embeddings[0]})
+        return httpx.Response(200, json={"embeddings": embeddings})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            provider="gemini-api",
+            model="gemini-embedding-001",
+            api_key="test-api-key",
+            dimensions=3,
+            max_concurrency=1,
+            batch_size=2,
+            max_retries=1,
+            data_policy="allow",
+        ),
+        client=client,
+    )
+    try:
+        result = service.embed_documents(
+            ["one", "two", "three", "four", "five"]
+        )
+    finally:
+        client.close()
+
+    assert len(result) == 5
+    assert result[0] == [1.0, 0.0, 0.0]
+    assert result[1] == [0.0, 1.0, 0.0]
+    assert result[2] == [0.0, 0.0, 1.0]
+    assert result[3] == pytest.approx(
+        [1 / math.sqrt(2), 1 / math.sqrt(2), 0.0]
+    )
+    assert result[4] == pytest.approx(
+        [1 / math.sqrt(2), 0.0, 1 / math.sqrt(2)]
+    )
+    assert [request.url.path.rsplit(":", 1)[-1] for request in requests] == [
+        "batchEmbedContents",
+        "batchEmbedContents",
+        "embedContent",
+    ]
+    for request in requests:
+        assert request.headers["x-goog-api-key"] == "test-api-key"
+        assert "authorization" not in request.headers
+        body = json.loads(request.content)
+        for embed_request in body.get("requests", [body]):
+            assert embed_request["model"] == "models/gemini-embedding-001"
+            assert embed_request["taskType"] == "RETRIEVAL_DOCUMENT"
+            assert embed_request["outputDimensionality"] == 3
+
+
+def test_gemini_api_config_requires_key_and_tracks_provider() -> None:
+    missing_key = EmbeddingConfig(provider="gemini-api", api_key="")
+    configured = EmbeddingConfig(
+        provider="gemini_api",
+        api_key="test-api-key",
+    )
+
+    assert not missing_key.ready
+    assert configured.ready
+    assert (
+        configured.model_revision
+        == f"{GEMINI_API_PROVIDER_REVISION}:redact"
+    )
+    assert configured.identity == "gemini-embedding-001@gemini-api-v1:redact"
 
 
 def test_global_location_uses_the_global_vertex_hostname() -> None:
