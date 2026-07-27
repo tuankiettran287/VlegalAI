@@ -447,6 +447,7 @@ class VertexAIEmbeddingService:
         }
         for attempt in range(self.config.max_retries):
             response: httpx.Response | None = None
+            self._throttle_items(1)
             token = self._access_token(force_refresh=force_refresh)
             force_refresh = False
             try:
@@ -498,13 +499,13 @@ class VertexAIEmbeddingService:
             "outputDimensionality": self.config.dimensions,
         }
 
-    def _throttle_gemini_items(self, item_count: int) -> None:
+    def _throttle_items(self, item_count: int) -> None:
         limit = self.config.max_items_per_minute
         if limit <= 0:
             return
         if item_count > limit:
             raise EmbeddingModelError(
-                "EMBEDDING_BATCH_SIZE cannot exceed "
+                "One embedding request cannot exceed "
                 "EMBEDDING_MAX_ITEMS_PER_MINUTE."
             )
 
@@ -549,7 +550,7 @@ class VertexAIEmbeddingService:
 
         for attempt in range(self.config.max_retries):
             response: httpx.Response | None = None
-            self._throttle_gemini_items(len(requests))
+            self._throttle_items(len(requests))
             try:
                 response = self._client.post(
                     self._gemini_api_url(action),

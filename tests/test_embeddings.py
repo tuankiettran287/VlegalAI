@@ -218,7 +218,7 @@ def test_gemini_api_config_requires_key_and_tracks_provider() -> None:
     assert configured.identity == "gemini-embedding-001@gemini-api-v1:redact"
 
 
-def test_gemini_api_rate_limiter_counts_items_inside_batches(
+def test_embedding_rate_limiter_counts_items_inside_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current_time = [100.0]
@@ -252,12 +252,39 @@ def test_gemini_api_rate_limiter_counts_items_inside_batches(
         client=client,
     )
     try:
-        service._throttle_gemini_items(2)
-        service._throttle_gemini_items(1)
+        service._throttle_items(2)
+        service._throttle_items(1)
     finally:
         client.close()
 
     assert sleeps == [60.0]
+
+
+def test_vertex_request_is_counted_by_the_shared_rate_limiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, client = _service(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": [1.0, 0.0, 0.0]}}
+                ]
+            },
+        )
+    )
+    item_counts: list[int] = []
+    monkeypatch.setattr(
+        service,
+        "_throttle_items",
+        item_counts.append,
+    )
+    try:
+        service.embed_query("quota-safe query")
+    finally:
+        client.close()
+
+    assert item_counts == [1]
 
 
 def test_global_location_uses_the_global_vertex_hostname() -> None:

@@ -33,11 +33,10 @@ chmod +x scripts/gcp/deploy-api-buildpacks.sh
   --neo4j-database YOUR_NEO4J_DATABASE
 ```
 
-Script hỏi lần lượt tám giá trị và ẩn ký tự nhập:
+Script hỏi lần lượt bảy giá trị và ẩn ký tự nhập:
 
 - `DATABASE_URL`
 - `NEO4J_PASSWORD`
-- `GEMINI_API_KEY`
 - `TAVILY_API_KEY`
 - `OIDC_CLIENT_ID`
 - `OIDC_CLIENT_SECRET`
@@ -82,17 +81,17 @@ nhận diện và gỡ đúng các biến đó trong một revision không nhậ
 bind Secret Manager. Bản source mới cũng được deploy không traffic, kiểm tra
 `live`/`ready` qua URL có tag, rồi mới chuyển 100% traffic sang revision mới.
 
-Production giữ `GEMINI_USE_ADC=true` cho Gemini generation trên Vertex AI.
-Embedding dùng `EMBEDDING_PROVIDER=gemini-api` và lấy `GEMINI_API_KEY` từ Secret
-Manager. Batch 20 văn bản giúp tránh quota Vertex AI 5 request/phút nhưng vẫn giữ
-nguyên model `gemini-embedding-001` và vector 1024 chiều. Gemini API tính quota
-theo từng văn bản trong batch, nên job reindex còn giới hạn ở 600 văn bản/phút,
-thấp hơn mức Free Tier 1000/phút.
+Production dùng Vertex AI/ADC cho cả Gemini generation và embedding.
+`EMBEDDING_PROVIDER=vertex` giữ nguyên model `gemini-embedding-001` và vector
+1024 chiều. API và reindex được giới hạn ở bốn embedding request/phút để nằm
+dưới quota Vertex hiện tại của project.
 
 ## Chạy reindex sau khi deploy API
 
-Script dưới đây tự lấy image từ revision API mới nhất, cấu hình job 4 CPU/8 GiB,
-chạy migration GraphRAG reset/reindex và chỉ refresh API sau khi job thành công:
+Script dưới đây tự lấy image từ revision API mới nhất, chạy migration, cấu hình
+job 4 CPU/8 GiB, reset/reindex GraphRAG và chỉ refresh API sau khi job thành
+công. Vector đã hoàn tất được checkpoint trong PostgreSQL; task bị gián đoạn có
+thể chạy lại cùng lệnh để tiếp tục thay vì embedding lại từ đầu:
 
 ```bash
 chmod +x scripts/gcp/run-reindex-buildpacks.sh
@@ -105,8 +104,8 @@ chmod +x scripts/gcp/run-reindex-buildpacks.sh
   --neo4j-database neo4j
 ```
 
-Không cần nhập lại API key; job bind version `latest` của
-`vlegal-gemini-api-key` từ Secret Manager.
+Job dùng service account của Cloud Run với quyền `roles/aiplatform.user`; không
+cần Gemini Developer API key hoặc tài khoản AI Studio Prepay.
 
 ## Xem lỗi build
 

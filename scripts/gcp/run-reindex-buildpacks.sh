@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 #
 # Rebuild and publish the VLegal GraphRAG index with the latest healthy API
-# image. Gemini generation stays on Vertex AI; embeddings use the
-# API-key-backed Gemini Developer API batch endpoint.
+# image. Gemini generation and embeddings both use Vertex AI with ADC. Bulk
+# embedding progress is checkpointed in PostgreSQL across task attempts.
 set -Eeuo pipefail
 
 PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-}"
 REGION="${GCP_REGION:-asia-southeast1}"
 SERVICE="${GCP_API_SERVICE:-vlegal-api}"
 JOB="${GCP_REINDEX_JOB:-vlegal-reindex}"
+MIGRATION_JOB="${GCP_MIGRATION_JOB:-vlegal-migrate}"
 RUNTIME_SERVICE_ACCOUNT="${GCP_RUN_SERVICE_ACCOUNT:-}"
 NEO4J_URI="${NEO4J_URI:-}"
 NEO4J_USER="${NEO4J_USER:-neo4j}"
 NEO4J_DATABASE="${NEO4J_DATABASE:-neo4j}"
 CPU="${REINDEX_CPU:-4}"
 MEMORY="${REINDEX_MEMORY:-8Gi}"
+EMBEDDING_LOCATION="${GCP_EMBEDDING_LOCATION:-asia-southeast1}"
 
 usage() {
   cat <<'EOF'
@@ -29,11 +31,13 @@ Options:
   --region REGION                         (default: asia-southeast1)
   --service SERVICE_NAME                  (default: vlegal-api)
   --job JOB_NAME                          (default: vlegal-reindex)
+  --migration-job JOB_NAME                (default: vlegal-migrate)
   --runtime-service-account EMAIL         (default: API service identity)
   --neo4j-user USER                       (default: neo4j)
   --neo4j-database DATABASE               (default: neo4j)
   --cpu CPU                               (default: 4)
   --memory MEMORY                         (default: 8Gi)
+  --embedding-location REGION             (default: asia-southeast1)
   -h, --help
 EOF
 }
@@ -54,6 +58,10 @@ while (($#)); do
       ;;
     --job)
       JOB="${2:?Missing value for --job}"
+      shift 2
+      ;;
+    --migration-job)
+      MIGRATION_JOB="${2:?Missing value for --migration-job}"
       shift 2
       ;;
     --runtime-service-account)
@@ -78,6 +86,10 @@ while (($#)); do
       ;;
     --memory)
       MEMORY="${2:?Missing value for --memory}"
+      shift 2
+      ;;
+    --embedding-location)
+      EMBEDDING_LOCATION="${2:?Missing value for --embedding-location}"
       shift 2
       ;;
     -h|--help)
@@ -136,8 +148,7 @@ fi
 
 for secret_id in \
   vlegal-database-url \
-  vlegal-neo4j-password \
-  vlegal-gemini-api-key
+  vlegal-neo4j-password
 do
   enabled_version="$(
     gcloud secrets versions list "$secret_id" \
@@ -158,13 +169,16 @@ env_vars="$(
     "@GEMINI_USE_ADC=true" \
     "@GEMINI_PROJECT_ID=$PROJECT_ID" \
     "@GEMINI_DATA_POLICY=redact" \
-    "@EMBEDDING_PROVIDER=gemini-api" \
+    "@EMBEDDING_PROVIDER=vertex" \
     "@EMBEDDING_MODEL=gemini-embedding-001" \
-    "@EMBEDDING_MAX_CONCURRENCY=2" \
+    "@EMBEDDING_LOCATION=$EMBEDDING_LOCATION" \
+    "@EMBEDDING_MAX_CONCURRENCY=1" \
     "@EMBEDDING_BATCH_SIZE=20" \
-    "@EMBEDDING_MAX_ITEMS_PER_MINUTE=600" \
+    "@EMBEDDING_MAX_ITEMS_PER_MINUTE=4" \
     "@EMBEDDING_TIMEOUT_SECONDS=120" \
     "@EMBEDDING_MAX_RETRIES=8" \
+    "@LEGAL_EMBEDDING_CHECKPOINT_ENABLED=true" \
+    "@LEGAL_EMBEDDING_CHECKPOINT_BATCH_SIZE=20" \
     "@POSTGRES_VECTOR_SIZE=1024" \
     "@NEO4J_URI=$NEO4J_URI" \
     "@NEO4J_USER=$NEO4J_USER" \
@@ -176,7 +190,29 @@ env_vars="$(
 
 echo "API revision: $revision"
 echo "Image: $image"
-echo "Deploying and executing $JOB with Gemini API batch embeddings."
+echo "Applying PostgreSQL migrations with $MIGRATION_JOB."
+
+gcloud run jobs deploy "$MIGRATION_JOB" \
+  --project="$PROJECT_ID" \
+  --region="$REGION" \
+  --image="$image" \
+  --service-account="$RUNTIME_SERVICE_ACCOUNT" \
+  --command=/cnb/process/migrate \
+  --args="" \
+  --set-secrets=DATABASE_URL=vlegal-database-url:latest \
+  --cpu=1 \
+  --memory=1Gi \
+  --task-timeout=15m \
+  --max-retries=1 \
+  --tasks=1 \
+  --quiet
+
+gcloud run jobs execute "$MIGRATION_JOB" \
+  --project="$PROJECT_ID" \
+  --region="$REGION" \
+  --wait
+
+echo "Deploying and executing $JOB with Vertex AI checkpoints."
 
 gcloud run jobs deploy "$JOB" \
   --project="$PROJECT_ID" \
@@ -185,20 +221,25 @@ gcloud run jobs deploy "$JOB" \
   --service-account="$RUNTIME_SERVICE_ACCOUNT" \
   --command=/cnb/process/reindex \
   --args="" \
-  --set-secrets=DATABASE_URL=vlegal-database-url:latest,NEO4J_PASSWORD=vlegal-neo4j-password:latest,GEMINI_API_KEY=vlegal-gemini-api-key:latest \
+  --set-secrets=DATABASE_URL=vlegal-database-url:latest,NEO4J_PASSWORD=vlegal-neo4j-password:latest \
   --set-env-vars="$env_vars" \
   --cpu="$CPU" \
   --memory="$MEMORY" \
   --task-timeout=24h \
-  --max-retries=0 \
+  --max-retries=3 \
   --tasks=1 \
   --quiet
 
-gcloud run jobs execute "$JOB" \
+if ! gcloud run jobs execute "$JOB" \
   --project="$PROJECT_ID" \
   --region="$REGION" \
   --task-timeout=24h \
-  --wait
+  --wait; then
+  echo
+  echo "Reindex stopped before completion. Completed Vertex embeddings are safe"
+  echo "in PostgreSQL. Run this same script again to resume from the checkpoint."
+  exit 1
+fi
 
 data_revision="$(date -u +%Y%m%d%H%M%S)"
 gcloud run services update "$SERVICE" \

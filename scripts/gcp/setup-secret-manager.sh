@@ -190,7 +190,6 @@ configure_secret() {
 
 configure_secret DATABASE_URL vlegal-database-url
 configure_secret NEO4J_PASSWORD vlegal-neo4j-password
-configure_secret GEMINI_API_KEY vlegal-gemini-api-key
 configure_secret TAVILY_API_KEY vlegal-tavily-key
 configure_secret OIDC_CLIENT_ID vlegal-oidc-client-id
 configure_secret OIDC_CLIENT_SECRET vlegal-oidc-client-secret
@@ -200,7 +199,6 @@ configure_secret MESSAGE_ENCRYPTION_KEY vlegal-message-key message
 secret_ids=(
   vlegal-database-url
   vlegal-neo4j-password
-  vlegal-gemini-api-key
   vlegal-tavily-key
   vlegal-oidc-client-id
   vlegal-oidc-client-secret

@@ -16,6 +16,11 @@ from typing import Any, Iterable
 from docx import Document
 
 from app import legal_ontology as onto
+from app.services.embedding_checkpoint import (
+    EmbeddingCheckpointRecord,
+    PostgresEmbeddingCheckpoint,
+    embedding_content_hash,
+)
 from app.services.embeddings import EmbeddingConfig, get_embedding_service
 
 
@@ -1788,9 +1793,77 @@ class LegalGraphBuilder:
         rows = list(self.chunks.values())
         texts = [f"{row['title']}\n{row['path_label']}\n{row['text']}" for row in rows]
         service = get_embedding_service(self.embedding_config)
-        embeddings = service.embed_documents(texts, show_progress=True)
-        for row, embedding in zip(rows, embeddings, strict=True):
-            row["vector"] = vector_to_blob(embedding)
+        checkpoint_enabled = os.getenv(
+            "LEGAL_EMBEDDING_CHECKPOINT_ENABLED",
+            "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        checkpoint: PostgresEmbeddingCheckpoint | None = None
+        cached: dict[str, tuple[str, list[float]]] = {}
+        if checkpoint_enabled:
+            checkpoint = PostgresEmbeddingCheckpoint(
+                os.getenv("DATABASE_URL", ""),
+                self.embedding_config,
+            )
+            cached = checkpoint.load()
+
+        pending: list[tuple[dict[str, Any], str, str]] = []
+        restored = 0
+        for row, text in zip(rows, texts, strict=True):
+            content_hash = embedding_content_hash(text)
+            cached_row = cached.get(row["chunk_id"])
+            if cached_row and cached_row[0] == content_hash:
+                row["vector"] = vector_to_blob(cached_row[1])
+                restored += 1
+            else:
+                pending.append((row, text, content_hash))
+
+        if checkpoint_enabled:
+            print(
+                "Embedding checkpoint: "
+                f"restored {restored}/{len(rows)}; pending {len(pending)}.",
+                flush=True,
+            )
+
+        checkpoint_batch_size = len(pending) or 1
+        if checkpoint_enabled:
+            checkpoint_batch_size = max(
+                1,
+                int(
+                    os.getenv(
+                        "LEGAL_EMBEDDING_CHECKPOINT_BATCH_SIZE",
+                        "20",
+                    )
+                ),
+            )
+        completed = restored
+        for offset in range(0, len(pending), checkpoint_batch_size):
+            batch = pending[offset : offset + checkpoint_batch_size]
+            embeddings = service.embed_documents(
+                [text for _, text, _ in batch],
+                show_progress=True,
+            )
+            records: list[EmbeddingCheckpointRecord] = []
+            for (row, _text, content_hash), embedding in zip(
+                batch,
+                embeddings,
+                strict=True,
+            ):
+                row["vector"] = vector_to_blob(embedding)
+                records.append(
+                    EmbeddingCheckpointRecord(
+                        chunk_id=row["chunk_id"],
+                        content_hash=content_hash,
+                        vector=embedding,
+                    )
+                )
+            if checkpoint is not None:
+                checkpoint.save(records)
+            completed += len(batch)
+            if checkpoint_enabled:
+                print(
+                    f"Embedding checkpoint: saved {completed}/{len(rows)}.",
+                    flush=True,
+                )
 
     def _semantic_chunk_text(self, node_id: str, node: dict[str, Any], outgoing: dict[str, list[str]]) -> str:
         """Give a concept node a body worth embedding.

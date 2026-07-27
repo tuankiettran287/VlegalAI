@@ -82,7 +82,6 @@ Các secret ứng dụng sau vẫn phải tồn tại trong Google Secret Manage
 
 - `vlegal-database-url`
 - `vlegal-neo4j-password`
-- `vlegal-gemini-api-key`
 - `vlegal-session-secret`
 - `vlegal-message-key`
 - `vlegal-oidc-client-id`

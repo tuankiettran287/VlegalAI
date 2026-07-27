@@ -82,7 +82,6 @@ Tạo các secret mà `scripts/gcp/deploy.ps1` tham chiếu:
 
 - `vlegal-database-url`
 - `vlegal-neo4j-password`
-- `vlegal-gemini-api-key`
 - `vlegal-session-secret`
 - `vlegal-message-key`
 - `vlegal-oidc-client-id`

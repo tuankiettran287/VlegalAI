@@ -178,7 +178,6 @@ fi
 secret_ids=(
   vlegal-database-url
   vlegal-neo4j-password
-  vlegal-gemini-api-key
   vlegal-tavily-key
   vlegal-oidc-client-id
   vlegal-oidc-client-secret
@@ -223,12 +222,12 @@ env_vars="$(
     "@GEMINI_MODEL=$GEMINI_MODEL" \
     "@GEMINI_LOCATION=global" \
     "@GEMINI_DATA_POLICY=redact" \
-    "@EMBEDDING_PROVIDER=gemini-api" \
+    "@EMBEDDING_PROVIDER=vertex" \
     "@EMBEDDING_MODEL=gemini-embedding-001" \
     "@EMBEDDING_LOCATION=$EMBEDDING_LOCATION" \
-    "@EMBEDDING_MAX_CONCURRENCY=2" \
+    "@EMBEDDING_MAX_CONCURRENCY=1" \
     "@EMBEDDING_BATCH_SIZE=20" \
-    "@EMBEDDING_MAX_ITEMS_PER_MINUTE=100" \
+    "@EMBEDDING_MAX_ITEMS_PER_MINUTE=4" \
     "@EMBEDDING_MAX_RETRIES=8" \
     "@POSTGRES_VECTOR_SIZE=1024" \
     "@RETRIEVER_BACKEND=hybrid_rag" \
@@ -246,7 +245,6 @@ secret_bindings="$(
   printf '%s' \
     'DATABASE_URL=vlegal-database-url:latest,' \
     'NEO4J_PASSWORD=vlegal-neo4j-password:latest,' \
-    'GEMINI_API_KEY=vlegal-gemini-api-key:latest,' \
     'TAVILY_API_KEY=vlegal-tavily-key:latest,' \
     'OIDC_CLIENT_ID=vlegal-oidc-client-id:latest,' \
     'OIDC_CLIENT_SECRET=vlegal-oidc-client-secret:latest,' \
@@ -258,7 +256,7 @@ secret_bindings="$(
 # reference in one gcloud mutation. Detect only legacy literal bindings and
 # remove them in a no-traffic revision before attaching the secret references.
 # Existing secret-backed variables are left untouched, making reruns idempotent.
-secret_env_names='DATABASE_URL,NEO4J_PASSWORD,GEMINI_API_KEY,TAVILY_API_KEY,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,SESSION_SECRET,MESSAGE_ENCRYPTION_KEY'
+secret_env_names='DATABASE_URL,NEO4J_PASSWORD,TAVILY_API_KEY,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,SESSION_SECRET,MESSAGE_ENCRYPTION_KEY'
 plain_secret_envs="$(
   gcloud run services describe "$SERVICE" \
     --project="$PROJECT_ID" \
