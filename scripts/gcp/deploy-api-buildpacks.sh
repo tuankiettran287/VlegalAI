@@ -293,11 +293,10 @@ if [[ -n "$plain_secret_envs" ]]; then
     --quiet
 fi
 
-# The failed Cloud Build log showed that source detection fell back to Python
-# 3.14 and the "missing-entrypoint" buildpack. Set both values explicitly so a
-# source deploy is deterministic even if gcloud's upload manifest omits or does
-# not detect Procfile/.python-version.
-build_env_vars='GOOGLE_PYTHON_VERSION=3.13.x,GOOGLE_ENTRYPOINT=python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT'
+# Pin the supported runtime while allowing the entrypoint buildpack to read the
+# Procfile. GOOGLE_ENTRYPOINT must not be set here because it takes precedence
+# over Procfile and would omit the migrate/reindex process types from the image.
+build_env_vars='GOOGLE_PYTHON_VERSION=3.13.x'
 source_commit="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
 deploy_tag="buildpacks-$source_commit"
 
