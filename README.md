@@ -191,5 +191,9 @@ API/frontend là hai service riêng dùng URL `run.app`; worker/beat là Worker 
 migration/reindex là Job. PostgreSQL chuyển sang
 Cloud SQL và Neo4j chạy trên GCE/GKE hoặc Neo4j Aura.
 
+Để tự động test, build và deploy mỗi khi push vào `master`, xem
+[hướng dẫn CI/CD GitHub Actions](cicd-gcp.md). Workflow dùng Workload Identity
+Federation, không lưu service-account JSON key trong GitHub.
+
 > VLegal AI hỗ trợ nghiên cứu và nghiệp vụ, không thay thế ý kiến của luật sư
 > đối với vụ việc hoặc giao dịch cụ thể.

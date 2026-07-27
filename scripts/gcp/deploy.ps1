@@ -14,6 +14,8 @@ param(
     [string]$FrontendUrl = "",
     [ValidateSet("all", "migrate", "reindex", "api", "frontend", "worker", "beat")]
     [string]$Component = "all",
+    [switch]$ExecuteMigrate,
+    [switch]$ExecuteReindex,
     [switch]$ExecuteJobs
 )
 
@@ -26,7 +28,7 @@ if ([string]::IsNullOrWhiteSpace($Neo4jUri) -and $Component -in @("all", "reinde
     throw "Truyền -Neo4jUri hoặc đặt NEO4J_URI."
 }
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 if ([string]::IsNullOrWhiteSpace($Tag)) {
     $Tag = (& git -C $repoRoot rev-parse --short HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($Tag)) {
@@ -99,7 +101,7 @@ function Deploy-Migrate {
         "--set-secrets=DATABASE_URL=vlegal-database-url:latest",
         "--quiet"
     )
-    if ($ExecuteJobs) {
+    if ($ExecuteJobs -or $ExecuteMigrate) {
         Invoke-Gcloud @("run", "jobs", "execute", $migrateJob, "--project=$ProjectId", "--region=$Region", "--wait")
     }
 }
@@ -139,7 +141,7 @@ function Deploy-Reindex {
         "--set-secrets=DATABASE_URL=vlegal-database-url:latest,NEO4J_PASSWORD=vlegal-neo4j-password:latest",
         "--quiet"
     )
-    if ($ExecuteJobs) {
+    if ($ExecuteJobs -or $ExecuteReindex) {
         Invoke-Gcloud @("run", "jobs", "execute", $reindexJob, "--project=$ProjectId", "--region=$Region", "--wait")
     }
 }

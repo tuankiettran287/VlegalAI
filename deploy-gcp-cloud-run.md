@@ -182,3 +182,8 @@ Sau mọi thay đổi model embedding hoặc task type, chạy:
 Migration `20260727_0012` xoá vector của provider cũ vì hai model embedding không
 chia sẻ cùng không gian vector. Job reindex phải hoàn tất trước khi API phục vụ
 truy hồi vector.
+
+## 8. CI/CD
+
+Để tự động test, build hai image và deploy khi push vào nhánh `master`, xem
+[CI/CD với GitHub Actions và Workload Identity Federation](cicd-gcp.md).
