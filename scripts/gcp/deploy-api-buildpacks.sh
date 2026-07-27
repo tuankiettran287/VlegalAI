@@ -325,6 +325,7 @@ if ! gcloud run deploy "$SERVICE" \
   --allow-unauthenticated \
   --no-traffic \
   --tag="$deploy_tag" \
+  --remove-build-env-vars=GOOGLE_ENTRYPOINT \
   --update-build-env-vars="$build_env_vars" \
   --update-env-vars="$env_vars" \
   --update-secrets="$secret_bindings"; then
