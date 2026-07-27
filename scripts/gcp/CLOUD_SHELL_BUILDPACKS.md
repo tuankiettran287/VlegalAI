@@ -1,0 +1,118 @@
+# Cloud Shell: deploy API bằng Buildpacks và Secret Manager
+
+Luồng này chỉ dành cho `vlegal-api`. Frontend tiếp tục dùng image Nginx riêng.
+Backend được build từ source bằng Google Buildpacks với `Procfile` và
+`.python-version`; không cần thêm Dockerfile backend.
+
+Script đồng thời truyền thẳng `GOOGLE_PYTHON_VERSION=3.12.x` và
+`GOOGLE_ENTRYPOINT` vào Buildpacks. Đây là lớp bảo vệ cho lỗi đã thấy trong log:
+Cloud Build từng bỏ qua hai file cấu hình, tự chọn Python 3.14 và dừng ở
+`google.python.missing-entrypoint`.
+
+## Một lệnh cho lần đầu
+
+Trong Google Cloud Shell:
+
+```bash
+cd ~/VlegalAI
+git pull --ff-only origin master
+
+chmod +x scripts/gcp/setup-secret-manager.sh
+chmod +x scripts/gcp/deploy-api-buildpacks.sh
+
+./scripts/gcp/deploy-api-buildpacks.sh \
+  --project idyllic-anvil-452006-k0 \
+  --region asia-southeast1 \
+  --frontend-url https://vlegal-frontend-201653369723.asia-southeast1.run.app \
+  --neo4j-uri neo4j+s://YOUR_INSTANCE.databases.neo4j.io \
+  --neo4j-user YOUR_NEO4J_USER \
+  --neo4j-database YOUR_NEO4J_DATABASE
+```
+
+Script hỏi lần lượt tám giá trị và ẩn ký tự nhập:
+
+- `DATABASE_URL`
+- `NEO4J_PASSWORD`
+- `GEMINI_API_KEY`
+- `TAVILY_API_KEY`
+- `OIDC_CLIENT_ID`
+- `OIDC_CLIENT_SECRET`
+- `SESSION_SECRET`
+- `MESSAGE_ENCRYPTION_KEY`
+
+Không giá trị nào được đưa vào command line, shell history hoặc file trong repo.
+Nếu secret đã có version đang bật, nhấn Enter để giữ nguyên. Nếu hai khóa
+session/encryption chưa tồn tại, nhấn Enter để script sinh giá trị phù hợp.
+
+Sau khi Secret Manager sẵn sàng, cùng script sẽ deploy API và kiểm tra:
+
+```text
+/api/health/live
+/api/health/ready
+```
+
+## Những lần deploy sau
+
+Không cần nhập lại secret:
+
+```bash
+./scripts/gcp/deploy-api-buildpacks.sh \
+  --project idyllic-anvil-452006-k0 \
+  --region asia-southeast1 \
+  --frontend-url https://vlegal-frontend-201653369723.asia-southeast1.run.app \
+  --neo4j-uri neo4j+s://YOUR_INSTANCE.databases.neo4j.io \
+  --neo4j-user YOUR_NEO4J_USER \
+  --neo4j-database YOUR_NEO4J_DATABASE \
+  --skip-secret-setup
+```
+
+Script dùng `--update-env-vars` và `--update-secrets`, vì vậy không xóa những cấu
+hình Cloud Run khác. Không dùng lại lệnh cũ chứa toàn bộ credential trong
+`--set-env-vars`.
+
+Các build variable cũng được cập nhật bằng `--update-build-env-vars`, không ghi
+đè những build variable không thuộc script.
+
+Production giữ `GEMINI_USE_ADC=true` để Gemini generation và
+`gemini-embedding-001` dùng Cloud Run service identity. `GEMINI_API_KEY` vẫn được
+lưu và bind từ Secret Manager theo cấu hình hiện tại, nhưng không được commit.
+
+## Xem lỗi build
+
+Nếu Buildpacks thất bại, script in sẵn lệnh đọc build gần nhất. Có thể tự lấy:
+
+```bash
+BUILD_ID="$(
+  gcloud builds list \
+    --project=idyllic-anvil-452006-k0 \
+    --region=asia-southeast1 \
+    --limit=1 \
+    --format='value(id)'
+)"
+
+gcloud beta builds log "$BUILD_ID" \
+  --project=idyllic-anvil-452006-k0 \
+  --region=asia-southeast1
+```
+
+Build thất bại không thay revision đang nhận traffic.
+
+## Rollback
+
+Liệt kê revision:
+
+```bash
+gcloud run revisions list \
+  --service=vlegal-api \
+  --project=idyllic-anvil-452006-k0 \
+  --region=asia-southeast1
+```
+
+Chuyển 100% traffic về revision ổn định:
+
+```bash
+gcloud run services update-traffic vlegal-api \
+  --project=idyllic-anvil-452006-k0 \
+  --region=asia-southeast1 \
+  --to-revisions=REVISION_NAME=100
+```

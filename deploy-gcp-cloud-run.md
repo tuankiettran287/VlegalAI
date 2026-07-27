@@ -1,5 +1,10 @@
 # Deploy VLegalAI lên Google Cloud
 
+> Deploy thủ công riêng `vlegal-api` từ Google Cloud Shell bằng Buildpacks và
+> Secret Manager: xem
+> [`scripts/gcp/CLOUD_SHELL_BUILDPACKS.md`](scripts/gcp/CLOUD_SHELL_BUILDPACKS.md).
+> Luồng này giữ frontend Nginx hiện tại và không yêu cầu Dockerfile backend.
+
 Kiến trúc triển khai không cần GPU hoặc volume chứa model embedding:
 
 | Image | Tài nguyên | Vai trò |
@@ -77,6 +82,7 @@ Tạo các secret mà `scripts/gcp/deploy.ps1` tham chiếu:
 
 - `vlegal-database-url`
 - `vlegal-neo4j-password`
+- `vlegal-gemini-api-key`
 - `vlegal-session-secret`
 - `vlegal-message-key`
 - `vlegal-oidc-client-id`

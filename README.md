@@ -95,6 +95,10 @@ Suggestions trong Vertex AI.
 Trên Cloud Run, đặt `GEMINI_USE_ADC=true` để dùng service identity; file
 `GEMINI_CREDENTIALS_PATH` chỉ cần cho môi trường local không dùng ADC.
 
+Deploy thủ công API từ Cloud Shell bằng Buildpacks và nhập credential kín vào
+Secret Manager theo
+[`scripts/gcp/CLOUD_SHELL_BUILDPACKS.md`](scripts/gcp/CLOUD_SHELL_BUILDPACKS.md).
+
 `GEMINI_DATA_POLICY=redact` là mặc định: email, số điện thoại, định danh, số tài
 khoản và secret phổ biến được che trước khi gửi ra Vertex AI/Tavily/Google Search.
 Chỉ đặt `allow` khi tổ chức đã phê duyệt rõ chính sách dữ liệu tương ứng.

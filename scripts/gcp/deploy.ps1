@@ -58,6 +58,7 @@ $reindexJob = "vlegal-reindex"
 $apiSecrets = @(
     "DATABASE_URL=vlegal-database-url:latest",
     "NEO4J_PASSWORD=vlegal-neo4j-password:latest",
+    "GEMINI_API_KEY=vlegal-gemini-api-key:latest",
     "SESSION_SECRET=vlegal-session-secret:latest",
     "MESSAGE_ENCRYPTION_KEY=vlegal-message-key:latest",
     "OIDC_CLIENT_ID=vlegal-oidc-client-id:latest",
@@ -68,6 +69,7 @@ $apiSecrets = @(
 $workerSecrets = @(
     "DATABASE_URL=vlegal-database-url:latest",
     "NEO4J_PASSWORD=vlegal-neo4j-password:latest",
+    "GEMINI_API_KEY=vlegal-gemini-api-key:latest",
     "TAVILY_API_KEY=vlegal-tavily-key:latest"
 ) -join ","
 
