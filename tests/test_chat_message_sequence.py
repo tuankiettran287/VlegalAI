@@ -130,7 +130,10 @@ class _AI:
 
     async def complete(self, *_: object, **__: object) -> str:
         assert self.db.rolled_back
-        return "Câu trả lời có căn cứ [S1]."
+        return (
+            "Theo Điều 1, Luật thử nghiệm số 100/2020/QH14 [S1], "
+            "đây là quy định pháp luật thử nghiệm."
+        )
 
 
 class _Cache:

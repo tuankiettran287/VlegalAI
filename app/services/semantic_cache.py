@@ -24,7 +24,7 @@ from app.services.ai import redact_sensitive_text
 from app.services.embeddings import EmbeddingConfig, LocalEmbeddingService, get_embedding_service
 
 
-LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v2"
+LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v4-professional-chatbot"
 _PRIVATE_CONTEXT_RE = re.compile(
     r"\b("
     r"tôi|mình|chúng tôi|của tôi|của mình|công ty tôi|gia đình tôi|"

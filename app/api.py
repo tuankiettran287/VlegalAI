@@ -4,6 +4,7 @@ import difflib
 import hashlib
 import logging
 import re
+import unicodedata
 import uuid
 from binascii import Error as BinasciiError
 from datetime import UTC, datetime
@@ -72,6 +73,8 @@ from app.services.freshness import (
 from app.services.guest_limit import GuestRateLimitExceeded, GuestRateLimitUnavailable, GuestRateLimiter
 from app.services.retrieval import (
     RetrievalService,
+    append_detailed_citations,
+    build_answer_plan,
     build_context,
     select_context_sources,
 )
@@ -351,11 +354,18 @@ async def _legal_sources(
             and str(source.get("text") or "").strip()
             and str(source.get("citation") or source.get("title") or "").strip()
         ]
-        # Every source admitted to the model context must be among the sources
-        # passed to freshness verification. Capping by source count is stricter
-        # than the verifier's unique-law cap and therefore cannot leave an
-        # unverified 17th law in the prompt.
-        return select_context_sources(filtered)[:source_limit]
+        # The freshness limit applies to unique instruments, not chunks.  A
+        # multi-abstract answer often needs many articles of the same code, so
+        # cutting at 16 chunks discarded valid evidence unnecessarily.
+        selected: list[dict[str, Any]] = []
+        admitted_laws: set[str] = set()
+        for source in select_context_sources(filtered):
+            law_code = source_law_code(source)
+            if law_code not in admitted_laws and len(admitted_laws) >= source_limit:
+                continue
+            admitted_laws.add(law_code)
+            selected.append(source)
+        return selected
 
     def source_law_code(source: dict[str, Any]) -> str:
         label = f"{source.get('citation', '')} {source.get('title', '')}"
@@ -372,85 +382,126 @@ async def _legal_sources(
         logger.warning("Retrieval failed: %s", exc)
         sources = []
     if not sources:
-        sources = [{
-            "source_id": "S1",
-            "citation": "Hệ thống Văn bản Quy phạm Pháp luật Việt Nam",
-            "title": "Quy định Pháp luật Việt Nam Hiện hành",
-            "text": f"Thông tin tra cứu giải đáp pháp lý về: '{query}'. Áp dụng các quy định của pháp luật Việt Nam.",
-            "reasons": ["Tổng hợp căn cứ pháp lý"],
-            "law_status": "Còn hiệu lực",
-        }]
-    try:
-        retrieval_query = query
-        followed_replacements: set[str] = set()
-        for _ in range(2):
-            try:
-                verification, updated = await freshness.verify_sources(sources)
-            except Exception as exc:
-                logger.warning("Freshness verification failed: %s", exc)
-                verification = {"checked": False, "all_current": True, "items": []}
-                updated = False
-            verification_items = list(
-                getattr(verification, "items", []) or []
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Kho dữ liệu hiện không có căn cứ pháp lý đủ liên quan để trả lời "
+                "an toàn. Hệ thống sẽ không suy đoán hoặc viện dẫn văn bản ngoài dữ liệu."
+            ),
+        )
+
+    retrieval_query = query
+    followed_replacements: set[str] = set()
+    verification: Any = None
+    require_freshness = bool(
+        getattr(
+            getattr(freshness, "settings", None),
+            "require_freshness_check",
+            True,
+        )
+    )
+    for _ in range(3):
+        try:
+            verification, updated = await freshness.verify_sources(sources)
+        except FreshnessUnavailable as exc:
+            logger.warning(
+                "Freshness verification unavailable error_type=%s",
+                type(exc).__name__,
             )
-            verified_statuses = {
-                item.code.strip().upper(): item.status.strip().upper()
-                for item in verification_items
-            }
-            current_sources = [
-                source
-                for source in sources
-                if verified_statuses.get(source_law_code(source))
-                in CURRENT_STATUSES
-            ]
-            replacement_codes = []
-            for item in verification_items:
-                replacement_code = str(
-                    getattr(item, "replacement_code", "") or ""
-                ).strip().upper()
-                if (
-                    item.status.strip().upper() not in CURRENT_STATUSES
-                    and replacement_code
-                    and replacement_code not in followed_replacements
-                ):
-                    replacement_codes.append(replacement_code)
-            if not updated and not replacement_codes:
-                sources = current_sources
-                break
+            raise HTTPException(
+                status_code=503,
+                detail="Không thể kiểm tra hiệu lực văn bản tại thời điểm này.",
+            ) from exc
+        except Exception as exc:
+            logger.warning(
+                "Freshness verification failed error_type=%s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Không thể kiểm tra hiệu lực văn bản tại thời điểm này.",
+            ) from exc
+
+        raw_items = getattr(verification, "items", [])
+        verification_items = (
+            list(raw_items or [])
+            if not callable(raw_items)
+            else []
+        )
+        verified_statuses = {
+            str(getattr(item, "code", "") or "").strip().upper():
+            str(getattr(item, "status", "") or "").strip().upper()
+            for item in verification_items
+        }
+        current_sources = [
+            source
+            for source in sources
+            if verified_statuses.get(source_law_code(source)) in CURRENT_STATUSES
+        ]
+        replacement_codes = []
+        for item in verification_items:
+            replacement_code = str(
+                getattr(item, "replacement_code", "") or ""
+            ).strip().upper()
+            item_status = str(
+                getattr(item, "status", "") or ""
+            ).strip().upper()
+            if (
+                item_status not in CURRENT_STATUSES
+                and replacement_code
+                and replacement_code not in followed_replacements
+            ):
+                replacement_codes.append(replacement_code)
+
+        if updated or replacement_codes:
             followed_replacements.update(replacement_codes)
-            retrieval_query = " ".join(
-                [query, *sorted(followed_replacements)]
-            )
-            sources = usable_sources(
-                await retrieval.retrieve(retrieval_query)
-            )
+            retrieval_query = " ".join([query, *sorted(followed_replacements)])
+            sources = usable_sources(await retrieval.retrieve(retrieval_query))
             if not sources:
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "Chỉ mục pháp luật đã được cập nhật nhưng chưa có "
-                        "văn bản thay thế phù hợp để trả lời an toàn."
+                        "Chỉ mục đã được cập nhật nhưng chưa có văn bản thay thế "
+                        "phù hợp để trả lời an toàn."
                     ),
                 )
-        else:
+            continue
+
+        if verification_items:
+            if not current_sources:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Các văn bản truy hồi không được xác nhận là còn hiệu lực; "
+                        "hệ thống không thể dùng chúng để kết luận."
+                    ),
+                )
+            sources = current_sources
+        elif require_freshness:
             raise HTTPException(
-                status_code=409,
-                detail="Chuỗi văn bản thay thế vượt quá giới hạn xử lý an toàn.",
+                status_code=503,
+                detail="Không nhận được bằng chứng kiểm tra hiệu lực văn bản.",
             )
-    except Exception as exc:
-        logger.warning("Legal freshness check unavailable: %s", exc)
-        verification = type("Verification", (), {
-            "items": [],
-            "checked": False,
-            "all_current": True,
-            "model_dump": lambda self, mode: {"checked": False, "all_current": True, "items": []}
-        })()
+        break
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail="Chuỗi văn bản thay thế vượt quá giới hạn xử lý an toàn.",
+        )
+
+    final_raw_items = getattr(verification, "items", [])
+    final_items = (
+        list(final_raw_items or [])
+        if not callable(final_raw_items)
+        else []
+    )
     verified_statuses = {
         item.code.strip().upper(): item.status.strip().upper()
-        for item in verification.items
+        for item in final_items
     }
     verification_by_code = {
-        item.code.strip().upper(): item for item in verification.items
+        item.code.strip().upper(): item
+        for item in final_items
     }
     verified_sources: list[dict[str, Any]] = []
     for source in sources:
@@ -463,15 +514,31 @@ async def _legal_sources(
         enriched["source_url"] = (
             getattr(item, "source_url", None) or enriched.get("source_url")
         )
+        checked_at = getattr(
+            item,
+            "checked_at",
+            None,
+        )
+        enriched["law_checked_at"] = (
+            checked_at.isoformat()
+            if isinstance(checked_at, datetime)
+            else checked_at
+        )
         verified_sources.append(enriched)
     if verified_sources:
         sources = verified_sources
-    else:
-        for source in sources:
-            source.setdefault("law_status", "Còn hiệu lực")
     for index, source in enumerate(sources, start=1):
         source["source_id"] = f"S{index}"
-    return sources, verification.model_dump(mode="json")
+    verification_payload = (
+        verification.model_dump(mode="json")
+        if hasattr(verification, "model_dump")
+        else {
+            "checked": False,
+            "all_current": False,
+            "items": [],
+        }
+    )
+    return sources, verification_payload
 
 
 def _verification_prompt(verification: dict[str, Any]) -> str:
@@ -512,12 +579,116 @@ def _validate_narrative_claims(
         )
 
 
+_LEGAL_INSTRUMENT_MENTION_RE = re.compile(
+    r"(?<!pháp )\b(?:Bộ luật|Luật|Nghị định|Thông tư|Nghị quyết|"
+    r"Văn bản hợp nhất)\s+",
+    re.IGNORECASE,
+)
+_GENERIC_INSTRUMENT_CONTINUATIONS = (
+    "nay",
+    "do",
+    "tren",
+    "hien hanh",
+    "co lien quan",
+    "viet nam",
+    "quy dinh",
+)
+
+
+def _normalized_legal_reference(value: str) -> str:
+    normalized = unicodedata.normalize("NFD", str(value or ""))
+    without_marks = "".join(
+        "d" if character in {"Đ", "đ"} else character
+        for character in normalized
+        if unicodedata.category(character) != "Mn"
+    )
+    return re.sub(r"\s+", " ", without_marks).strip().lower()
+
+
+def _validate_grounded_legal_references(
+    value: str,
+    sources: list[dict[str, Any]],
+) -> None:
+    """Reject instrument codes and titles that do not exist in model context."""
+
+    allowed_codes = {
+        match.group(0).upper()
+        for source in sources
+        for match in LAW_CODE_RE.finditer(
+            f"{source.get('citation', '')} {source.get('title', '')}"
+        )
+    }
+    referenced_codes = {
+        match.group(0).upper() for match in LAW_CODE_RE.finditer(value)
+    }
+    unknown_codes = referenced_codes - allowed_codes
+    if unknown_codes:
+        raise GeminiError(
+            "Câu trả lời nhắc đến số hiệu văn bản không có trong nguồn: "
+            + ", ".join(sorted(unknown_codes))
+        )
+
+    allowed_titles: set[str] = set()
+    for source in sources:
+        raw_title = str(
+            source.get("citation") or source.get("title") or ""
+        ).split(">", 1)[0]
+        raw_title = re.sub(r"\s*\([^)]*\)\s*$", "", raw_title).strip()
+        title = _normalized_legal_reference(raw_title)
+        if title:
+            allowed_titles.add(title)
+            if title.startswith("bo luat "):
+                allowed_titles.add(title.removeprefix("bo "))
+
+    normalized_answer = _normalized_legal_reference(value)
+    for match in _LEGAL_INSTRUMENT_MENTION_RE.finditer(value):
+        start = match.start()
+        normalized_tail = _normalized_legal_reference(value[start : start + 140])
+        after_marker = _normalized_legal_reference(value[match.end() : match.end() + 80])
+        if after_marker.startswith(_GENERIC_INSTRUMENT_CONTINUATIONS):
+            continue
+        if any(
+            normalized_tail.startswith(title)
+            for title in allowed_titles
+        ):
+            continue
+        if any(code.lower() in normalized_tail for code in allowed_codes):
+            continue
+        # A source title may occur immediately before a parenthetical or an
+        # inline citation and therefore not be captured by startswith above.
+        if any(
+            title in normalized_answer[
+                max(0, start - 10) : start + max(160, len(title) + 20)
+            ]
+            for title in allowed_titles
+        ):
+            continue
+        excerpt = " ".join(value[start : start + 80].split())
+        raise GeminiError(
+            f"Câu trả lời nhắc đến văn bản không có trong nguồn: {excerpt}"
+        )
+
+
+def _validate_professional_legal_opening(value: str) -> None:
+    """Require a direct, cited legal opening instead of a generic preamble."""
+
+    stripped = str(value or "").lstrip()
+    if not stripped.startswith("Theo "):
+        raise GeminiError('Câu trả lời pháp lý phải mở đầu trực tiếp bằng "Theo".')
+    opening_paragraph = re.split(r"\n\s*\n", stripped, maxsplit=1)[0]
+    if not re.search(r"\[S\d+\]", opening_paragraph, re.IGNORECASE):
+        raise GeminiError(
+            "Đoạn mở đầu phải chứa căn cứ nguồn cho kết luận trực tiếp."
+        )
+
+
 async def _complete_with_citation_repair(
     ai: GeminiService,
     system: str,
     prompt: str,
     *,
     allowed_ids: list[str],
+    sources: list[dict[str, Any]] | None = None,
     max_tokens: int,
     temperature: float = 0.1,
 ) -> str:
@@ -533,6 +704,9 @@ async def _complete_with_citation_repair(
             allowed_ids,
             require_claim_coverage=True,
         )
+        if sources is not None:
+            _validate_grounded_legal_references(answer, sources)
+            _validate_professional_legal_opening(answer)
         return answer
     except GeminiError:
         repair_prompt = (
@@ -540,7 +714,13 @@ async def _complete_with_citation_repair(
             "YÊU CẦU SỬA TRÍCH DẪN BẮT BUỘC:\n"
             "Chuyển câu trả lời thành các nhận định ngắn. Mỗi phần tử chỉ chứa "
             "một nhận định và phải chọn ít nhất một ID nguồn thực sự hỗ trợ "
-            "nhận định đó. Không tạo ID mới.\n"
+            "nhận định đó. Không tạo ID mới. Chỉ được nhắc tên và số hiệu "
+            "văn bản xuất hiện trong LEGAL_SOURCES. Với căn cứ điều khoản, "
+            "viết theo mẫu: “Theo Điều ..., khoản ..., điểm ..., tên và số "
+            "hiệu văn bản [Sx], ...”. Phần tử đầu tiên phải bắt đầu bằng “Theo”, "
+            "nêu căn cứ và kết luận trực tiếp; không thêm lời chào hoặc tiêu đề. "
+            "Chỉ viết ngày có hiệu lực khi trường effective_date có trong nguồn. "
+            "Không suy diễn từ kiến thức nền.\n"
             f"{untrusted_data_block('DRAFT_WITH_INVALID_CITATIONS', answer)}"
         )
         repair_schema = {
@@ -597,8 +777,13 @@ async def _complete_with_citation_repair(
                 if unit:
                     terminal = unit[-1] if unit[-1] in ".!?;" else ""
                     body = unit[:-1].rstrip() if terminal else unit
+                    prefix = (
+                        ""
+                        if sources is not None and not repaired_units
+                        else "- "
+                    )
                     repaired_units.append(
-                        f"- {body} {suffix}{terminal}"
+                        f"{prefix}{body} {suffix}{terminal}"
                     )
         repaired = "\n".join(repaired_units)
         try:
@@ -607,12 +792,22 @@ async def _complete_with_citation_repair(
                 allowed_ids,
                 require_claim_coverage=True,
             )
+            if sources is not None:
+                _validate_grounded_legal_references(repaired, sources)
+                _validate_professional_legal_opening(repaired)
             return repaired
-        except Exception:
-            return answer
+        except Exception as exc:
+            raise GeminiError(
+                "Không thể tạo câu trả lời có căn cứ và trích dẫn hợp lệ."
+            ) from exc
     except Exception as exc:
-        logger.warning("Citation repair failed, returning initial answer: %s", exc)
-        return answer
+        logger.warning(
+            "Citation validation failed closed error_type=%s",
+            type(exc).__name__,
+        )
+        raise GeminiError(
+            "Không thể xác minh căn cứ của câu trả lời."
+        ) from exc
 
 
 async def _load_postgres_chat_history(
@@ -656,6 +851,27 @@ async def readiness(
         raise HTTPException(
             status_code=503,
             detail="Database connection is not ready",
+        ) from exc
+    if not settings.embedding_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding model checkpoint is not ready",
+        )
+    if settings.require_freshness_check and not settings.tavily_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Legal freshness verification is not configured",
+        )
+    try:
+        await ai.ensure_ready()
+    except Exception as exc:
+        logger.warning(
+            "Gemini readiness failed error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini service is not ready",
         ) from exc
     return {"status": "ready"}
 
@@ -951,6 +1167,8 @@ async def chat(
             "BỘ NHỚ TÓM TẮT:\n"
             f"{_summary_prompt(summary_context)}\n\n"
             f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
+            "KẾ HOẠCH PHỦ CÂU HỎI:\n"
+            f"{untrusted_data_block('ANSWER_PLAN', build_answer_plan(payload.message))}\n\n"
             f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
             f"NGUỒN:\n{build_context(sources)}\n\n"
             f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
@@ -959,8 +1177,10 @@ async def chat(
             "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
             "không được sao chép các kết luận không còn phù hợp.",
             allowed_ids=[source["source_id"] for source in sources],
+            sources=sources,
             max_tokens=2200,
         )
+        answer = append_detailed_citations(answer, sources)
         if cache_lookup and verification.get("checked") and verification.get("all_current"):
             try:
                 await answer_cache.store(
