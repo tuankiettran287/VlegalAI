@@ -218,6 +218,48 @@ def test_gemini_api_config_requires_key_and_tracks_provider() -> None:
     assert configured.identity == "gemini-embedding-001@gemini-api-v1:redact"
 
 
+def test_gemini_api_rate_limiter_counts_items_inside_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_time = [100.0]
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(
+        "app.services.embeddings.time.monotonic",
+        lambda: current_time[0],
+    )
+
+    def advance_time(seconds: float) -> None:
+        sleeps.append(seconds)
+        current_time[0] += seconds
+
+    monkeypatch.setattr(
+        "app.services.embeddings.time.sleep",
+        advance_time,
+    )
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(500)
+        )
+    )
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            provider="gemini-api",
+            api_key="test-api-key",
+            max_items_per_minute=2,
+        ),
+        client=client,
+    )
+    try:
+        service._throttle_gemini_items(2)
+        service._throttle_gemini_items(1)
+    finally:
+        client.close()
+
+    assert sleeps == [60.0]
+
+
 def test_global_location_uses_the_global_vertex_hostname() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url == (

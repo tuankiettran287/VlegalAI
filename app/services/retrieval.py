@@ -420,6 +420,9 @@ def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
         embedding_api_key=settings.gemini_api_key,
         embedding_max_concurrency=settings.embedding_max_concurrency,
         embedding_batch_size=settings.embedding_batch_size,
+        embedding_max_items_per_minute=(
+            settings.embedding_max_items_per_minute
+        ),
         embedding_timeout_seconds=settings.embedding_timeout_seconds,
         embedding_max_retries=settings.embedding_max_retries,
         embedding_auto_truncate=settings.embedding_auto_truncate,

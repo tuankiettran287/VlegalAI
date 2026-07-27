@@ -360,6 +360,9 @@ class LegalIndexer:
             embedding_api_key=self.settings.gemini_api_key,
             embedding_max_concurrency=self.settings.embedding_max_concurrency,
             embedding_batch_size=self.settings.embedding_batch_size,
+            embedding_max_items_per_minute=(
+                self.settings.embedding_max_items_per_minute
+            ),
             embedding_timeout_seconds=self.settings.embedding_timeout_seconds,
             embedding_max_retries=self.settings.embedding_max_retries,
             embedding_auto_truncate=self.settings.embedding_auto_truncate,

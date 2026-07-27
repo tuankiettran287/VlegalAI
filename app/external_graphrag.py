@@ -303,6 +303,7 @@ class ExternalGraphRAGConfig:
     embedding_api_key: str = field(default="", repr=False)
     embedding_max_concurrency: int = 8
     embedding_batch_size: int = 20
+    embedding_max_items_per_minute: int = 0
     embedding_timeout_seconds: float = 60.0
     embedding_max_retries: int = 3
     embedding_auto_truncate: bool = True
@@ -344,6 +345,9 @@ class ExternalGraphRAGConfig:
                 os.getenv("EMBEDDING_MAX_CONCURRENCY", "8")
             ),
             embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "20")),
+            embedding_max_items_per_minute=int(
+                os.getenv("EMBEDDING_MAX_ITEMS_PER_MINUTE", "0")
+            ),
             embedding_timeout_seconds=float(
                 os.getenv("EMBEDDING_TIMEOUT_SECONDS", "60")
             ),
@@ -377,6 +381,7 @@ class ExternalGraphRAGConfig:
             dimensions=self.postgres_vector_size,
             max_concurrency=self.embedding_max_concurrency,
             batch_size=self.embedding_batch_size,
+            max_items_per_minute=self.embedding_max_items_per_minute,
             timeout_seconds=self.embedding_timeout_seconds,
             max_retries=self.embedding_max_retries,
             auto_truncate=self.embedding_auto_truncate,

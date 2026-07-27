@@ -85,7 +85,9 @@ bind Secret Manager. Bản source mới cũng được deploy không traffic, ki
 Production giữ `GEMINI_USE_ADC=true` cho Gemini generation trên Vertex AI.
 Embedding dùng `EMBEDDING_PROVIDER=gemini-api` và lấy `GEMINI_API_KEY` từ Secret
 Manager. Batch 20 văn bản giúp tránh quota Vertex AI 5 request/phút nhưng vẫn giữ
-nguyên model `gemini-embedding-001` và vector 1024 chiều.
+nguyên model `gemini-embedding-001` và vector 1024 chiều. Gemini API tính quota
+theo từng văn bản trong batch, nên job reindex còn giới hạn ở 600 văn bản/phút,
+thấp hơn mức Free Tier 1000/phút.
 
 ## Chạy reindex sau khi deploy API
 

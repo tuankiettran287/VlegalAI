@@ -7,6 +7,7 @@ import random
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -58,6 +59,7 @@ class EmbeddingConfig:
     dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS
     max_concurrency: int = 8
     batch_size: int = 20
+    max_items_per_minute: int = 0
     timeout_seconds: float = 60.0
     max_retries: int = 3
     auto_truncate: bool = True
@@ -84,6 +86,9 @@ class EmbeddingConfig:
             ),
             max_concurrency=int(os.getenv("EMBEDDING_MAX_CONCURRENCY", "8")),
             batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "20")),
+            max_items_per_minute=int(
+                os.getenv("EMBEDDING_MAX_ITEMS_PER_MINUTE", "0")
+            ),
             timeout_seconds=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "60")),
             max_retries=int(os.getenv("EMBEDDING_MAX_RETRIES", "3")),
             auto_truncate=_env_bool("EMBEDDING_AUTO_TRUNCATE", True),
@@ -136,6 +141,11 @@ class EmbeddingConfig:
             and 128 <= self.dimensions <= 3072
             and self.max_concurrency >= 1
             and 1 <= self.batch_size <= 100
+            and self.max_items_per_minute >= 0
+            and (
+                self.max_items_per_minute == 0
+                or self.batch_size <= self.max_items_per_minute
+            )
             and self.timeout_seconds > 0
             and self.max_retries >= 1
             and self.data_policy in {"allow", "redact", "deny"}
@@ -157,6 +167,7 @@ def embedding_config_from_settings(settings: Any) -> EmbeddingConfig:
         dimensions=settings.postgres_vector_size,
         max_concurrency=settings.embedding_max_concurrency,
         batch_size=settings.embedding_batch_size,
+        max_items_per_minute=settings.embedding_max_items_per_minute,
         timeout_seconds=settings.embedding_timeout_seconds,
         max_retries=settings.embedding_max_retries,
         auto_truncate=settings.embedding_auto_truncate,
@@ -179,6 +190,9 @@ class VertexAIEmbeddingService:
         self._credentials_lock = threading.Lock()
         self._readiness_lock = threading.Lock()
         self._vertex_ready = False
+        self._rate_lock = threading.Lock()
+        self._rate_events: deque[tuple[float, int]] = deque()
+        self._rate_total = 0
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(config.timeout_seconds, connect=15.0),
@@ -484,6 +498,39 @@ class VertexAIEmbeddingService:
             "outputDimensionality": self.config.dimensions,
         }
 
+    def _throttle_gemini_items(self, item_count: int) -> None:
+        limit = self.config.max_items_per_minute
+        if limit <= 0:
+            return
+        if item_count > limit:
+            raise EmbeddingModelError(
+                "EMBEDDING_BATCH_SIZE cannot exceed "
+                "EMBEDDING_MAX_ITEMS_PER_MINUTE."
+            )
+
+        while True:
+            wait_seconds = 0.0
+            with self._rate_lock:
+                now = time.monotonic()
+                cutoff = now - 60.0
+                while (
+                    self._rate_events
+                    and self._rate_events[0][0] <= cutoff
+                ):
+                    _, expired_count = self._rate_events.popleft()
+                    self._rate_total -= expired_count
+
+                if self._rate_total + item_count <= limit:
+                    self._rate_events.append((now, item_count))
+                    self._rate_total += item_count
+                    return
+
+                wait_seconds = max(
+                    self._rate_events[0][0] + 60.0 - now,
+                    0.01,
+                )
+            time.sleep(wait_seconds)
+
     def _request_gemini_batch(
         self,
         texts: list[str],
@@ -502,6 +549,7 @@ class VertexAIEmbeddingService:
 
         for attempt in range(self.config.max_retries):
             response: httpx.Response | None = None
+            self._throttle_gemini_items(len(requests))
             try:
                 response = self._client.post(
                     self._gemini_api_url(action),
