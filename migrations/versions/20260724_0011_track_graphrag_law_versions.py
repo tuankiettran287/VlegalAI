@@ -12,7 +12,7 @@ depends_on = None
 def upgrade() -> None:
     op.execute(
         """
-        CREATE TABLE graphrag_law_version (
+        CREATE TABLE IF NOT EXISTS graphrag_law_version (
             law_code_normalized VARCHAR(120) PRIMARY KEY,
             latest_version INTEGER NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -40,6 +40,12 @@ def upgrade() -> None:
         FROM graphrag_chunk
         WHERE law_code IS NOT NULL AND law_version IS NOT NULL
         GROUP BY 1
+        ON CONFLICT (law_code_normalized) DO UPDATE SET
+            latest_version = GREATEST(
+                graphrag_law_version.latest_version,
+                EXCLUDED.latest_version
+            ),
+            updated_at = now()
         """
     )
 

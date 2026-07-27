@@ -18,7 +18,7 @@ NORMALIZED_CODE = (
 def upgrade() -> None:
     op.execute(
         f"""
-        CREATE INDEX {INDEX_NAME}
+        CREATE INDEX IF NOT EXISTS {INDEX_NAME}
         ON graphrag_chunk ({NORMALIZED_CODE}, law_version DESC)
         WHERE law_code IS NOT NULL AND law_version IS NOT NULL
         """
