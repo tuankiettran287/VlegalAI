@@ -4,10 +4,14 @@ Luồng này chỉ dành cho `vlegal-api`. Frontend tiếp tục dùng image Ngi
 Backend được build từ source bằng Google Buildpacks với `Procfile` và
 `.python-version`; không cần thêm Dockerfile backend.
 
-Script đồng thời truyền thẳng `GOOGLE_PYTHON_VERSION=3.12.x` và
+Script đồng thời truyền thẳng `GOOGLE_PYTHON_VERSION=3.13.x` và
 `GOOGLE_ENTRYPOINT` vào Buildpacks. Đây là lớp bảo vệ cho lỗi đã thấy trong log:
 Cloud Build từng bỏ qua hai file cấu hình, tự chọn Python 3.14 và dừng ở
 `google.python.missing-entrypoint`.
+
+Python 3.13 được dùng đồng nhất với backend Dockerfile và GitHub Actions. Builder
+Cloud Run hiện tại không còn cung cấp Python 3.12, nên ép `3.12.x` sẽ dừng ở bước
+resolve runtime trước khi cài dependency.
 
 ## Một lệnh cho lần đầu
 
