@@ -73,6 +73,11 @@ hình Cloud Run khác. Không dùng lại lệnh cũ chứa toàn bộ credentia
 Các build variable cũng được cập nhật bằng `--update-build-env-vars`, không ghi
 đè những build variable không thuộc script.
 
+Nếu service cũ đang giữ credential dưới dạng biến môi trường thường, script tự
+nhận diện và gỡ đúng các biến đó trong một revision không nhận traffic trước khi
+bind Secret Manager. Bản source mới cũng được deploy không traffic, kiểm tra
+`live`/`ready` qua URL có tag, rồi mới chuyển 100% traffic sang revision mới.
+
 Production giữ `GEMINI_USE_ADC=true` để Gemini generation và
 `gemini-embedding-001` dùng Cloud Run service identity. `GEMINI_API_KEY` vẫn được
 lưu và bind từ Secret Manager theo cấu hình hiện tại, nhưng không được commit.

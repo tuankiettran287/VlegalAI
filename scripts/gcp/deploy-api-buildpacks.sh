@@ -116,6 +116,7 @@ require_command() {
 require_command gcloud
 require_command git
 require_command curl
+require_command python3
 
 if [[ -z "$PROJECT_ID" ]]; then
   PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
@@ -248,17 +249,73 @@ secret_bindings="$(
     'MESSAGE_ENCRYPTION_KEY=vlegal-message-key:latest'
 )"
 
+# A variable cannot change directly from a literal value to a Secret Manager
+# reference in one gcloud mutation. Detect only legacy literal bindings and
+# remove them in a no-traffic revision before attaching the secret references.
+# Existing secret-backed variables are left untouched, making reruns idempotent.
+secret_env_names='DATABASE_URL,NEO4J_PASSWORD,GEMINI_API_KEY,TAVILY_API_KEY,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,SESSION_SECRET,MESSAGE_ENCRYPTION_KEY'
+plain_secret_envs="$(
+  gcloud run services describe "$SERVICE" \
+    --project="$PROJECT_ID" \
+    --region="$REGION" \
+    --format=json |
+    SECRET_ENV_NAMES="$secret_env_names" python3 -c '
+import json
+import os
+import sys
+
+service = json.load(sys.stdin)
+spec = service.get("spec") or {}
+template = spec.get("template") or {}
+container_spec = template.get("spec") or template
+containers = container_spec.get("containers") or []
+env = containers[0].get("env") or [] if containers else []
+wanted = os.environ["SECRET_ENV_NAMES"].split(",")
+literal_names = {
+    item.get("name")
+    for item in env
+    if isinstance(item, dict) and "value" in item
+}
+print(",".join(name for name in wanted if name in literal_names))
+'
+)"
+
+if [[ -n "$plain_secret_envs" ]]; then
+  echo
+  echo "Migrating legacy plaintext environment variables to Secret Manager:"
+  echo "$plain_secret_envs"
+  gcloud run services update "$SERVICE" \
+    --project="$PROJECT_ID" \
+    --region="$REGION" \
+    --remove-env-vars="$plain_secret_envs" \
+    --no-traffic \
+    --no-deploy-health-check \
+    --quiet
+fi
+
 # The failed Cloud Build log showed that source detection fell back to Python
 # 3.14 and the "missing-entrypoint" buildpack. Set both values explicitly so a
 # source deploy is deterministic even if gcloud's upload manifest omits or does
 # not detect Procfile/.python-version.
 build_env_vars='GOOGLE_PYTHON_VERSION=3.12.x,GOOGLE_ENTRYPOINT=python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT'
+source_commit="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
+deploy_tag="buildpacks-$source_commit"
+
+latest_build_id() {
+  gcloud builds list \
+    --project="$PROJECT_ID" \
+    --region="$REGION" \
+    --limit=1 \
+    --format='value(id)' \
+    2>/dev/null || true
+}
 
 echo
-echo "Deploying $SERVICE from commit $(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+echo "Deploying $SERVICE from commit $source_commit"
 echo "Runtime service account: $RUNTIME_SERVICE_ACCOUNT"
 echo "Frontend origin: $FRONTEND_URL"
 
+build_before="$(latest_build_id)"
 if ! gcloud run deploy "$SERVICE" \
   --project="$PROJECT_ID" \
   --region="$REGION" \
@@ -267,31 +324,24 @@ if ! gcloud run deploy "$SERVICE" \
   --service-account="$RUNTIME_SERVICE_ACCOUNT" \
   --port=8080 \
   --allow-unauthenticated \
+  --no-traffic \
+  --tag="$deploy_tag" \
   --update-build-env-vars="$build_env_vars" \
   --update-env-vars="$env_vars" \
   --update-secrets="$secret_bindings"; then
-  latest_build="$(
-    gcloud builds list \
-      --project="$PROJECT_ID" \
-      --region="$REGION" \
-      --limit=1 \
-      --format='value(id)' \
-      2>/dev/null || true
-  )"
-  if [[ -n "$latest_build" ]]; then
+  latest_build="$(latest_build_id)"
+  if [[ -n "$latest_build" && "$latest_build" != "$build_before" ]]; then
     echo
     echo "Build failed. Read its log with:"
     echo "gcloud beta builds log $latest_build --region=$REGION --project=$PROJECT_ID"
+  else
+    echo
+    echo "Deployment stopped before a new Cloud Build was created."
+    echo "Read the gcloud validation error above."
   fi
   exit 1
 fi
 
-API_URL="$(
-  gcloud run services describe "$SERVICE" \
-    --project="$PROJECT_ID" \
-    --region="$REGION" \
-    --format='value(status.url)'
-)"
 revision="$(
   gcloud run services describe "$SERVICE" \
     --project="$PROJECT_ID" \
@@ -299,22 +349,77 @@ revision="$(
     --format='value(status.latestReadyRevisionName)'
 )"
 
+tag_url() {
+  gcloud run services describe "$SERVICE" \
+    --project="$PROJECT_ID" \
+    --region="$REGION" \
+    --format=json |
+    DEPLOY_TAG="$deploy_tag" python3 -c '
+import json
+import os
+import sys
+
+service = json.load(sys.stdin)
+tag = os.environ["DEPLOY_TAG"]
+for target in (service.get("status") or {}).get("traffic") or []:
+    if target.get("tag") == tag:
+        print(target.get("url") or "")
+        break
+'
+}
+
+TAG_URL=""
+for attempt in {1..12}; do
+  TAG_URL="$(tag_url)"
+  if [[ -n "$TAG_URL" ]]; then
+    break
+  fi
+  sleep 5
+done
+if [[ -z "$TAG_URL" ]]; then
+  echo "Cannot resolve the no-traffic test URL for tag $deploy_tag." >&2
+  exit 1
+fi
+
 check_health() {
-  local path="$1"
+  local base_url="$1"
+  local path="$2"
   local attempt
   for attempt in {1..12}; do
-    if curl --fail --silent --show-error --max-time 20 "$API_URL$path"; then
+    if curl --fail --silent --show-error --max-time 20 "$base_url$path"; then
       echo
       return 0
     fi
     sleep 10
   done
-  echo "Health check failed: $API_URL$path" >&2
+  echo "Health check failed: $base_url$path" >&2
   return 1
 }
 
-check_health /api/health/live
-check_health /api/health/ready
+echo
+echo "Checking the new no-traffic revision at $TAG_URL"
+check_health "$TAG_URL" /api/health/live
+check_health "$TAG_URL" /api/health/ready
+
+gcloud run services update-traffic "$SERVICE" \
+  --project="$PROJECT_ID" \
+  --region="$REGION" \
+  --to-latest \
+  --quiet
+
+gcloud run services update-traffic "$SERVICE" \
+  --project="$PROJECT_ID" \
+  --region="$REGION" \
+  --remove-tags="$deploy_tag" \
+  --quiet || echo "Warning: could not remove temporary tag $deploy_tag." >&2
+
+API_URL="$(
+  gcloud run services describe "$SERVICE" \
+    --project="$PROJECT_ID" \
+    --region="$REGION" \
+    --format='value(status.url)'
+)"
+check_health "$API_URL" /api/health/live
 
 echo
 echo "Deployment complete."
