@@ -20,7 +20,10 @@ from sqlalchemy.engine import make_url
 from app.legal_graphrag import DEFAULT_DB_PATH, blob_to_vector, key_terms, normalize_space, strip_accents
 from app.legal_ontology import RELATIONS as LEGAL_RELATIONS
 from app.legal_ontology import REVERSIBLE_RELATIONS as LEGAL_REVERSIBLE_RELATIONS
-from app.services.embeddings import EmbeddingConfig, get_embedding_service
+from app.services.embeddings import (
+    EmbeddingConfig,
+    get_embedding_service,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -291,12 +294,16 @@ class ExternalGraphRAGConfig:
     database_url: str = "postgresql+asyncpg://vlegal:vlegal@localhost:5432/vlegal"
     postgres_vector_size: int = 1024
     batch_size: int = 256
-    embedding_model_path: str = "models/bge-m3"
-    embedding_model_repo: str = "BAAI/bge-m3"
-    embedding_model_revision: str = "main"
-    embedding_device: str = "auto"
-    embedding_batch_size: int = 4
-    embedding_max_sequence_length: int = 2048
+    embedding_model: str = "gemini-embedding-001"
+    embedding_project_id: str = ""
+    embedding_location: str = "asia-southeast1"
+    embedding_credentials_path: str = "env.json"
+    embedding_use_adc: bool = False
+    embedding_max_concurrency: int = 8
+    embedding_timeout_seconds: float = 60.0
+    embedding_max_retries: int = 3
+    embedding_auto_truncate: bool = True
+    embedding_data_policy: str = "redact"
     hybrid_vector_weight: float = 0.55
     hybrid_bm25_weight: float = 0.45
     hybrid_rrf_k: int = 60
@@ -316,12 +323,34 @@ class ExternalGraphRAGConfig:
             ),
             postgres_vector_size=int(os.getenv("POSTGRES_VECTOR_SIZE", "1024")),
             batch_size=int(os.getenv("EXTERNAL_SYNC_BATCH_SIZE", "256")),
-            embedding_model_path=os.getenv("EMBEDDING_MODEL_PATH", "models/bge-m3"),
-            embedding_model_repo=os.getenv("EMBEDDING_MODEL_REPO", "BAAI/bge-m3"),
-            embedding_model_revision=os.getenv("EMBEDDING_MODEL_REVISION", "main"),
-            embedding_device=os.getenv("EMBEDDING_DEVICE", "auto"),
-            embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "4")),
-            embedding_max_sequence_length=int(os.getenv("EMBEDDING_MAX_SEQUENCE_LENGTH", "2048")),
+            embedding_model=os.getenv("EMBEDDING_MODEL", "gemini-embedding-001"),
+            embedding_project_id=os.getenv("GEMINI_PROJECT_ID", ""),
+            embedding_location=os.getenv(
+                "EMBEDDING_LOCATION",
+                "asia-southeast1",
+            ),
+            embedding_credentials_path=os.getenv(
+                "GEMINI_CREDENTIALS_PATH",
+                "env.json",
+            ),
+            embedding_use_adc=os.getenv("GEMINI_USE_ADC", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+            embedding_max_concurrency=int(
+                os.getenv("EMBEDDING_MAX_CONCURRENCY", "8")
+            ),
+            embedding_timeout_seconds=float(
+                os.getenv("EMBEDDING_TIMEOUT_SECONDS", "60")
+            ),
+            embedding_max_retries=int(os.getenv("EMBEDDING_MAX_RETRIES", "3")),
+            embedding_auto_truncate=os.getenv(
+                "EMBEDDING_AUTO_TRUNCATE",
+                "true",
+            ).strip().lower()
+            in {"1", "true", "yes", "on"},
+            embedding_data_policy=os.getenv(
+                "GEMINI_DATA_POLICY",
+                "redact",
+            ).strip().lower(),
             hybrid_vector_weight=float(os.getenv("HYBRID_VECTOR_WEIGHT", "0.55")),
             hybrid_bm25_weight=float(os.getenv("HYBRID_BM25_WEIGHT", "0.45")),
             hybrid_rrf_k=int(os.getenv("HYBRID_RRF_K", "60")),
@@ -332,13 +361,17 @@ class ExternalGraphRAGConfig:
     @property
     def embedding_config(self) -> EmbeddingConfig:
         return EmbeddingConfig(
-            model_path=self.embedding_model_path,
-            model_repo=self.embedding_model_repo,
-            model_revision=self.embedding_model_revision,
-            device=self.embedding_device,
+            model=self.embedding_model,
+            project_id=self.embedding_project_id,
+            location=self.embedding_location,
+            credentials_path=self.embedding_credentials_path,
+            use_adc=self.embedding_use_adc,
             dimensions=self.postgres_vector_size,
-            batch_size=self.embedding_batch_size,
-            max_sequence_length=self.embedding_max_sequence_length,
+            max_concurrency=self.embedding_max_concurrency,
+            timeout_seconds=self.embedding_timeout_seconds,
+            max_retries=self.embedding_max_retries,
+            auto_truncate=self.embedding_auto_truncate,
+            data_policy=self.embedding_data_policy,
         )
 
     @property
@@ -382,15 +415,21 @@ def sqlite_rows(db_path: Path | str, table: str) -> list[dict[str, Any]]:
 def validate_sqlite_embedding_metadata(db_path: Path | str, config: ExternalGraphRAGConfig) -> None:
     try:
         rows = sqlite_rows(db_path, "index_metadata")
-    except sqlite3.OperationalError:
-        return
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            "SQLite GraphRAG has no trusted embedding metadata; rebuild the index."
+        ) from exc
     metadata = {str(row["key"]): str(row["value"]) for row in rows}
     expected = {
-        "embedding_model": config.embedding_model_repo,
-        "embedding_revision": config.embedding_model_revision,
+        "embedding_model": config.embedding_model,
+        "embedding_revision": config.embedding_config.model_revision,
         "embedding_dimensions": str(config.postgres_vector_size),
     }
-    # Metadata mismatches will degrade gracefully to text search rather than blocking sync
+    if any(metadata.get(key) != value for key, value in expected.items()):
+        raise RuntimeError(
+            f"SQLite GraphRAG embeddings {metadata!r} do not match "
+            f"{expected!r}; rebuild the index before syncing."
+        )
 
 
 def postgres_dsn(database_url: str) -> str:
@@ -555,17 +594,26 @@ def vector_literal(values: Iterable[float]) -> str:
     return "[" + ",".join(f"{float(value):.8g}" for value in values) + "]"
 
 
-def postgres_dense_vector(text: str, config: ExternalGraphRAGConfig) -> list[float]:
+def postgres_dense_vector(
+    text: str,
+    config: ExternalGraphRAGConfig,
+) -> list[float] | None:
     try:
         return get_embedding_service(config.embedding_config).embed_query(text)
     except Exception as exc:
-        logger.warning("Local embedding model unavailable for dense vector search, falling back to zero vector: %s", exc)
-        return [0.0] * config.postgres_vector_size
+        logger.warning(
+            "Vertex AI embedding unavailable; skipping dense retrieval and "
+            "continuing with lexical retrieval: %s",
+            exc,
+        )
+        return None
 
 
 def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) -> None:
-    if config.postgres_vector_size > 2000:
-        raise ValueError("POSTGRES_VECTOR_SIZE must be <= 2000 when using an HNSW vector index")
+    if config.postgres_vector_size != 1024:
+        raise ValueError(
+            "POSTGRES_VECTOR_SIZE must be 1024 for the current pgvector schema."
+        )
     with postgres_connection(config) as connection:
         with connection.cursor() as cursor:
             cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -710,19 +758,28 @@ def validate_postgres_embeddings(connection, config: ExternalGraphRAGConfig) -> 
             """
             SELECT embedding_model, embedding_revision, vector_dims(embedding) AS dimensions
             FROM graphrag_chunk
-            LIMIT 1
+            GROUP BY embedding_model, embedding_revision, vector_dims(embedding)
+            ORDER BY embedding_model, embedding_revision, dimensions
+            LIMIT 2
             """
         )
-        row = cursor.fetchone()
-    if not row:
+        rows = cursor.fetchall()
+    if not rows:
         return
-    actual = (row["embedding_model"], row["embedding_revision"], int(row["dimensions"]))
+    actual = {
+        (
+            row["embedding_model"],
+            row["embedding_revision"],
+            int(row["dimensions"]),
+        )
+        for row in rows
+    }
     expected = (
-        config.embedding_model_repo,
-        config.embedding_model_revision,
+        config.embedding_model,
+        config.embedding_config.model_revision,
         config.postgres_vector_size,
     )
-    if actual != expected:
+    if actual != {expected}:
         raise RuntimeError(
             f"PostgreSQL embeddings {actual!r} do not match configured model {expected!r}; re-embed the corpus."
         )
@@ -750,10 +807,12 @@ def upsert_postgres_chunks(
         else:
             values = list(blob_to_vector(bytes(stored_vector)))
             if len(values) != config.postgres_vector_size:
+                missing_indices.append(len(prepared))
+                missing_texts.append(vector_text)
                 values = [0.0] * config.postgres_vector_size
             row["embedding"] = vector_literal(values)
-        row["embedding_model"] = config.embedding_model_repo
-        row["embedding_revision"] = config.embedding_model_revision
+        row["embedding_model"] = config.embedding_model
+        row["embedding_revision"] = config.embedding_config.model_revision
         prepared.append(row)
 
     if missing_texts:
@@ -1140,7 +1199,10 @@ class PostgresGraphRAGStore:
         return selected
 
     def _vector_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
-        query_vector = vector_literal(postgres_dense_vector(query, self.config))
+        dense_vector = postgres_dense_vector(query, self.config)
+        if dense_vector is None:
+            return []
+        query_vector = vector_literal(dense_vector)
         current_chunk = postgres_latest_chunk_predicate("current_chunk")
         with self.connection.cursor() as cursor:
             cursor.execute(

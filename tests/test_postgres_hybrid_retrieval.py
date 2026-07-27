@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from app import external_graphrag as graphrag_module
 from app.external_graphrag import (
     CURRENT_LAW_STATUSES,
@@ -16,6 +18,7 @@ from app.external_graphrag import (
     postgres_lexical_terms,
     postgres_or_tsquery,
     reciprocal_rank_fusion,
+    validate_postgres_embeddings,
 )
 
 
@@ -216,6 +219,35 @@ class _GraphDriver:
         return self.recording_session
 
 
+def test_postgres_embedding_validation_rejects_mixed_vector_spaces() -> None:
+    cursor = _RecordingCursor(
+        fetchall_results=[
+            [
+                {
+                    "embedding_model": "gemini-embedding-001",
+                    "embedding_revision": "vertex-ai-v1:redact",
+                    "dimensions": 1024,
+                },
+                {
+                    "embedding_model": "BAAI/bge-m3",
+                    "embedding_revision": "main",
+                    "dimensions": 1024,
+                },
+            ]
+        ]
+    )
+    config = SimpleNamespace(
+        embedding_model="gemini-embedding-001",
+        postgres_vector_size=1024,
+        embedding_config=SimpleNamespace(
+            model_revision="vertex-ai-v1:redact"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="re-embed"):
+        validate_postgres_embeddings(_RecordingConnection(cursor), config)
+
+
 def test_current_postgres_predicate_requires_current_status_and_latest_version() -> None:
     predicate = postgres_current_chunk_predicate("candidate")
 
@@ -269,6 +301,17 @@ def test_postgres_vector_and_bm25_paths_use_latest_indexed_versions(
     vector_query = vector_cursor.queries[0][0]
     assert "current_chunk.law_status IN" not in vector_query
     assert "latest_law.latest_version = current_chunk.law_version" in vector_query
+
+    monkeypatch.setattr(
+        graphrag_module,
+        "postgres_dense_vector",
+        lambda *_: None,
+    )
+    no_dense_cursor = _RecordingCursor(fetchall_results=[[]])
+    vector_store.connection = _RecordingConnection(no_dense_cursor)
+
+    assert vector_store._vector_candidates("thuế", 5) == []
+    assert no_dense_cursor.queries == []
 
     row = {
         **_row("current", "thuế phải nộp"),

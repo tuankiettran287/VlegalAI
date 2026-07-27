@@ -188,6 +188,8 @@ class LegalAnswerCache(TimestampMixin, Base):
     law_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
     model_name: Mapped[str] = mapped_column(String(255))
     prompt_version: Mapped[str] = mapped_column(String(64))
+    embedding_model: Mapped[str] = mapped_column(String(255))
+    embedding_revision: Mapped[str] = mapped_column(String(255))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     hit_count: Mapped[int] = mapped_column(BigInteger, default=0)
     last_hit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

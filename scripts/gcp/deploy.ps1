@@ -2,20 +2,18 @@
 param(
     [string]$ProjectId = $env:GOOGLE_CLOUD_PROJECT,
     [string]$Region = "asia-southeast1",
+    [string]$EmbeddingLocation = "",
     [string]$Repository = "vlegal",
     [string]$Tag = "",
     [string]$RunServiceAccount = "",
-    [string]$EmbeddingBucket = "",
     [string]$CorpusBucket = "",
     [string]$Network = "default",
     [string]$Subnet = "default",
     [string]$Neo4jUri = $env:NEO4J_URI,
     [string]$Neo4jUser = "neo4j",
     [string]$FrontendUrl = "",
-    [ValidateSet("all", "model-init", "migrate", "reindex", "api", "frontend", "worker", "beat")]
+    [ValidateSet("all", "migrate", "reindex", "api", "frontend", "worker", "beat")]
     [string]$Component = "all",
-    [ValidateSet("nvidia-rtx-pro-6000", "nvidia-l4")]
-    [string]$GpuType = "nvidia-l4",
     [switch]$ExecuteJobs
 )
 
@@ -38,24 +36,23 @@ if ([string]::IsNullOrWhiteSpace($Tag)) {
 if ([string]::IsNullOrWhiteSpace($RunServiceAccount)) {
     $RunServiceAccount = "vlegal-run@$ProjectId.iam.gserviceaccount.com"
 }
-if ([string]::IsNullOrWhiteSpace($EmbeddingBucket)) {
-    $EmbeddingBucket = "$ProjectId-vlegal-bge-m3"
+if ([string]::IsNullOrWhiteSpace($EmbeddingLocation)) {
+    $EmbeddingLocation = $Region
 }
 if ([string]::IsNullOrWhiteSpace($CorpusBucket)) {
     $CorpusBucket = "$ProjectId-vlegal-corpus"
 }
 
 $imageRoot = "$Region-docker.pkg.dev/$ProjectId/$Repository"
+$backendImage = "$imageRoot/vlegal-backend`:$Tag"
+$frontendImage = "$imageRoot/vlegal-frontend`:$Tag"
 $apiService = "vlegal-api"
 $frontendService = "vlegal-frontend"
 $workerPool = "vlegal-worker"
 $beatPool = "vlegal-beat"
 $migrateJob = "vlegal-migrate"
-$modelJob = "vlegal-model-init"
 $reindexJob = "vlegal-reindex"
 
-$gpuCpu = if ($GpuType -eq "nvidia-l4") { "8" } else { "20" }
-$gpuMemory = if ($GpuType -eq "nvidia-l4") { "32Gi" } else { "80Gi" }
 $apiSecrets = @(
     "DATABASE_URL=vlegal-database-url:latest",
     "NEO4J_PASSWORD=vlegal-neo4j-password:latest",
@@ -89,28 +86,14 @@ function Get-ServiceUrl {
     return $url
 }
 
-function Deploy-ModelInit {
-    Invoke-Gcloud @(
-        "run", "jobs", "deploy", $modelJob,
-        "--project=$ProjectId", "--region=$Region",
-        "--image=$imageRoot/vlegal-model-init`:$Tag",
-        "--service-account=$RunServiceAccount",
-        "--cpu=4", "--memory=8Gi", "--task-timeout=3h", "--max-retries=3",
-        "--set-env-vars=EMBEDDING_MODEL_REPO=BAAI/bge-m3,EMBEDDING_MODEL_REVISION=main,HF_HUB_OFFLINE=0,TRANSFORMERS_OFFLINE=0",
-        "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=false,mount-options=uid=10001;gid=10001",
-        "--quiet"
-    )
-    if ($ExecuteJobs) {
-        Invoke-Gcloud @("run", "jobs", "execute", $modelJob, "--project=$ProjectId", "--region=$Region", "--wait")
-    }
-}
-
 function Deploy-Migrate {
     Invoke-Gcloud @(
         "run", "jobs", "deploy", $migrateJob,
         "--project=$ProjectId", "--region=$Region",
-        "--image=$imageRoot/vlegal-migrate`:$Tag",
+        "--image=$backendImage",
         "--service-account=$RunServiceAccount",
+        "--command=alembic",
+        "--args=upgrade,head",
         "--cpu=1", "--memory=1Gi", "--task-timeout=15m", "--max-retries=1",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
         "--set-secrets=DATABASE_URL=vlegal-database-url:latest",
@@ -127,31 +110,30 @@ function Deploy-Reindex {
         "LEGAL_DATA_DIR=/app/legal-data",
         "LEGAL_STORAGE_DIR=/tmp/graphrag",
         "LEGAL_GRAPHRAG_DB=/tmp/graphrag/legal_graphrag.sqlite",
-        "EMBEDDING_MODEL_PATH=/models/embedding",
-        "EMBEDDING_MODEL_REPO=BAAI/bge-m3",
-        "EMBEDDING_MODEL_REVISION=main",
-        "EMBEDDING_DEVICE=cuda",
-        "EMBEDDING_BATCH_SIZE=4",
-        "EMBEDDING_MAX_SEQUENCE_LENGTH=2048",
+        "GEMINI_USE_ADC=true",
+        "GEMINI_PROJECT_ID=$ProjectId",
+        "EMBEDDING_MODEL=gemini-embedding-001",
+        "EMBEDDING_LOCATION=$EmbeddingLocation",
+        "EMBEDDING_MAX_CONCURRENCY=8",
+        "EMBEDDING_TIMEOUT_SECONDS=60",
+        "EMBEDDING_MAX_RETRIES=3",
+        "EMBEDDING_AUTO_TRUNCATE=true",
+        "GEMINI_DATA_POLICY=redact",
         "POSTGRES_VECTOR_SIZE=1024",
         "NEO4J_URI=$Neo4jUri",
-        "NEO4J_USER=$Neo4jUser",
-        "HF_HUB_OFFLINE=1",
-        "TRANSFORMERS_OFFLINE=1"
+        "NEO4J_USER=$Neo4jUser"
     ) -join ","
 
     Invoke-Gcloud @(
         "run", "jobs", "deploy", $reindexJob,
         "--project=$ProjectId", "--region=$Region",
-        "--image=$imageRoot/vlegal-reindex`:$Tag",
+        "--image=$backendImage",
         "--service-account=$RunServiceAccount",
         "--command=python",
         "--args=scripts/sync_external_graphrag.py,--reset-neo4j,--reset-postgres",
         "--tasks=1", "--parallelism=1", "--max-retries=1", "--task-timeout=24h",
-        "--gpu=1", "--gpu-type=nvidia-l4", "--no-gpu-zonal-redundancy",
-        "--cpu=4", "--memory=16Gi",
+        "--cpu=4", "--memory=8Gi",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
-        "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--add-volume=mount-path=/app/legal-data,type=cloud-storage,bucket=$CorpusBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--set-env-vars=$envVars",
         "--set-secrets=DATABASE_URL=vlegal-database-url:latest,NEO4J_PASSWORD=vlegal-neo4j-password:latest",
@@ -170,12 +152,13 @@ function Deploy-Api {
         "GEMINI_LOCATION=global",
         "GEMINI_MODEL=gemini-3.5-flash",
         "GEMINI_MAX_CONCURRENT_GENERATIONS=8",
-        "EMBEDDING_MODEL_PATH=/models/embedding",
-        "EMBEDDING_MODEL_REPO=BAAI/bge-m3",
-        "EMBEDDING_MODEL_REVISION=main",
-        "EMBEDDING_DEVICE=cuda",
-        "EMBEDDING_BATCH_SIZE=4",
-        "EMBEDDING_MAX_SEQUENCE_LENGTH=2048",
+        "EMBEDDING_MODEL=gemini-embedding-001",
+        "EMBEDDING_LOCATION=$EmbeddingLocation",
+        "EMBEDDING_MAX_CONCURRENCY=8",
+        "EMBEDDING_TIMEOUT_SECONDS=60",
+        "EMBEDDING_MAX_RETRIES=3",
+        "EMBEDDING_AUTO_TRUNCATE=true",
+        "GEMINI_DATA_POLICY=redact",
         "WEB_CONCURRENCY=1",
         "DATABASE_POOL_SIZE=5",
         "DATABASE_MAX_OVERFLOW=5",
@@ -188,14 +171,12 @@ function Deploy-Api {
     Invoke-Gcloud @(
         "run", "deploy", $apiService,
         "--project=$ProjectId", "--region=$Region",
-        "--image=$imageRoot/vlegal-api`:$Tag",
+        "--image=$backendImage",
         "--execution-environment=gen2", "--service-account=$RunServiceAccount", "--port=8080",
-        "--gpu=1", "--gpu-type=$GpuType", "--no-gpu-zonal-redundancy",
-        "--cpu=$gpuCpu", "--memory=$gpuMemory", "--concurrency=1",
-        "--min=0", "--max=1", "--timeout=3600", "--no-cpu-throttling",
+        "--cpu=2", "--memory=4Gi", "--concurrency=16",
+        "--min=0", "--max=5", "--timeout=3600",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
         "--allow-unauthenticated",
-        "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--set-env-vars=$envVars", "--set-secrets=$apiSecrets",
         "--quiet"
     )
@@ -216,7 +197,7 @@ function Deploy-Frontend {
     Invoke-Gcloud @(
         "run", "deploy", $frontendService,
         "--project=$ProjectId", "--region=$Region",
-        "--image=$imageRoot/vlegal-frontend`:$Tag",
+        "--image=$frontendImage",
         "--execution-environment=gen2", "--service-account=$RunServiceAccount", "--port=8080",
         "--cpu=1", "--memory=512Mi", "--concurrency=80", "--min=0", "--max=5",
         "--allow-unauthenticated", "--set-env-vars=API_UPSTREAM=$apiUrl",
@@ -233,12 +214,13 @@ function Deploy-Worker {
         "GEMINI_LOCATION=global",
         "GEMINI_MODEL=gemini-3.5-flash",
         "GEMINI_MAX_CONCURRENT_GENERATIONS=8",
-        "EMBEDDING_MODEL_PATH=/models/embedding",
-        "EMBEDDING_MODEL_REPO=BAAI/bge-m3",
-        "EMBEDDING_MODEL_REVISION=main",
-        "EMBEDDING_DEVICE=cuda",
-        "EMBEDDING_BATCH_SIZE=4",
-        "EMBEDDING_MAX_SEQUENCE_LENGTH=2048",
+        "EMBEDDING_MODEL=gemini-embedding-001",
+        "EMBEDDING_LOCATION=$EmbeddingLocation",
+        "EMBEDDING_MAX_CONCURRENCY=8",
+        "EMBEDDING_TIMEOUT_SECONDS=60",
+        "EMBEDDING_MAX_RETRIES=3",
+        "EMBEDDING_AUTO_TRUNCATE=true",
+        "GEMINI_DATA_POLICY=redact",
         "DATABASE_POOL_SIZE=2",
         "DATABASE_MAX_OVERFLOW=2",
         "RETRIEVER_BACKEND=hybrid_rag",
@@ -250,11 +232,11 @@ function Deploy-Worker {
     Invoke-Gcloud @(
         "run", "worker-pools", "deploy", $workerPool,
         "--project=$ProjectId", "--region=$Region", "--instances=1",
-        "--image=$imageRoot/vlegal-worker`:$Tag", "--service-account=$RunServiceAccount",
-        "--gpu=1", "--gpu-type=$GpuType", "--no-gpu-zonal-redundancy",
-        "--cpu=$gpuCpu", "--memory=$gpuMemory",
+        "--image=$backendImage", "--service-account=$RunServiceAccount",
+        "--command=celery",
+        "--args=-A,app.worker.celery_app,worker,--loglevel=INFO,--concurrency=1",
+        "--cpu=2", "--memory=4Gi",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
-        "--add-volume=mount-path=/models/embedding,type=cloud-storage,bucket=$EmbeddingBucket,readonly=true,mount-options=uid=10001;gid=10001",
         "--set-env-vars=$envVars", "--set-secrets=$workerSecrets",
         "--quiet"
     )
@@ -264,7 +246,9 @@ function Deploy-Beat {
     Invoke-Gcloud @(
         "run", "worker-pools", "deploy", $beatPool,
         "--project=$ProjectId", "--region=$Region", "--instances=1",
-        "--image=$imageRoot/vlegal-beat`:$Tag", "--service-account=$RunServiceAccount",
+        "--image=$backendImage", "--service-account=$RunServiceAccount",
+        "--command=celery",
+        "--args=-A,app.scheduler.celery_app,beat,--loglevel=INFO",
         "--cpu=1", "--memory=512Mi",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
         "--set-env-vars=APP_ENV=production",
@@ -274,7 +258,6 @@ function Deploy-Beat {
 }
 
 switch ($Component) {
-    "model-init" { Deploy-ModelInit }
     "migrate" { Deploy-Migrate }
     "reindex" { Deploy-Reindex }
     "api" {
@@ -291,7 +274,6 @@ switch ($Component) {
     "worker" { Deploy-Worker }
     "beat" { Deploy-Beat }
     "all" {
-        Deploy-ModelInit
         Deploy-Migrate
         Deploy-Reindex
         Deploy-Api

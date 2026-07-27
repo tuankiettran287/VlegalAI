@@ -351,12 +351,16 @@ class LegalIndexer:
             neo4j_database=self.settings.neo4j_database,
             database_url=self.settings.database_url,
             postgres_vector_size=self.settings.postgres_vector_size,
-            embedding_model_path=self.settings.embedding_model_path,
-            embedding_model_repo=self.settings.embedding_model_repo,
-            embedding_model_revision=self.settings.embedding_model_revision,
-            embedding_device=self.settings.embedding_device,
-            embedding_batch_size=self.settings.embedding_batch_size,
-            embedding_max_sequence_length=self.settings.embedding_max_sequence_length,
+            embedding_model=self.settings.embedding_model,
+            embedding_project_id=self.settings.gemini_project_id,
+            embedding_location=self.settings.embedding_location,
+            embedding_credentials_path=self.settings.gemini_credentials_path,
+            embedding_use_adc=self.settings.gemini_use_adc,
+            embedding_max_concurrency=self.settings.embedding_max_concurrency,
+            embedding_timeout_seconds=self.settings.embedding_timeout_seconds,
+            embedding_max_retries=self.settings.embedding_max_retries,
+            embedding_auto_truncate=self.settings.embedding_auto_truncate,
+            embedding_data_policy=self.settings.gemini_data_policy,
         )
 
     async def index_candidate(self, db: AsyncSession, candidate: LegalCandidate) -> LegalDocument:

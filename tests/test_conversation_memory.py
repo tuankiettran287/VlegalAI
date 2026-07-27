@@ -125,5 +125,5 @@ def test_refresh_summarizes_embeds_and_persists_conversation_memory(
     assert memory.source_message_count == 2
     assert memory.last_message_sequence == 2
     assert memory.embedding == [0.5] * 1024
-    assert memory.embedding_model == settings.embedding_model_repo
+    assert memory.embedding_model == settings.embedding_model
     assert decrypt_text(memory.summary_ciphertext, settings).startswith("Người dùng hỏi")

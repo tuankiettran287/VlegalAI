@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -18,6 +19,7 @@ from app import legal_ontology as onto
 from app.services.embeddings import EmbeddingConfig, get_embedding_service
 
 
+logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = PROJECT_ROOT / "Data (1)"
 DEFAULT_STORAGE_DIR = PROJECT_ROOT / "storage" / "graphrag"
@@ -1785,15 +1787,10 @@ class LegalGraphBuilder:
     def _embed_chunks(self) -> None:
         rows = list(self.chunks.values())
         texts = [f"{row['title']}\n{row['path_label']}\n{row['text']}" for row in rows]
-        try:
-            service = get_embedding_service(self.embedding_config)
-            embeddings = service.embed_documents(texts, show_progress=True)
-            for row, embedding in zip(rows, embeddings, strict=True):
-                row["vector"] = vector_to_blob(embedding)
-        except Exception:
-            zero_vec = vector_to_blob([0.0] * self.embedding_config.dimensions)
-            for row in rows:
-                row["vector"] = zero_vec
+        service = get_embedding_service(self.embedding_config)
+        embeddings = service.embed_documents(texts, show_progress=True)
+        for row, embedding in zip(rows, embeddings, strict=True):
+            row["vector"] = vector_to_blob(embedding)
 
     def _semantic_chunk_text(self, node_id: str, node: dict[str, Any], outgoing: dict[str, list[str]]) -> str:
         """Give a concept node a body worth embedding.
@@ -1958,7 +1955,7 @@ class LegalGraphBuilder:
         conn.executemany(
             "INSERT INTO index_metadata(key, value) VALUES (?, ?)",
             [
-                ("embedding_model", self.embedding_config.model_repo),
+                ("embedding_model", self.embedding_config.model),
                 ("embedding_revision", self.embedding_config.model_revision),
                 ("embedding_dimensions", str(self.embedding_config.dimensions)),
             ],
@@ -2018,11 +2015,11 @@ class GraphRAGStore:
             rows = self.conn.execute("SELECT key, value FROM index_metadata").fetchall()
         except sqlite3.OperationalError as exc:
             raise RuntimeError(
-                "Local GraphRAG index uses legacy hash vectors; rebuild it with BGE-M3."
+                "Local GraphRAG index uses legacy vectors; rebuild it with the configured Vertex AI embedding model."
             ) from exc
         metadata = {row["key"]: row["value"] for row in rows}
         expected = {
-            "embedding_model": self.embedding_config.model_repo,
+            "embedding_model": self.embedding_config.model,
             "embedding_revision": self.embedding_config.model_revision,
             "embedding_dimensions": str(self.embedding_config.dimensions),
         }
@@ -2070,7 +2067,16 @@ class GraphRAGStore:
             combined[row["chunk_id"]] = combined.get(row["chunk_id"], 0.0) + score * 1.25
             reasons.setdefault(row["chunk_id"], []).append("FTS")
 
-        for rank, (chunk_id, score) in enumerate(self._vector_search(query, limit=pool), start=1):
+        try:
+            vector_matches = self._vector_search(query, limit=pool)
+        except Exception as exc:
+            logger.warning(
+                "Vertex AI embedding unavailable; skipping local dense retrieval "
+                "and continuing with FTS: %s",
+                exc,
+            )
+            vector_matches = []
+        for rank, (chunk_id, score) in enumerate(vector_matches, start=1):
             combined[chunk_id] = combined.get(chunk_id, 0.0) + max(score, 0.0) * (1.0 / math.sqrt(rank + 1))
             reasons.setdefault(chunk_id, []).append("vector")
 
@@ -2535,6 +2541,8 @@ class GraphRAGStore:
 
             scores = matrix @ np.asarray(qvec, dtype=np.float32)
             count = min(limit, scores.shape[0])
+            if count <= 0:
+                return []
             top = np.argpartition(-scores, count - 1)[:count]
             top = top[np.argsort(-scores[top])]
             return [(self._matrix_ids[index], float(scores[index])) for index in top]

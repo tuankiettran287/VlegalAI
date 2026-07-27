@@ -14,7 +14,11 @@ from app.core.security import decrypt_text, encrypt_text
 from app.db import SessionFactory
 from app.models import ChatMessage, Conversation, ConversationSummary
 from app.services.ai import GeminiService, untrusted_data_block
-from app.services.embeddings import EmbeddingConfig, LocalEmbeddingService, get_embedding_service
+from app.services.embeddings import (
+    VertexAIEmbeddingService,
+    embedding_config_from_settings,
+    get_embedding_service,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -40,30 +44,21 @@ class _SummarySnapshot:
     messages: tuple[tuple[str, str], ...]
 
 
-def _embedding_config(settings: Settings) -> EmbeddingConfig:
-    return EmbeddingConfig(
-        model_path=settings.embedding_model_path,
-        model_repo=settings.embedding_model_repo,
-        model_revision=settings.embedding_model_revision,
-        device=settings.embedding_device,
-        dimensions=settings.postgres_vector_size,
-        batch_size=settings.embedding_batch_size,
-        max_sequence_length=settings.embedding_max_sequence_length,
-    )
-
-
 class ConversationMemoryService:
-    """Create encrypted LLM summaries and searchable BGE-M3 vectors."""
+    """Create encrypted LLM summaries and searchable Vertex AI vectors."""
 
     def __init__(
         self,
         settings: Settings,
         ai: GeminiService,
-        embeddings: LocalEmbeddingService | None = None,
+        embeddings: VertexAIEmbeddingService | None = None,
     ) -> None:
         self.settings = settings
         self.ai = ai
-        self.embeddings = embeddings or get_embedding_service(_embedding_config(settings))
+        self.embedding_config = embedding_config_from_settings(settings)
+        self.embeddings = embeddings or get_embedding_service(
+            self.embedding_config
+        )
 
     async def get_summary(self, db: AsyncSession, conversation_id: uuid.UUID) -> str:
         memory = await db.scalar(
@@ -167,8 +162,8 @@ class ConversationMemoryService:
                     summary_hash="",
                     source_message_count=snapshot.target_count,
                     last_message_sequence=snapshot.target_sequence,
-                    embedding_model=self.settings.embedding_model_repo,
-                    embedding_revision=self.settings.embedding_model_revision,
+                    embedding_model=self.settings.embedding_model,
+                    embedding_revision=self.embedding_config.model_revision,
                     embedding=embedding,
                 )
                 db.add(memory)
@@ -176,8 +171,8 @@ class ConversationMemoryService:
             memory.summary_hash = hashlib.sha256(summary.encode("utf-8")).hexdigest()
             memory.source_message_count = snapshot.target_count
             memory.last_message_sequence = snapshot.target_sequence
-            memory.embedding_model = self.settings.embedding_model_repo
-            memory.embedding_revision = self.settings.embedding_model_revision
+            memory.embedding_model = self.settings.embedding_model
+            memory.embedding_revision = self.embedding_config.model_revision
             memory.embedding = embedding
             await db.commit()
             await db.refresh(memory)

@@ -12,6 +12,7 @@ from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
 from sqlalchemy import delete, func, select, text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +65,11 @@ from app.services.ai import (
 )
 from app.services.articles import ArticleResearchService
 from app.services.conversation_memory import ConversationMemoryService
+from app.services.embeddings import (
+    VertexAIEmbeddingService,
+    embedding_config_from_settings,
+    get_embedding_service,
+)
 from app.services.freshness import (
     CURRENT_STATUSES,
     LAW_CODE_RE,
@@ -194,6 +200,12 @@ def freshness_service(request: Request) -> LegalFreshnessService:
 
 def ai_service(request: Request) -> GeminiService:
     return request.app.state.ai
+
+
+def embedding_service(
+    settings: Settings = Depends(get_settings),
+) -> VertexAIEmbeddingService:
+    return get_embedding_service(embedding_config_from_settings(settings))
 
 
 def article_research_service(request: Request) -> ArticleResearchService:
@@ -842,6 +854,7 @@ async def readiness(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     ai: GeminiService = Depends(ai_service),
+    embeddings: VertexAIEmbeddingService = Depends(embedding_service),
 ) -> dict[str, str]:
     try:
         await db.scalar(select(func.now()))
@@ -855,13 +868,24 @@ async def readiness(
     if not settings.embedding_ready:
         raise HTTPException(
             status_code=503,
-            detail="Embedding model checkpoint is not ready",
+            detail="Vertex AI embedding configuration is not ready",
         )
     if settings.require_freshness_check and not settings.tavily_ready:
         raise HTTPException(
             status_code=503,
             detail="Legal freshness verification is not configured",
         )
+    try:
+        await run_in_threadpool(embeddings.ensure_ready)
+    except Exception as exc:
+        logger.warning(
+            "Vertex AI embedding readiness failed error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Vertex AI embedding service is not ready",
+        ) from exc
     try:
         await ai.ensure_ready()
     except Exception as exc:

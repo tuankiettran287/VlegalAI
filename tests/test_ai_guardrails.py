@@ -539,16 +539,6 @@ def test_chat_does_not_write_or_call_ai_when_retrieval_has_no_source() -> None:
     ai.complete.assert_not_awaited()
 
 
-def _ready_embedding_path(tmp_path: Path) -> Path:
-    model_path = tmp_path / "embedding-model"
-    model_path.mkdir()
-    (model_path / "config.json").write_text("{}", encoding="utf-8")
-    (model_path / "modules.json").write_text("[]", encoding="utf-8")
-    (model_path / "tokenizer_config.json").write_text("{}", encoding="utf-8")
-    (model_path / "model.safetensors").write_bytes(b"test")
-    return model_path
-
-
 @pytest.mark.parametrize(
     "override",
     [
@@ -560,6 +550,8 @@ def _ready_embedding_path(tmp_path: Path) -> Path:
         {"retrieval_top_k": 0},
         {"gemini_google_search_max_output_tokens": 1_023},
         {"gemini_google_search_max_output_tokens": 65_536},
+        {"postgres_vector_size": 768},
+        {"postgres_vector_size": 3_072},
     ],
 )
 def test_legal_ai_configuration_rejects_unsafe_bounds(
@@ -569,25 +561,21 @@ def test_legal_ai_configuration_rejects_unsafe_bounds(
         Settings(_env_file=None, **override)
 
 
-def test_embedding_readiness_rejects_checkpoint_without_tokenizer_or_weights(
-    tmp_path: Path,
+def test_embedding_readiness_requires_vertex_credentials(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model_path = tmp_path / "incomplete-embedding"
-    model_path.mkdir()
-    (model_path / "config.json").write_text("{}", encoding="utf-8")
-    (model_path / "modules.json").write_text("[]", encoding="utf-8")
+    monkeypatch.delenv("GEMINI_CREDENTIALS_JSON", raising=False)
 
     settings = Settings(
         _env_file=None,
-        embedding_model_path=str(model_path),
+        gemini_credentials_path="tests/definitely-missing-env.json",
+        gemini_use_adc=False,
     )
 
     assert not settings.embedding_ready
 
 
-def test_readiness_loads_adc_credentials_and_required_dependencies(
-    tmp_path: Path,
-) -> None:
+def test_readiness_loads_adc_credentials_and_required_dependencies() -> None:
     class _Db:
         def __init__(self) -> None:
             self.active = False
@@ -606,21 +594,21 @@ def test_readiness_loads_adc_credentials_and_required_dependencies(
         return "detected-project"
 
     ai = SimpleNamespace(ensure_ready=AsyncMock(side_effect=ensure_ready))
+    embeddings = SimpleNamespace(ensure_ready=lambda: None)
     settings = Settings(
         _env_file=None,
         gemini_credentials_path="tests/definitely-missing-env.json",
         gemini_use_adc=True,
         require_freshness_check=False,
-        embedding_model_path=str(_ready_embedding_path(tmp_path)),
     )
 
-    assert asyncio.run(readiness(db, settings, ai)) == {"status": "ready"}
+    assert asyncio.run(readiness(db, settings, ai, embeddings)) == {
+        "status": "ready"
+    }
     ai.ensure_ready.assert_awaited_once()
 
 
-def test_readiness_sanitizes_credential_failure(
-    tmp_path: Path,
-) -> None:
+def test_readiness_sanitizes_credential_failure() -> None:
     class _Db:
         async def scalar(self, _: object) -> int:
             return 1
@@ -637,19 +625,23 @@ def test_readiness_sanitizes_credential_failure(
         gemini_credentials_path="tests/definitely-missing-env.json",
         gemini_use_adc=True,
         require_freshness_check=False,
-        embedding_model_path=str(_ready_embedding_path(tmp_path)),
     )
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(readiness(_Db(), settings, ai))
+        asyncio.run(
+            readiness(
+                _Db(),
+                settings,
+                ai,
+                SimpleNamespace(ensure_ready=lambda: None),
+            )
+        )
 
     assert error.value.status_code == 503
     assert internal not in str(error.value.detail)
 
 
-def test_readiness_requires_tavily_when_freshness_is_mandatory(
-    tmp_path: Path,
-) -> None:
+def test_readiness_requires_tavily_when_freshness_is_mandatory() -> None:
     class _Db:
         async def scalar(self, _: object) -> int:
             return 1
@@ -663,7 +655,6 @@ def test_readiness_requires_tavily_when_freshness_is_mandatory(
         gemini_use_adc=True,
         require_freshness_check=True,
         tavily_api_key="",
-        embedding_model_path=str(_ready_embedding_path(tmp_path)),
     )
 
     with pytest.raises(HTTPException, match="freshness"):
@@ -672,5 +663,42 @@ def test_readiness_requires_tavily_when_freshness_is_mandatory(
                 _Db(),
                 settings,
                 SimpleNamespace(ensure_ready=AsyncMock(return_value="project")),
+                SimpleNamespace(ensure_ready=lambda: None),
             )
         )
+
+
+def test_readiness_sanitizes_embedding_endpoint_failure() -> None:
+    class _Db:
+        async def scalar(self, _: object) -> int:
+            return 1
+
+        async def rollback(self) -> None:
+            return None
+
+    internal = "Vertex model denied for secret-project"
+    settings = Settings(
+        _env_file=None,
+        gemini_credentials_path="tests/definitely-missing-env.json",
+        gemini_use_adc=True,
+        require_freshness_check=False,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            readiness(
+                _Db(),
+                settings,
+                SimpleNamespace(
+                    ensure_ready=AsyncMock(return_value="project")
+                ),
+                SimpleNamespace(
+                    ensure_ready=lambda: (_ for _ in ()).throw(
+                        RuntimeError(internal)
+                    )
+                ),
+            )
+        )
+
+    assert error.value.status_code == 503
+    assert internal not in str(error.value.detail)

@@ -1,66 +1,28 @@
-# Deploy VLegalAI lên GCP không cần tên miền
+# Deploy VLegalAI lên Google Cloud
 
-Hướng dẫn này dùng URL mặc định `https://*.run.app` của Cloud Run, không dùng
-Caddy, load balancer, DNS hay custom domain. Mỗi tiến trình ứng dụng có một
-Dockerfile và một image riêng.
+Kiến trúc triển khai không cần GPU hoặc volume chứa model embedding:
 
-## Kiến trúc GCP
-
-| Image | Tài nguyên GCP | Vai trò |
+| Image | Tài nguyên | Vai trò |
 | --- | --- | --- |
-| `vlegal-api` | Cloud Run Service có GPU | FastAPI, Gemini 3.5 Flash và BGE-M3 retrieval |
-| `vlegal-frontend` | Cloud Run Service CPU | React SPA và reverse proxy `/api` |
-| `vlegal-worker` | Cloud Run Worker Pool có GPU | Celery consumer chạy liên tục |
-| `vlegal-beat` | Cloud Run Worker Pool CPU | Celery scheduler chạy liên tục |
-| `vlegal-migrate` | Cloud Run Job | `alembic upgrade head` |
-| `vlegal-model-init` | Cloud Run Job | tải BGE-M3 vào Cloud Storage |
-| `vlegal-reindex` | Cloud Run Job GPU | embedding lại corpus và đồng bộ Neo4j/pgvector |
+| `vlegal-backend` | Cloud Run Service, Worker Pool và Job | FastAPI, Celery worker/beat, migration, reindex và Vertex AI embeddings |
+| `vlegal-frontend` | Cloud Run Service | React SPA và reverse proxy `/api` |
 
-PostgreSQL/pgvector nên chạy trên Cloud SQL và Neo4j
-trên Compute Engine hoặc GKE. Không chạy hai database này bằng Cloud Run vì Cloud
-Run không cung cấp persistent block storage/TCP endpoint phù hợp cho chúng.
+PostgreSQL/pgvector nên chạy trên Cloud SQL; Neo4j chạy trên Aura, Compute
+Engine hoặc GKE. Embedding dùng `gemini-embedding-001` qua Vertex AI với service
+identity của Cloud Run.
 
-Frontend gọi API qua chính origin frontend (`/api`). Nginx chuyển tiếp request
-sang URL Cloud Run của API, nên browser không cần biết URL backend và cookie OIDC
-vẫn là same-site. Sau khi deploy, script tự đặt:
-
-```text
-PUBLIC_URL=<frontend-run.app-url>
-FRONTEND_URL=<frontend-run.app-url>
-CORS_ORIGINS=<frontend-run.app-url>
-OIDC_REDIRECT_URI=<frontend-run.app-url>/api/auth/google/callback
-```
-
-## Dockerfile riêng
-
-```text
-docker/api.Dockerfile
-docker/frontend.Dockerfile
-docker/worker.Dockerfile
-docker/beat.Dockerfile
-docker/migrate.Dockerfile
-docker/model-init.Dockerfile
-docker/reindex.Dockerfile
-```
-
-`compose.gcp.yml` trỏ trực tiếp đến các file này để build/tag image cho Artifact
-Registry. `Dockerfile` ở root chỉ được giữ để tương thích với lệnh build cũ;
-luồng deploy GCP dùng các Dockerfile riêng trong `docker/`.
-
-## 1. Biến dùng chung
-
-Các lệnh dưới đây dành cho PowerShell:
+## 1. Biến triển khai
 
 ```powershell
 cd F:\VlegalAI
 
 $PROJECT_ID = "your-gcp-project-id"
 $REGION = "asia-southeast1"
+$EMBEDDING_LOCATION = "asia-southeast1"
 $AR_REPO = "vlegal"
 $TAG = git rev-parse --short HEAD
 $RUN_SA_NAME = "vlegal-run"
 $RUN_SA = "$RUN_SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
-$EMBEDDING_BUCKET = "$PROJECT_ID-vlegal-bge-m3"
 $CORPUS_BUCKET = "$PROJECT_ID-vlegal-corpus"
 $NETWORK = "default"
 $SUBNET = "default"
@@ -70,10 +32,7 @@ gcloud auth login
 gcloud config set project $PROJECT_ID
 ```
 
-Script mặc định dùng L4 cho BGE-M3 embedding. Các tác vụ sinh, phân loại, tóm tắt
-và đánh giá gọi `gemini-3.5-flash` qua Vertex AI bằng service identity của Cloud Run.
-
-## 2. Bootstrap project một lần
+## 2. Bootstrap project
 
 ```powershell
 gcloud services enable `
@@ -88,8 +47,7 @@ gcloud services enable `
 
 gcloud artifacts repositories create $AR_REPO `
   --repository-format=docker `
-  --location=$REGION `
-  --description="VLegalAI service images"
+  --location=$REGION
 
 gcloud iam service-accounts create $RUN_SA_NAME `
   --display-name="VLegalAI Cloud Run runtime"
@@ -102,14 +60,6 @@ gcloud projects add-iam-policy-binding $PROJECT_ID `
   --member="serviceAccount:$RUN_SA" `
   --role="roles/aiplatform.user"
 
-gcloud storage buckets create "gs://$EMBEDDING_BUCKET" `
-  --location=$REGION `
-  --uniform-bucket-level-access
-
-gcloud storage buckets add-iam-policy-binding "gs://$EMBEDDING_BUCKET" `
-  --member="serviceAccount:$RUN_SA" `
-  --role="roles/storage.objectUser"
-
 gcloud storage buckets create "gs://$CORPUS_BUCKET" `
   --location=$REGION `
   --uniform-bucket-level-access
@@ -121,278 +71,114 @@ gcloud storage buckets add-iam-policy-binding "gs://$CORPUS_BUCKET" `
 gcloud storage rsync ".\Data (1)" "gs://$CORPUS_BUCKET" --recursive
 ```
 
-Nếu resource đã tồn tại, bỏ qua lỗi `ALREADY_EXISTS`. Network/subnet dùng cho
-Direct VPC egress phải nằm cùng region; subnet phải đủ IP cho Cloud Run và Worker
-Pool.
+## 3. Secret Manager
 
-## 3. Dịch vụ dữ liệu và Secret Manager
+Tạo các secret mà `scripts/gcp/deploy.ps1` tham chiếu:
 
-Chuẩn bị các endpoint trước khi deploy:
+- `vlegal-database-url`
+- `vlegal-neo4j-password`
+- `vlegal-session-secret`
+- `vlegal-message-key`
+- `vlegal-oidc-client-id`
+- `vlegal-oidc-client-secret`
+- `vlegal-tavily-key`
 
-```text
-DATABASE_URL=postgresql+asyncpg://vlegal:<password>@<cloud-sql-private-ip>:5432/vlegal
-NEO4J_URI=neo4j+s://<neo4j-host>:7687
-```
-
-PostgreSQL là nguồn runtime duy nhất cho dữ liệu ứng dụng, rate limit, advisory
-lock và Celery SQLAlchemy transport/result backend. Tất cả service và Worker Pool
-phải được cấp quyền kết nối cùng Cloud SQL instance.
-
-Tạo các secret dưới đây trong Secret Manager và thêm ít nhất một version:
-
-```text
-vlegal-database-url
-vlegal-neo4j-password
-vlegal-session-secret
-vlegal-message-key
-vlegal-oidc-client-id
-vlegal-oidc-client-secret
-vlegal-tavily-key
-```
-
-Không đưa secret vào source, image tag hoặc tham số `--set-env-vars`. Giá trị
-`vlegal-message-key` là khóa Fernet; có thể tạo offline bằng:
+Ví dụ:
 
 ```powershell
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+"postgresql+asyncpg://vlegal:<password>@<host>:5432/vlegal" |
+  gcloud secrets create vlegal-database-url --data-file=-
 ```
 
-## 4. Build và push từng image
+Nếu secret đã tồn tại, thêm version mới bằng `gcloud secrets versions add`.
 
-Script build dùng đúng Dockerfile của từng service và mặc định target
-`linux/amd64`, là kiến trúc Cloud Run hỗ trợ:
+## 4. Build và push image
 
 ```powershell
-# Build + push toàn bộ bảy image
 .\scripts\gcp\build-images.ps1 `
-  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG -Push
+  -ProjectId $PROJECT_ID `
+  -Region $REGION `
+  -Repository $AR_REPO `
+  -Tag $TAG `
+  -Push
 ```
 
-Build/push riêng từng service:
+Hai Dockerfile runtime nằm trong `docker/`: backend và frontend. Các tiến trình
+backend dùng chung một image và được Cloud Run cấu hình command/args riêng.
 
-```powershell
-.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service api -Push
-.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service frontend -Push
-.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service worker -Push
-.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service beat -Push
-.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service migrate -Push
-.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service model-init -Push
-.\scripts\gcp\build-images.ps1 -ProjectId $PROJECT_ID -Tag $TAG -Service reindex -Push
-```
-
-Image được push theo dạng:
-
-```text
-asia-southeast1-docker.pkg.dev/<project>/vlegal/vlegal-<service>:<git-sha>
-```
-
-## 5. Deploy từng service/job lên GCP
-
-Chạy lần lượt theo thứ tự sau. `-ExecuteJobs` deploy rồi thực thi job; bỏ flag đó
-nếu chỉ muốn cập nhật cấu hình job mà chưa chạy.
-
-### 5.1 Tải model
+## 5. Deploy và reindex
 
 ```powershell
 .\scripts\gcp\deploy.ps1 `
-  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -EmbeddingBucket $EMBEDDING_BUCKET `
-  -Neo4jUri $NEO4J_URI `
-  -Component model-init -ExecuteJobs
-```
-
-Bucket embedding được mount read-write vào job ở `/models/embedding`.
-API/worker mount lại read-only. Job có marker nên chạy lại không tải checkpoint
-nếu repo/revision không thay đổi.
-
-### 5.2 Migration
-
-```powershell
-.\scripts\gcp\deploy.ps1 `
-  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
-  -Component migrate -ExecuteJobs
-```
-
-### 5.3 Re-index embedding
-
-Trước khi deploy API lần đầu, chạy job tạo lại embedding. Migration
-`20260721_0003` chủ động xoá vector hash cũ vì không thể đổi trực tiếp sang
-BGE-M3; job này tạo vector chuẩn hoá 1024 chiều từ corpus và dùng lại chính vector
-đó khi ghi vào PostgreSQL:
-
-```powershell
-.\scripts\gcp\deploy.ps1 `
-  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -EmbeddingBucket $EMBEDDING_BUCKET -CorpusBucket $CORPUS_BUCKET `
-  -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
-  -Component reindex -ExecuteJobs
-```
-
-Job re-index dùng image riêng `vlegal-reindex`, một L4 trong thời gian chạy, BGE-M3 từ
-bucket chỉ đọc và corpus từ `$CORPUS_BUCKET`. File SQLite trung gian nằm trong
-filesystem tạm của job; dữ liệu lâu dài được ghi vào Cloud SQL/pgvector và Neo4j.
-
-### 5.4 API
-
-```powershell
-.\scripts\gcp\deploy.ps1 `
-  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -EmbeddingBucket $EMBEDDING_BUCKET `
-  -Network $NETWORK -Subnet $SUBNET `
-  -Neo4jUri $NEO4J_URI -Component api
-```
-
-API được public để Nginx frontend có thể reverse proxy đến nó. API nghiệp vụ vẫn
-áp dụng session/role/rate-limit ở tầng ứng dụng; chỉ các endpoint được thiết kế
-public mới không cần đăng nhập.
-
-### 5.5 Frontend
-
-```powershell
-.\scripts\gcp\deploy.ps1 `
-  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -Neo4jUri $NEO4J_URI -Component frontend
-```
-
-Script đọc URL API, đặt `API_UPSTREAM`, lấy URL frontend và cập nhật bốn biến URL
-của API. Không có bước cấu hình domain.
-
-### 5.6 Worker
-
-```powershell
-.\scripts\gcp\deploy.ps1 `
-  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -EmbeddingBucket $EMBEDDING_BUCKET `
-  -Network $NETWORK -Subnet $SUBNET `
-  -Neo4jUri $NEO4J_URI -Component worker
-```
-
-### 5.7 Beat
-
-```powershell
-.\scripts\gcp\deploy.ps1 `
-  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
-  -Component beat
-```
-
-Worker Pool không autoscale và `worker` giữ một GPU hoạt động liên tục. Nếu chỉ
-cần refresh kho luật theo ngày, nên chuyển tác vụ này thành Cloud Run Job + Cloud
-Scheduler để giảm chi phí; cấu hình hiện tại giữ nguyên semantics Celery đang có.
-
-### Deploy tất cả bằng một lệnh
-
-Sau khi dữ liệu, bucket và secrets đã sẵn sàng:
-
-```powershell
-.\scripts\gcp\deploy.ps1 `
-  -ProjectId $PROJECT_ID -Region $REGION -Repository $AR_REPO -Tag $TAG `
-  -RunServiceAccount $RUN_SA -EmbeddingBucket $EMBEDDING_BUCKET `
+  -ProjectId $PROJECT_ID `
+  -Region $REGION `
+  -EmbeddingLocation $EMBEDDING_LOCATION `
+  -Repository $AR_REPO `
+  -Tag $TAG `
+  -RunServiceAccount $RUN_SA `
   -CorpusBucket $CORPUS_BUCKET `
-  -Network $NETWORK -Subnet $SUBNET -Neo4jUri $NEO4J_URI `
-  -Component all -ExecuteJobs
+  -Network $NETWORK `
+  -Subnet $SUBNET `
+  -Neo4jUri $NEO4J_URI `
+  -Component all `
+  -ExecuteJobs
 ```
 
-## 6. Lấy URL và cấu hình Google OAuth
+Script thực hiện theo thứ tự: migration, reindex, API, frontend, worker và beat.
+Reindex tạo vector bằng Vertex AI với:
 
-```powershell
-$FRONTEND_URL = gcloud run services describe vlegal-frontend `
-  --project=$PROJECT_ID --region=$REGION --format="value(status.url)"
-
-$API_URL = gcloud run services describe vlegal-api `
-  --project=$PROJECT_ID --region=$REGION --format="value(status.url)"
-
-Write-Output "Frontend: $FRONTEND_URL"
-Write-Output "API:      $API_URL"
-Write-Output "OAuth:    $FRONTEND_URL/api/auth/google/callback"
+```dotenv
+EMBEDDING_MODEL=gemini-embedding-001
+EMBEDDING_LOCATION=asia-southeast1
+EMBEDDING_MAX_CONCURRENCY=8
+POSTGRES_VECTOR_SIZE=1024
 ```
 
-Trong Google OAuth client loại **Web application**, thêm:
+Corpus được gửi với task type `RETRIEVAL_DOCUMENT`; query runtime dùng
+`RETRIEVAL_QUERY`. Backend chuẩn hoá vector 1024 chiều trước khi lưu/tìm kiếm.
+Semantic cache dùng `SEMANTIC_SIMILARITY` vì nó so sánh query với query.
+
+## 6. OAuth và kiểm tra
+
+Trong Google Cloud Console, tạo OAuth client loại **Web application**. Thêm URL
+frontend Cloud Run vào Authorized JavaScript origins và:
 
 ```text
-Authorized JavaScript origin: <FRONTEND_URL>
-Authorized redirect URI:      <FRONTEND_URL>/api/auth/google/callback
+https://<frontend-run-app>/api/auth/google/callback
 ```
 
-Đây là cấu hình URL `run.app`, không phải custom domain.
+vào Authorized redirect URIs.
 
-## 7. Lệnh chạy từng Docker ở local
-
-Tạo `.env` trước:
+Kiểm tra:
 
 ```powershell
-Copy-Item .env.example .env
+curl.exe https://<frontend-run-app>/api/health/live
+curl.exe https://<frontend-run-app>/api/health/ready
 ```
 
-Build riêng từng image:
+`/api/health/ready` kiểm tra database, cấu hình Vertex AI/Gemini và dịch vụ kiểm
+tra hiệu lực pháp luật bắt buộc.
+
+## 7. Tạo lại embedding
+
+Sau mọi thay đổi model embedding hoặc task type, chạy:
 
 ```powershell
-docker build -f docker/api.Dockerfile -t vlegal-api:local .
-docker build -f docker/frontend.Dockerfile -t vlegal-frontend:local .
-docker build -f docker/worker.Dockerfile -t vlegal-worker:local .
-docker build -f docker/beat.Dockerfile -t vlegal-beat:local .
-docker build -f docker/migrate.Dockerfile -t vlegal-migrate:local .
-docker build -f docker/model-init.Dockerfile -t vlegal-model-init:local .
-docker build -f docker/reindex.Dockerfile -t vlegal-reindex:local .
+.\scripts\gcp\deploy.ps1 `
+  -ProjectId $PROJECT_ID `
+  -Region $REGION `
+  -EmbeddingLocation $EMBEDDING_LOCATION `
+  -Repository $AR_REPO `
+  -Tag $TAG `
+  -RunServiceAccount $RUN_SA `
+  -CorpusBucket $CORPUS_BUCKET `
+  -Network $NETWORK `
+  -Subnet $SUBNET `
+  -Neo4jUri $NEO4J_URI `
+  -Component reindex `
+  -ExecuteJobs
 ```
 
-Khởi động hạ tầng local trước:
-
-```powershell
-docker compose up -d postgres neo4j
-```
-
-Chạy từng service/job độc lập qua Compose:
-
-```powershell
-# Job một lần
-docker compose run --rm model-init
-docker compose run --rm migrate
-docker compose --profile jobs run --rm reindex --reset-postgres --reset-neo4j
-
-# Service chạy nền
-docker compose up -d api
-docker compose up -d frontend
-docker compose up -d worker
-docker compose up -d beat
-```
-
-Hoặc chạy toàn bộ stack:
-
-```powershell
-docker compose up -d --build
-```
-
-Xem log và dừng riêng từng service:
-
-```powershell
-docker compose logs -f api
-docker compose stop api
-docker compose rm -f api
-```
-
-Thay `api` bằng `frontend`, `worker` hoặc `beat` khi cần.
-
-## 8. Kiểm tra sau deploy
-
-```powershell
-curl.exe -fsS "$API_URL/api/health/live"
-curl.exe -fsS "$API_URL/api/health/ready"
-curl.exe -I "$FRONTEND_URL/"
-
-gcloud run services logs read vlegal-api `
-  --project=$PROJECT_ID --region=$REGION --limit=200
-```
-
-Các file/scripts trong thay đổi này chỉ tạo cấu hình; không tự build image, chạy
-container hay deploy tài nguyên khi checkout source.
-
-## Tài liệu GCP liên quan
-
-- [Cloud Run container runtime contract](https://docs.cloud.google.com/run/docs/container-contract)
-- [Deploy Cloud Run worker pools](https://docs.cloud.google.com/run/docs/deploy-worker-pools)
-- [Cloud Run GPU services](https://docs.cloud.google.com/run/docs/configuring/services/gpu)
-- [Cloud Run GPU worker pools](https://docs.cloud.google.com/run/docs/configuring/workerpools/gpu)
-- [Cloud Storage volume mounts](https://docs.cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts)
-- [Direct VPC egress](https://docs.cloud.google.com/run/docs/configuring/vpc-direct-vpc)
+Migration `20260727_0012` xoá vector của provider cũ vì hai model embedding không
+chia sẻ cùng không gian vector. Job reindex phải hoàn tất trước khi API phục vụ
+truy hồi vector.

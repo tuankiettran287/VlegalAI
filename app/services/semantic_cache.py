@@ -21,7 +21,11 @@ from app.core.security import decrypt_text, encrypt_text
 from app.db import SessionFactory
 from app.models import LegalAnswerCache
 from app.services.ai import redact_sensitive_text
-from app.services.embeddings import EmbeddingConfig, LocalEmbeddingService, get_embedding_service
+from app.services.embeddings import (
+    VertexAIEmbeddingService,
+    embedding_config_from_settings,
+    get_embedding_service,
+)
 
 
 LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v4-professional-chatbot"
@@ -182,18 +186,6 @@ def legal_fingerprint(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _embedding_config(settings: Settings) -> EmbeddingConfig:
-    return EmbeddingConfig(
-        model_path=settings.embedding_model_path,
-        model_repo=settings.embedding_model_repo,
-        model_revision=settings.embedding_model_revision,
-        device=settings.embedding_device,
-        dimensions=settings.postgres_vector_size,
-        batch_size=settings.embedding_batch_size,
-        max_sequence_length=settings.embedding_max_sequence_length,
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class CachedLegalAnswer:
     id: uuid.UUID
@@ -220,10 +212,13 @@ class SemanticAnswerCacheService:
     def __init__(
         self,
         settings: Settings,
-        embeddings: LocalEmbeddingService | None = None,
+        embeddings: VertexAIEmbeddingService | None = None,
     ) -> None:
         self.settings = settings
-        self.embeddings = embeddings or get_embedding_service(_embedding_config(settings))
+        self.embedding_config = embedding_config_from_settings(settings)
+        self.embeddings = embeddings or get_embedding_service(
+            self.embedding_config
+        )
 
     def eligible(self, query: str, *, has_conversation_context: bool) -> bool:
         return (
@@ -263,6 +258,9 @@ class SemanticAnswerCacheService:
             LegalAnswerCache.expires_at > now,
             LegalAnswerCache.model_name == self.settings.gemini_model,
             LegalAnswerCache.prompt_version == LEGAL_ANSWER_PROMPT_VERSION,
+            LegalAnswerCache.embedding_model == self.embedding_config.model,
+            LegalAnswerCache.embedding_revision
+            == self.embedding_config.model_revision,
         )
         async with SessionFactory() as db:
             exact = await db.scalar(
@@ -282,9 +280,12 @@ class SemanticAnswerCacheService:
                 )
 
         try:
-            embedding = await run_in_threadpool(self.embeddings.embed_query, normalized_query)
+            embedding = await run_in_threadpool(
+                self.embeddings.embed_similarity,
+                normalized_query,
+            )
         except Exception as exc:
-            logger.warning("Local embedding model unavailable for semantic cache: %s", exc)
+            logger.warning("Vertex AI embedding unavailable for semantic cache: %s", exc)
             return CacheLookup(
                 scope_hash=scope_hash,
                 query_hash=query_hash,
@@ -331,7 +332,7 @@ class SemanticAnswerCacheService:
         embedding = lookup.embedding
         if embedding is None:
             embedding = await run_in_threadpool(
-                self.embeddings.embed_query,
+                self.embeddings.embed_similarity,
                 lookup.normalized_query,
             )
         now = datetime.now(UTC)
@@ -348,6 +349,8 @@ class SemanticAnswerCacheService:
             "law_fingerprint": legal_fingerprint(sources, verification),
             "model_name": self.settings.gemini_model,
             "prompt_version": LEGAL_ANSWER_PROMPT_VERSION,
+            "embedding_model": self.embedding_config.model,
+            "embedding_revision": self.embedding_config.model_revision,
             "expires_at": now + timedelta(hours=self.settings.semantic_answer_cache_ttl_hours),
             "hit_count": 0,
         }
@@ -367,6 +370,8 @@ class SemanticAnswerCacheService:
                 "law_fingerprint": statement.excluded.law_fingerprint,
                 "model_name": statement.excluded.model_name,
                 "prompt_version": statement.excluded.prompt_version,
+                "embedding_model": statement.excluded.embedding_model,
+                "embedding_revision": statement.excluded.embedding_revision,
                 "expires_at": statement.excluded.expires_at,
                 "updated_at": func.now(),
             },

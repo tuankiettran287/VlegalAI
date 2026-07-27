@@ -45,7 +45,7 @@ Kho dữ liệu gồm **57 văn bản quy phạm pháp luật** (Bộ luật Lao
 | Loại nút | 41 |
 | Loại quan hệ | 33 |
 
-Vector: **BAAI/bge-m3**, 1024 chiều, chạy cục bộ. Chỉ mục cục bộ lưu ở SQLite (`storage/graphrag/legal_graphrag.sqlite`) kèm FTS5 tiếng Việt; bản production đồng bộ sang Neo4j + PostgreSQL/pgvector.
+Vector: **Vertex AI `gemini-embedding-001`**, 1024 chiều và được chuẩn hoá sau khi giảm chiều. Chỉ mục cục bộ lưu ở SQLite (`storage/graphrag/legal_graphrag.sqlite`) kèm FTS5 tiếng Việt; bản production đồng bộ sang Neo4j + PostgreSQL/pgvector.
 
 ---
 
@@ -173,7 +173,7 @@ _build_document_relations()   _build_effective_dates()   _build_reference_edges(
    → _layer5_procedures() → _layer6_temporal() → _layer7_sanctions_and_risk()
    → _layer8_lifecycles() → _layer9_precedents()
                                   ▼
-                _build_chunks() → _embed_chunks() (BGE-M3)
+                _build_chunks() → _embed_chunks() (Vertex AI Gemini Embedding 001)
                                   ▼
                     SQLite + FTS5  |  JSONL export
                                   ▼
@@ -210,7 +210,7 @@ python scripts/build_graphrag.py
 `GraphRAGStore.retrieve()` chạy 6 giai đoạn:
 
 ```
-1. TRUY HỒI KÉP        BM25/FTS5  +  vector BGE-M3 (một phép nhân ma trận numpy)
+1. TRUY HỒI KÉP        BM25/FTS5  +  vector Gemini Embedding 001 (một phép nhân ma trận numpy)
                        → pool = max(60, top_k × 8) ứng viên
         ▼
 2. CHẤM ĐIỂM LẠI       độ phủ từ khoá · khớp chính xác "Điều N/Khoản N"

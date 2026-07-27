@@ -1,11 +1,13 @@
-# Local development stack only. Google Cloud Run does not deploy Compose files;
-# use compose.gcp.yml to build/tag images and scripts/gcp/deploy.ps1 to deploy.
+# Local development stack. Production images are described by compose.gcp.yml
+# and deployed by scripts/gcp/deploy.ps1.
 name: vlegal
 
-# Cấu hình dùng chung cho api và worker. Cả hai truy hồi qua PostgreSQL/pgvector
-# và Neo4j, không mở chỉ mục SQLite cục bộ và không đọc corpus .docx, nên ở đây
-# không có LEGAL_DATA_DIR/LEGAL_STORAGE_DIR/LEGAL_GRAPHRAG_DB — xem service
-# reindex, nơi duy nhất dùng tới chúng.
+x-backend-image: &backend-image
+  image: "${VLEGAL_BACKEND_IMAGE:-vlegal-backend:local}"
+  build:
+    context: .
+    dockerfile: docker/backend.Dockerfile
+
 x-app-environment: &app-environment
   APP_ENV: development
   PUBLIC_URL: http://localhost:8000
@@ -19,56 +21,39 @@ x-app-environment: &app-environment
   NEO4J_PASSWORD: "${NEO4J_PASSWORD:-local-neo4j-password}"
   NEO4J_DATABASE: "${NEO4J_DATABASE:-neo4j}"
   GEMINI_CREDENTIALS_PATH: /app/env.json
-  # Bearer token chỉ được gắn vào request Vertex khi cờ này bật; để false trong
-  # khi vẫn mount service account ở /app/env.json sẽ nhận HTTP 401.
   GEMINI_USE_ADC: "${GEMINI_USE_ADC:-true}"
   GEMINI_PROJECT_ID: "${GEMINI_PROJECT_ID:-}"
   GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.5-flash}"
   GEMINI_LOCATION: "${GEMINI_LOCATION:-global}"
   GEMINI_THINKING_LEVEL: "${GEMINI_THINKING_LEVEL:-low}"
   GEMINI_DATA_POLICY: "${GEMINI_DATA_POLICY:-redact}"
-  EMBEDDING_MODEL_PATH: /models/embedding
-  EMBEDDING_MODEL_REPO: "${EMBEDDING_MODEL_REPO:-BAAI/bge-m3}"
-  EMBEDDING_MODEL_REVISION: "${EMBEDDING_MODEL_REVISION:-main}"
-  EMBEDDING_DEVICE: "${EMBEDDING_DEVICE:-auto}"
+  EMBEDDING_MODEL: "${EMBEDDING_MODEL:-gemini-embedding-001}"
+  EMBEDDING_LOCATION: "${EMBEDDING_LOCATION:-asia-southeast1}"
+  EMBEDDING_MAX_CONCURRENCY: "${EMBEDDING_MAX_CONCURRENCY:-8}"
+  EMBEDDING_TIMEOUT_SECONDS: "${EMBEDDING_TIMEOUT_SECONDS:-60}"
+  EMBEDDING_MAX_RETRIES: "${EMBEDDING_MAX_RETRIES:-3}"
+  EMBEDDING_AUTO_TRUNCATE: "${EMBEDDING_AUTO_TRUNCATE:-true}"
 
 x-runtime-volumes: &runtime-volumes
   - ./env.json:/app/env.json:ro
-  - embedding_model:/models/embedding:ro
 
 services:
-  model-init:
-    image: "${VLEGAL_MODEL_INIT_IMAGE:-vlegal-model-init:local}"
-    build:
-      context: .
-      dockerfile: docker/model-init.Dockerfile
-    environment:
-      HF_TOKEN: "${HF_TOKEN:-}"
-      EMBEDDING_MODEL_PATH: /models/embedding
-      EMBEDDING_MODEL_REPO: "${EMBEDDING_MODEL_REPO:-BAAI/bge-m3}"
-      EMBEDDING_MODEL_REVISION: "${EMBEDDING_MODEL_REVISION:-main}"
-    volumes:
-      - embedding_model:/models/embedding
-    restart: "no"
-
   migrate:
-    image: "${VLEGAL_MIGRATE_IMAGE:-vlegal-migrate:local}"
-    build:
-      context: .
-      dockerfile: docker/migrate.Dockerfile
+    <<: *backend-image
+    command: [alembic, upgrade, head]
     env_file:
       - .env
     environment:
       DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in .env}"
     restart: "no"
 
-  # Service duy nhất đọc corpus .docx và ghi chỉ mục GraphRAG: dựng SQLite từ
-  # /app/legal-data rồi đẩy node/edge/chunk sang Neo4j và pgvector.
   reindex:
-    image: "${VLEGAL_REINDEX_IMAGE:-vlegal-reindex:local}"
-    build:
-      context: .
-      dockerfile: docker/reindex.Dockerfile
+    <<: *backend-image
+    command:
+      - python
+      - scripts/sync_external_graphrag.py
+      - --reset-neo4j
+      - --reset-postgres
     profiles: [jobs]
     env_file:
       - .env
@@ -78,12 +63,10 @@ services:
       LEGAL_STORAGE_DIR: /app/storage/graphrag
       LEGAL_GRAPHRAG_DB: /app/storage/graphrag/legal_graphrag.sqlite
     volumes:
-      - embedding_model:/models/embedding:ro
+      - ./env.json:/app/env.json:ro
       - "./Data (1):/app/legal-data:ro"
       - ./storage:/app/storage
     depends_on:
-      model-init:
-        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       neo4j:
@@ -91,10 +74,7 @@ services:
     restart: "no"
 
   api:
-    image: "${VLEGAL_API_IMAGE:-vlegal-api:local}"
-    build:
-      context: .
-      dockerfile: docker/api.Dockerfile
+    <<: *backend-image
     init: true
     env_file:
       - .env
@@ -103,9 +83,20 @@ services:
     volumes: *runtime-volumes
     ports:
       - "${API_PORT:-8000}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          response = urllib.request.urlopen("http://127.0.0.1:8080/api/health/live", timeout=3);
+          raise SystemExit(0 if response.status == 200 else 1)
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
     depends_on:
-      model-init:
-        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       neo4j:
@@ -128,20 +119,21 @@ services:
     restart: unless-stopped
 
   worker:
-    image: "${VLEGAL_WORKER_IMAGE:-vlegal-worker:local}"
-    build:
-      context: .
-      dockerfile: docker/worker.Dockerfile
+    <<: *backend-image
+    command:
+      - celery
+      - -A
+      - app.worker.celery_app
+      - worker
+      - --loglevel=INFO
+      - "--concurrency=${CELERY_CONCURRENCY:-1}"
     init: true
     env_file:
       - .env
     environment:
       <<: *app-environment
-      CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-1}"
     volumes: *runtime-volumes
     depends_on:
-      model-init:
-        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       neo4j:
@@ -149,16 +141,18 @@ services:
     restart: unless-stopped
 
   beat:
-    image: "${VLEGAL_BEAT_IMAGE:-vlegal-beat:local}"
-    build:
-      context: .
-      dockerfile: docker/beat.Dockerfile
+    <<: *backend-image
+    command:
+      - celery
+      - -A
+      - app.scheduler.celery_app
+      - beat
+      - --loglevel=INFO
     init: true
     env_file:
       - .env
     environment:
       DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in .env}"
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -184,5 +178,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  embedding_model:
   neo4j_data:

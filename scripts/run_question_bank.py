@@ -2,9 +2,10 @@
 
 Two modes:
 
-* ``--mode retrieval`` (default) grades the retriever alone. Fast, offline and
-  fully deterministic: for each question the bank declares which legal citations
-  must come back and which facts must appear in the retrieved text.
+* ``--mode retrieval`` (default) grades the retriever alone. It does not call
+  the generation model, but dense retrieval still calls Vertex AI embeddings.
+  Grading remains deterministic: for each question the bank declares which
+  legal citations must come back and which facts must appear in retrieved text.
 * ``--mode full`` runs the production answer path — retrieve → build context →
   Gemini with ``LEGAL_SYSTEM_PROMPT`` — then grades the generated answer for
   fact coverage, citation validity and (optionally) with an LLM judge, while
@@ -708,7 +709,8 @@ def main() -> None:
     results: list[dict[str, Any]] = []
     retrieved: dict[str, list[dict[str, Any]]] = {}
 
-    # Warm the embedding model so the first question does not absorb model load.
+    # Warm the embedding endpoint so the first question does not absorb auth
+    # refresh, connection setup, and Vertex AI cold-path latency.
     store.retrieve("khởi động hệ thống", top_k=1)
 
     for index, question in enumerate(questions, start=1):

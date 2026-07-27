@@ -1,94 +1,247 @@
 from __future__ import annotations
 
-import sys
-import tempfile
-import types
-import unittest
-from pathlib import Path
-from unittest.mock import patch
+import json
+import math
+from types import SimpleNamespace
 
-from app.services.embeddings import EmbeddingConfig, EmbeddingModelError, LocalEmbeddingService
+import httpx
+import pytest
 
-
-class _Matrix:
-    def __init__(self, rows: list[list[float]]):
-        self.rows = rows
-
-    def tolist(self) -> list[list[float]]:
-        return self.rows
+from app.services.embeddings import (
+    EMBEDDING_PROVIDER_REVISION,
+    EmbeddingConfig,
+    EmbeddingModelError,
+    VertexAIEmbeddingService,
+)
 
 
-class _FakeSentenceTransformer:
-    instances: list["_FakeSentenceTransformer"] = []
-
-    def __init__(self, path: str, **kwargs):
-        self.path = path
-        self.kwargs = kwargs
-        self.max_seq_length = 0
-        self.calls: list[tuple[str, list[str], dict]] = []
-        self.evaluating = False
-        self.instances.append(self)
-
-    def get_sentence_embedding_dimension(self) -> int:
-        return 3
-
-    def eval(self) -> None:
-        self.evaluating = True
-
-    def encode_document(self, texts: list[str], **kwargs) -> _Matrix:
-        self.calls.append(("document", texts, kwargs))
-        return _Matrix([[1.0, 0.0, 0.0] for _ in texts])
-
-    def encode_query(self, texts: list[str], **kwargs) -> _Matrix:
-        self.calls.append(("query", texts, kwargs))
-        return _Matrix([[0.0, 1.0, 0.0] for _ in texts])
-
-
-class LocalEmbeddingServiceTests(unittest.TestCase):
-    def setUp(self) -> None:
-        _FakeSentenceTransformer.instances.clear()
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.model_dir = Path(self.temp_dir.name)
-        (self.model_dir / "config.json").write_text("{}", encoding="utf-8")
-        (self.model_dir / "modules.json").write_text("[]", encoding="utf-8")
-        self.fake_module = types.SimpleNamespace(SentenceTransformer=_FakeSentenceTransformer)
-
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
-
-    def config(self, dimensions: int = 3) -> EmbeddingConfig:
-        return EmbeddingConfig(
-            model_path=str(self.model_dir),
+def _service(
+    handler,
+    *,
+    dimensions: int = 3,
+) -> tuple[VertexAIEmbeddingService, httpx.Client]:
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            model="gemini-embedding-001",
+            project_id="legal-project",
+            location="asia-southeast1",
             dimensions=dimensions,
-            batch_size=7,
-            max_sequence_length=1234,
+            max_concurrency=1,
+            max_retries=1,
+        ),
+        client=client,
+    )
+    service._credentials = SimpleNamespace(valid=True, token="access-token")
+    service._project_id = "legal-project"
+    return service, client
+
+
+def test_uses_vertex_document_and_query_task_types_and_normalizes_output() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": [3.0, 4.0, 0.0]}}
+                ]
+            },
         )
 
-    def test_uses_document_and_query_routes_with_normalized_output(self) -> None:
-        with patch.dict(sys.modules, {"sentence_transformers": self.fake_module}):
-            service = LocalEmbeddingService(self.config())
-            self.assertEqual(service.embed_documents(["điều luật"]), [[1.0, 0.0, 0.0]])
-            self.assertEqual(service.embed_query("câu hỏi"), [0.0, 1.0, 0.0])
+    service, client = _service(handler)
+    try:
+        document = service.embed_documents(["điều luật"])
+        query = service.embed_query("câu hỏi")
+        similarity = service.embed_similarity("câu hỏi tương tự")
+    finally:
+        client.close()
 
-        model = _FakeSentenceTransformer.instances[0]
-        self.assertEqual(model.max_seq_length, 1234)
-        self.assertTrue(model.evaluating)
-        self.assertEqual([call[0] for call in model.calls], ["document", "query"])
-        for _, _, kwargs in model.calls:
-            self.assertEqual(kwargs["batch_size"], 7)
-            self.assertTrue(kwargs["normalize_embeddings"])
-            self.assertTrue(kwargs["convert_to_numpy"])
+    assert document == [[0.6, 0.8, 0.0]]
+    assert query == [0.6, 0.8, 0.0]
+    assert similarity == [0.6, 0.8, 0.0]
+    bodies = [json.loads(request.content) for request in requests]
+    assert [body["instances"][0]["task_type"] for body in bodies] == [
+        "RETRIEVAL_DOCUMENT",
+        "RETRIEVAL_QUERY",
+        "SEMANTIC_SIMILARITY",
+    ]
+    for request, body in zip(requests, bodies, strict=True):
+        assert request.headers["authorization"] == "Bearer access-token"
+        assert body["parameters"] == {
+            "autoTruncate": True,
+            "outputDimensionality": 3,
+        }
+        assert request.url == (
+            "https://asia-southeast1-aiplatform.googleapis.com/v1/projects/legal-project/"
+            "locations/asia-southeast1/publishers/google/models/"
+            "gemini-embedding-001:predict"
+        )
 
-    def test_rejects_configured_dimension_mismatch(self) -> None:
-        with patch.dict(sys.modules, {"sentence_transformers": self.fake_module}):
-            with self.assertRaisesRegex(EmbeddingModelError, "produces 3 dimensions"):
-                LocalEmbeddingService(self.config(dimensions=2)).embed_query("query")
 
-    def test_requires_complete_local_checkpoint(self) -> None:
-        (self.model_dir / "modules.json").unlink()
-        with self.assertRaisesRegex(EmbeddingModelError, "model-init"):
-            LocalEmbeddingService(self.config()).embed_query("query")
+def test_rejects_vertex_dimension_mismatch() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": [1.0, 0.0]}}
+                ]
+            },
+        )
+
+    service, client = _service(handler)
+    try:
+        with pytest.raises(EmbeddingModelError, match="returned 2 dimensions"):
+            service.embed_query("query")
+    finally:
+        client.close()
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_rejects_zero_magnitude_vector() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": [0.0, 0.0, 0.0]}}
+                ]
+            },
+        )
+
+    service, client = _service(handler)
+    try:
+        with pytest.raises(EmbeddingModelError, match="zero magnitude"):
+            service.embed_query("query")
+    finally:
+        client.close()
+
+
+def test_embedding_config_identity_tracks_vertex_provider() -> None:
+    config = EmbeddingConfig()
+
+    assert config.model == "gemini-embedding-001"
+    assert config.model_revision == f"{EMBEDDING_PROVIDER_REVISION}:redact"
+    assert config.identity == "gemini-embedding-001@vertex-ai-v1:redact"
+    assert 128 <= config.dimensions <= 3072
+    assert math.isfinite(config.timeout_seconds)
+
+
+def test_global_location_uses_the_global_vertex_hostname() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == (
+            "https://aiplatform.googleapis.com/v1/projects/legal-project/"
+            "locations/global/publishers/google/models/"
+            "gemini-embedding-001:predict"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": [1.0, 0.0, 0.0]}}
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            project_id="legal-project",
+            location="global",
+            dimensions=3,
+            max_concurrency=1,
+            max_retries=1,
+        ),
+        client=client,
+    )
+    service._credentials = SimpleNamespace(valid=True, token="access-token")
+    service._project_id = "legal-project"
+    try:
+        assert service.embed_query("query") == [1.0, 0.0, 0.0]
+    finally:
+        client.close()
+
+
+def test_rejects_invalid_vertex_location_before_sending_a_request() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            project_id="legal-project",
+            location="evil.example/path",
+            dimensions=3,
+            max_concurrency=1,
+            max_retries=1,
+        ),
+        client=client,
+    )
+    service._credentials = SimpleNamespace(valid=True, token="access-token")
+    service._project_id = "legal-project"
+    try:
+        with pytest.raises(EmbeddingModelError, match="valid location"):
+            service.embed_query("query")
+    finally:
+        client.close()
+
+    assert requests == []
+
+
+def test_redacts_sensitive_text_before_vertex_embedding_request() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": [1.0, 0.0, 0.0]}}
+                ]
+            },
+        )
+
+    service, client = _service(handler)
+    try:
+        service.embed_query("Liên hệ luật sư qua an@example.com")
+    finally:
+        client.close()
+
+    body = json.loads(requests[0].content)
+    content = body["instances"][0]["content"]
+    assert "an@example.com" not in content
+    assert "[REDACTED_EMAIL]" in content
+
+
+def test_deny_policy_blocks_sensitive_embedding_without_network_call() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            project_id="legal-project",
+            location="asia-southeast1",
+            dimensions=3,
+            max_concurrency=1,
+            max_retries=1,
+            data_policy="deny",
+        ),
+        client=client,
+    )
+    try:
+        with pytest.raises(EmbeddingModelError, match="Sensitive data"):
+            service.embed_query("Liên hệ luật sư qua an@example.com")
+    finally:
+        client.close()
+
+    assert requests == []

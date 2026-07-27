@@ -13,7 +13,7 @@ tài liệu và các công cụ hợp đồng.
 Người dùng không phải chọn RAG, GraphRAG hay từng luật áp dụng. Backend luôn tìm
 trên toàn bộ kho luật bằng Hybrid GraphRAG, sau đó thực hiện tuần tự:
 
-1. Mã hoá câu hỏi bằng BGE-M3, lấy các chunk gần nghĩa bằng `pgvector` trong PostgreSQL và mở rộng quan hệ trên Neo4j.
+1. Mã hoá câu hỏi bằng Vertex AI `gemini-embedding-001`, lấy các chunk gần nghĩa bằng `pgvector` trong PostgreSQL và mở rộng quan hệ trên Neo4j.
 2. Chạy Tavily và Google Search grounding song song, khử trùng lặp rồi chỉ giữ
    kết quả thuộc các nguồn chính thức được cho phép.
 3. Dùng Gemini 3.5 Flash phân loại còn hiệu lực, sửa đổi, hết hiệu lực hoặc bị thay thế.
@@ -22,7 +22,7 @@ trên toàn bộ kho luật bằng Hybrid GraphRAG, sau đó thực hiện tuầ
 5. Chỉ sau đó Gemini 3.5 Flash mới sinh kết quả có trích dẫn `[S1]`, `[S2]`.
 
 Nếu văn bản đã hết hiệu lực hoặc bị thay thế, backend tải văn bản thay thế từ URL
-chính thức, tách Điều/Khoản thành chunk, tạo embedding BGE-M3, upsert
+chính thức, tách Điều/Khoản thành chunk, tạo embedding bằng Vertex AI, upsert
 PostgreSQL/pgvector, tạo node/chunk Neo4j và quan hệ `REPLACES`, rồi truy xuất lại
 trước khi sinh câu trả lời.
 
@@ -56,7 +56,7 @@ PostgreSQL được quản lý bên ngoài (ví dụ Cloud SQL); Neo4j, Caddy v�
 lý được lưu trong Docker volumes.
 
 Sau mỗi lượt hỏi đáp đã đăng nhập, Gemini tạo một bản tóm tắt hội thoại lũy tiến.
-Summary được mã hóa trước khi lưu; BGE-M3 đồng thời tạo embedding chuẩn hóa 1024
+Summary được mã hóa trước khi lưu; Gemini Embedding 001 đồng thời tạo embedding chuẩn hóa 1024
 chiều và lưu vào `conversation_summary.embedding` trên pgvector. Lượt chat sau
 dùng summary làm bộ nhớ dài hạn và các message gần nhất làm ngữ cảnh ngắn hạn.
 
@@ -77,8 +77,8 @@ và Gemini dùng service identity qua ADC. Các biến bắt buộc cho producti
 - `DATABASE_URL`
 - `SESSION_SECRET`, `MESSAGE_ENCRYPTION_KEY`
 - `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
-- `GEMINI_CREDENTIALS_PATH`, `GEMINI_MODEL`, `GEMINI_LOCATION`, `TAVILY_API_KEY`
-- `EMBEDDING_MODEL_PATH`, `EMBEDDING_DEVICE`, `EMBEDDING_BATCH_SIZE`
+- `GEMINI_PROJECT_ID`, `GEMINI_USE_ADC=true`, `GEMINI_MODEL`, `GEMINI_LOCATION`, `TAVILY_API_KEY`
+- `EMBEDDING_MODEL`, `EMBEDDING_LOCATION`, `EMBEDDING_MAX_CONCURRENCY`
 - `NEO4J_*`, `POSTGRES_VECTOR_SIZE`
 
 `RETRIEVER_BACKEND`, provider và API key chỉ tồn tại ở backend; frontend không
@@ -92,23 +92,28 @@ và Vertex AI API phải được bật. Google Search grounding dùng cùng cre
 không cần thêm Custom Search API key/CX; project cần bật Google Search
 Suggestions trong Vertex AI.
 
+Trên Cloud Run, đặt `GEMINI_USE_ADC=true` để dùng service identity; file
+`GEMINI_CREDENTIALS_PATH` chỉ cần cho môi trường local không dùng ADC.
+
 `GEMINI_DATA_POLICY=redact` là mặc định: email, số điện thoại, định danh, số tài
 khoản và secret phổ biến được che trước khi gửi ra Vertex AI/Tavily/Google Search.
 Chỉ đặt `allow` khi tổ chức đã phê duyệt rõ chính sách dữ liệu tương ứng.
 
 Một cấu hình model duy nhất được dùng cho hỏi đáp, kiểm tra hiệu lực, tạo/review/
 so sánh hợp đồng, nghiên cứu bài viết, tóm tắt bộ nhớ hội thoại và LLM-judge của
-bộ đánh giá. Chỉ embedding truy xuất/cache tiếp tục dùng BGE-M3 local.
+bộ đánh giá. Embedding truy xuất/cache dùng riêng `gemini-embedding-001` qua Vertex AI.
 
 Chức năng Bài viết tìm đồng thời bằng Tavily và Google Search grounding. Các URL
 do Google tìm thấy được Tavily Extract bổ sung nội dung khi có thể; frontend hiển
 thị provider của từng nguồn và Google Search entry point.
 
-BGE-M3 cũng chạy local từ `EMBEDDING_MODEL_PATH`. Mỗi chunk và mỗi câu hỏi đều
-được mã hoá bằng cùng checkpoint thành vector chuẩn hoá 1024 chiều; nội dung pháp
-lý không được gửi tới embedding API bên ngoài. `model-init` tải checkpoint vào
-volume `embedding_model` riêng. Chỉ mục hash 384/1536 chiều cũ không tương thích
-và phải được tạo lại sau migration.
+Gemini Embedding 001 chạy qua Vertex AI với cùng service account/ADC của lớp sinh
+nội dung. Corpus dùng task type `RETRIEVAL_DOCUMENT`, câu hỏi dùng
+`RETRIEVAL_QUERY`; mỗi request đặt `outputDimensionality=1024` và backend chuẩn
+hoá lại vector giảm chiều trước khi lưu hoặc tìm kiếm. Khi đổi model embedding,
+vector size hoặc `GEMINI_DATA_POLICY`, toàn bộ chỉ mục vector phải được tạo lại.
+Semantic cache dùng task type đối xứng `SEMANTIC_SIMILARITY` và chỉ so khớp các
+row được tạo bằng đúng model/revision embedding hiện tại.
 
 Trong Google Cloud Console, tạo OAuth client loại **Web application**, thêm origin
 của frontend và đăng ký chính xác redirect URI
@@ -151,14 +156,15 @@ limit PostgreSQL. API chính:
 
 ## Docker
 
-Thư mục `docker/` có Dockerfile riêng cho `api`, `frontend`, `worker`, `beat`,
-`migrate`, `model-init` và `reindex`; Compose build thành bảy image độc lập.
+Thư mục `docker/` chỉ có hai Dockerfile ứng dụng: `backend.Dockerfile` và
+`frontend.Dockerfile`. API, Celery worker/beat, migration và reindex dùng chung
+image `vlegal-backend`; Compose hoặc Cloud Run ghi đè command theo từng vai trò.
 PostgreSQL/pgvector là dịch vụ được quản lý bên ngoài và được kết nối qua
 `DATABASE_URL` trong file env; Compose không khởi động database. Neo4j lưu graph.
 Migration phải thành công trước khi API và worker khởi động.
 
 `api` và `worker` phục vụ mọi request từ PostgreSQL/pgvector và Neo4j nên chỉ
-mount `env.json` và checkpoint BGE-M3. Corpus `.docx` và chỉ mục SQLite cục bộ
+mount `env.json`; embedding được gọi qua Vertex AI. Corpus `.docx` và chỉ mục SQLite cục bộ
 chỉ được mount vào `reindex` — image duy nhất dựng chỉ mục — đúng như cấu hình
 Cloud Run, nơi chỉ job reindex mount corpus bucket.
 
@@ -172,18 +178,17 @@ docker compose up --build
 Tạo lại toàn bộ embedding từ corpus hiện có và đồng bộ Neo4j/pgvector:
 
 ```bash
-docker compose run --rm model-init
 docker compose run --rm migrate
-docker compose --profile jobs run --rm reindex --reset-postgres --reset-neo4j
+docker compose --profile jobs run --rm reindex
 ```
 
-Lần đầu cần đủ dung lượng đĩa và thời gian tải BGE-M3 (~2,1 GB). Theo dõi riêng
-bằng `docker compose logs -f model-init`; các lần sau checkpoint embedding được
-dùng lại từ Docker volume.
+Service account phải có `roles/aiplatform.user` và project phải bật
+`aiplatform.googleapis.com`. Reindex sẽ gửi corpus tới Vertex AI để tạo lại toàn
+bộ vector.
 
 Xem [hướng dẫn Cloud Run](deploy-gcp-cloud-run.md) để build và triển khai lên GCP.
 API/frontend là hai service riêng dùng URL `run.app`; worker/beat là Worker Pool,
-model/migration là Job. Model dùng Cloud Storage volume, PostgreSQL chuyển sang
+migration/reindex là Job. PostgreSQL chuyển sang
 Cloud SQL và Neo4j chạy trên GCE/GKE hoặc Neo4j Aura.
 
 > VLegal AI hỗ trợ nghiên cứu và nghiệp vụ, không thay thế ý kiến của luật sư

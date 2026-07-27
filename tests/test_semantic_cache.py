@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -21,7 +22,7 @@ from app.services.semantic_cache import (
 
 
 class _FakeEmbeddings:
-    def embed_query(self, _: str) -> list[float]:
+    def embed_similarity(self, _: str) -> list[float]:
         raise AssertionError("Exact cache hits must not run embedding inference")
 
 
@@ -60,6 +61,21 @@ class _FakeSession:
 
     async def commit(self) -> None:
         self.committed = True
+
+
+class _NoHitSession(_FakeSession):
+    async def execute(self, statement: object) -> SimpleNamespace:
+        self.statements.append(statement)
+        return SimpleNamespace(first=lambda: None)
+
+
+class _SimilarityEmbeddings:
+    def __init__(self) -> None:
+        self.inputs: list[str] = []
+
+    def embed_similarity(self, text: str) -> list[float]:
+        self.inputs.append(text)
+        return [1.0] + [0.0] * 1023
 
 
 def test_privacy_gate_only_accepts_context_free_public_legal_questions() -> None:
@@ -146,6 +162,8 @@ def test_exact_cache_hit_skips_embedding_inference(monkeypatch: pytest.MonkeyPat
         law_fingerprint="b" * 64,
         model_name=settings.gemini_model,
         prompt_version="legal-answer-v1",
+        embedding_model=settings.embedding_model,
+        embedding_revision="vertex-ai-v1:redact",
         expires_at=datetime.now(UTC) + timedelta(hours=1),
         hit_count=0,
     )
@@ -161,6 +179,8 @@ def test_exact_cache_hit_skips_embedding_inference(monkeypatch: pytest.MonkeyPat
     assert lookup.hit.exact_match
     lookup_sql = str(db.statements[0].compile(dialect=postgresql.dialect()))
     assert "cache_scope_hash" in lookup_sql
+    assert "embedding_model" in lookup_sql
+    assert "embedding_revision" in lookup_sql
 
 
 def test_cache_lookup_requires_a_nonblank_private_scope() -> None:
@@ -171,6 +191,29 @@ def test_cache_lookup_requires_a_nonblank_private_scope() -> None:
 
     with pytest.raises(ValueError, match="scope"):
         asyncio.run(service.lookup("Pháp luật quy định gì?", scope="  "))
+
+
+def test_semantic_lookup_uses_symmetric_similarity_embeddings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _NoHitSession()
+    embeddings = _SimilarityEmbeddings()
+    monkeypatch.setattr(semantic_cache, "SessionFactory", lambda: db)
+    service = SemanticAnswerCacheService(
+        Settings(_env_file=None),
+        embeddings,
+    )
+
+    lookup = asyncio.run(
+        service.lookup(
+            "Pháp luật quy định thời hạn khởi kiện là bao lâu?",
+            scope="guest:test",
+        )
+    )
+
+    assert embeddings.inputs == [lookup.normalized_query]
+    assert lookup.embedding == [1.0] + [0.0] * 1023
+    assert lookup.hit is None
 
 
 def test_store_uses_atomic_postgresql_upsert(

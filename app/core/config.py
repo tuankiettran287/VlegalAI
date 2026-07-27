@@ -91,14 +91,15 @@ class Settings(BaseSettings):
     gemini_thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     gemini_data_policy: Literal["redact", "deny", "allow"] = "redact"
 
-    # BGE-M3 runs locally and creates normalized semantic embeddings for every
-    # legal chunk. Runtime services never send legal text to an embedding API.
-    embedding_model_path: str = str(PROJECT_ROOT / "models" / "bge-m3")
-    embedding_model_repo: str = "BAAI/bge-m3"
-    embedding_model_revision: str = "main"
-    embedding_device: Literal["auto", "cuda", "cpu", "mps"] = "auto"
-    embedding_batch_size: int = Field(default=4, ge=1, le=128)
-    embedding_max_sequence_length: int = Field(default=2048, ge=128, le=8192)
+    # Semantic embeddings use Gemini Embedding 001 through Vertex AI. The
+    # reduced 1024-dimensional output remains compatible with the pgvector
+    # schema and is normalized by the application before storage/search.
+    embedding_model: str = "gemini-embedding-001"
+    embedding_location: str = "asia-southeast1"
+    embedding_max_concurrency: int = Field(default=8, ge=1, le=64)
+    embedding_timeout_seconds: int = Field(default=60, ge=5, le=600)
+    embedding_max_retries: int = Field(default=3, ge=1, le=3)
+    embedding_auto_truncate: bool = True
 
     tavily_api_key: str = ""
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"
@@ -117,7 +118,10 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
-    postgres_vector_size: int = Field(default=1024, ge=1, le=2000)
+    # All pgvector columns and HNSW indexes are currently schema-bound to 1024.
+    # Reject a mismatched environment value during startup instead of failing
+    # later during inserts or similarity queries.
+    postgres_vector_size: int = Field(default=1024, ge=1024, le=1024)
     hybrid_vector_weight: float = Field(default=0.55, ge=0)
     hybrid_bm25_weight: float = Field(default=0.45, ge=0)
     hybrid_rrf_k: int = Field(default=60, ge=1)
@@ -231,25 +235,10 @@ class Settings(BaseSettings):
         return self.gemini_use_adc
 
     @property
-    def embedding_local_path(self) -> Path:
-        model_path = Path(self.embedding_model_path).expanduser()
-        return model_path if model_path.is_absolute() else PROJECT_ROOT / model_path
-
-    @property
     def embedding_ready(self) -> bool:
-        model_path = self.embedding_local_path
-        if not model_path.is_dir():
-            return False
-        required_files = (
-            "config.json",
-            "modules.json",
-            "tokenizer_config.json",
-        )
-        if not all((model_path / name).is_file() for name in required_files):
-            return False
-        return any(model_path.rglob("*.safetensors")) or any(
-            model_path.rglob("pytorch_model*.bin")
-        )
+        from app.services.embeddings import embedding_config_from_settings
+
+        return embedding_config_from_settings(self).ready
 
     @property
     def tavily_ready(self) -> bool:

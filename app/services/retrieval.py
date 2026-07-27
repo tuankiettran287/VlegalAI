@@ -17,7 +17,7 @@ from app.external_graphrag import (
 )
 from app.legal_graphrag import GraphRAGStore
 from app.services.ai import untrusted_data_block
-from app.services.embeddings import EmbeddingConfig
+from app.services.embeddings import EmbeddingConfig, embedding_config_from_settings
 
 
 _WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", re.UNICODE)
@@ -400,15 +400,7 @@ def _merge_retrieval_rows(
 
 
 def _embedding_config(settings: Settings) -> EmbeddingConfig:
-    return EmbeddingConfig(
-        model_path=settings.embedding_model_path,
-        model_repo=settings.embedding_model_repo,
-        model_revision=settings.embedding_model_revision,
-        device=settings.embedding_device,
-        dimensions=settings.postgres_vector_size,
-        batch_size=settings.embedding_batch_size,
-        max_sequence_length=settings.embedding_max_sequence_length,
-    )
+    return embedding_config_from_settings(settings)
 
 
 def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
@@ -419,12 +411,16 @@ def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
         neo4j_database=settings.neo4j_database,
         database_url=settings.database_url,
         postgres_vector_size=settings.postgres_vector_size,
-        embedding_model_path=settings.embedding_model_path,
-        embedding_model_repo=settings.embedding_model_repo,
-        embedding_model_revision=settings.embedding_model_revision,
-        embedding_device=settings.embedding_device,
-        embedding_batch_size=settings.embedding_batch_size,
-        embedding_max_sequence_length=settings.embedding_max_sequence_length,
+        embedding_model=settings.embedding_model,
+        embedding_project_id=settings.gemini_project_id,
+        embedding_location=settings.embedding_location,
+        embedding_credentials_path=settings.gemini_credentials_path,
+        embedding_use_adc=settings.gemini_use_adc,
+        embedding_max_concurrency=settings.embedding_max_concurrency,
+        embedding_timeout_seconds=settings.embedding_timeout_seconds,
+        embedding_max_retries=settings.embedding_max_retries,
+        embedding_auto_truncate=settings.embedding_auto_truncate,
+        embedding_data_policy=settings.gemini_data_policy,
         hybrid_vector_weight=settings.hybrid_vector_weight,
         hybrid_bm25_weight=settings.hybrid_bm25_weight,
         hybrid_rrf_k=settings.hybrid_rrf_k,

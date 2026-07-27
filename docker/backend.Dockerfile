@@ -1,7 +1,5 @@
 # syntax=docker/dockerfile:1.7
 
-# API chỉ đọc PostgreSQL/pgvector, Neo4j và checkpoint BGE-M3 được mount ngoài
-# image. Không copy corpus .docx, SQLite GraphRAG, credential hoặc model vào đây.
 ARG PYTHON_VERSION=3.13
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS builder
@@ -35,18 +33,13 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONFAULTHANDLER=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    HF_HUB_OFFLINE=1 \
-    HF_HUB_DISABLE_TELEMETRY=1 \
-    TRANSFORMERS_OFFLINE=1 \
-    TOKENIZERS_PARALLELISM=false \
-    EMBEDDING_MODEL_PATH=/models/embedding \
     PORT=8080 \
     WEB_CONCURRENCY=1
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates libgomp1 \
+    && apt-get install --yes --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid "${APP_GID}" vlegal \
     && useradd \
@@ -54,17 +47,21 @@ RUN apt-get update \
        --gid "${APP_GID}" \
        --create-home \
        --shell /usr/sbin/nologin \
-       vlegal
+       vlegal \
+    && mkdir -p /app/legal-data /app/storage/graphrag \
+    && chown -R vlegal:vlegal /app /home/vlegal
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=vlegal:vlegal app ./app
+COPY --chown=vlegal:vlegal migrations ./migrations
+COPY --chown=vlegal:vlegal alembic.ini ./
+COPY --chown=vlegal:vlegal scripts/*.py ./scripts/
 
 USER vlegal
 
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD python -c "import os, urllib.request; response = urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8080') + '/api/health/live', timeout=3); raise SystemExit(0 if response.status == 200 else 1)"
-
+# API is the default. Cloud Run Jobs/Worker Pools and Compose override this
+# command for migrate, reindex, Celery worker and Celery beat.
 CMD ["sh", "-c", "exec gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker --workers \"${WEB_CONCURRENCY:-1}\" --bind \"0.0.0.0:${PORT:-8080}\" --timeout 3600 --graceful-timeout 30 --keep-alive 5 --max-requests 2000 --max-requests-jitter 200 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile - --capture-output"]
