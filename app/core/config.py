@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     gemini_thinking_budget: int = Field(default=0, ge=0, le=24_576)
     gemini_thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     gemini_data_policy: Literal["redact", "deny", "allow"] = "redact"
+    query_rewrite_enabled: bool = True
+    query_rewrite_timeout_seconds: int = Field(default=12, ge=2, le=30)
+    query_rewrite_min_confidence: float = Field(default=0.75, ge=0.5, le=1)
 
     # Semantic embeddings can use Vertex AI or the Gemini Developer API. The
     # provider is independent from GEMINI_USE_ADC so generation can remain on

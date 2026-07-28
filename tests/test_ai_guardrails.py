@@ -20,6 +20,7 @@ from app.api import (
     readiness,
 )
 from app.core.config import Settings
+from app.models import ChatMessage, Conversation
 from app.schemas import ChatRequest
 from app.services.ai import GeminiError, validate_citations
 from app.services.articles import ArticleResearchError
@@ -162,6 +163,24 @@ def test_legal_ai_rejects_blank_retrieved_source_content() -> None:
                 _FreshnessMustNotRun(),
             )
         assert error.value.status_code == 422
+
+    asyncio.run(scenario())
+
+
+def test_legal_ai_returns_data_unavailable_when_empty_sources_are_allowed() -> None:
+    async def scenario() -> None:
+        sources, verification = await _legal_sources(
+            "Tư vấn nghĩa vụ pháp lý",
+            _EmptyRetrieval(),
+            _FreshnessMustNotRun(),
+            allow_empty=True,
+        )
+
+        assert sources == []
+        assert verification["checked"] is False
+        assert verification["all_current"] is False
+        assert verification["items"] == []
+        assert verification["note"] == "Dữ liệu không có sẵn"
 
     asyncio.run(scenario())
 
@@ -489,7 +508,7 @@ def test_freshness_rejects_verdict_url_not_present_in_evidence() -> None:
         service._validate_verdict_evidence(verdict, "100/2020/QH14", evidence)
 
 
-def test_chat_does_not_write_or_call_ai_when_retrieval_has_no_source() -> None:
+def test_chat_returns_and_persists_data_unavailable_without_calling_ai() -> None:
     class _Db:
         def __init__(self) -> None:
             self.added: list[object] = []
@@ -499,7 +518,22 @@ def test_chat_does_not_write_or_call_ai_when_retrieval_has_no_source() -> None:
             self.added.append(value)
 
         async def flush(self) -> None:
+            conversation = next(
+                (
+                    value
+                    for value in self.added
+                    if isinstance(value, Conversation)
+                ),
+                None,
+            )
+            if conversation is not None and conversation.id is None:
+                conversation.id = uuid.uuid4()
+
+        async def execute(self, *_: object, **__: object) -> None:
             return None
+
+        async def scalar(self, *_: object, **__: object) -> int:
+            return 0
 
         async def commit(self) -> None:
             self.commits += 1
@@ -507,36 +541,46 @@ def test_chat_does_not_write_or_call_ai_when_retrieval_has_no_source() -> None:
         async def rollback(self) -> None:
             return None
 
+        async def refresh(self, value: object) -> None:
+            if isinstance(value, ChatMessage) and value.id is None:
+                value.id = uuid.uuid4()
+
     class _Cache:
         def eligible(self, *_: object, **__: object) -> bool:
             return False
 
     db = _Db()
     ai = SimpleNamespace(complete=AsyncMock())
+    memory = SimpleNamespace(refresh=AsyncMock())
 
-    async def scenario() -> None:
-        with pytest.raises(HTTPException) as error:
-            await chat(
-                ChatRequest(message="Nghĩa vụ pháp lý của doanh nghiệp là gì?"),
-                SimpleNamespace(),
-                Response(),
-                db,
-                SimpleNamespace(id=uuid.uuid4()),
-                Settings(_env_file=None, session_secret="guardrail-test"),
-                _EmptyRetrieval(),
-                _FreshnessMustNotRun(),
-                ai,
-                SimpleNamespace(),
-                SimpleNamespace(),
-                _Cache(),
-            )
-        assert error.value.status_code == 422
+    async def scenario() -> object:
+        return await chat(
+            ChatRequest(message="Nghĩa vụ pháp lý của doanh nghiệp là gì?"),
+            SimpleNamespace(),
+            Response(),
+            db,
+            SimpleNamespace(id=uuid.uuid4()),
+            Settings(_env_file=None, session_secret="guardrail-test"),
+            _EmptyRetrieval(),
+            _FreshnessMustNotRun(),
+            ai,
+            SimpleNamespace(),
+            memory,
+            _Cache(),
+        )
 
-    asyncio.run(scenario())
+    result = asyncio.run(scenario())
 
-    assert db.added == []
-    assert db.commits == 0
+    assert result.answer == "Dữ liệu không có sẵn"
+    assert result.sources == []
+    assert result.verification.checked is False
+    assert result.verification.note == "Dữ liệu không có sẵn"
+    assert result.temporary is False
+    assert len([value for value in db.added if isinstance(value, Conversation)]) == 1
+    assert len([value for value in db.added if isinstance(value, ChatMessage)]) == 2
+    assert db.commits == 1
     ai.complete.assert_not_awaited()
+    memory.refresh.assert_awaited_once()
 
 
 @pytest.mark.parametrize(

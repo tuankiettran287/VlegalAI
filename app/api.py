@@ -77,6 +77,7 @@ from app.services.freshness import (
     LegalFreshnessService,
 )
 from app.services.guest_limit import GuestRateLimitExceeded, GuestRateLimitUnavailable, GuestRateLimiter
+from app.services.query_rewrite import rewrite_query_if_needed
 from app.services.retrieval import (
     RetrievalService,
     append_detailed_citations,
@@ -94,6 +95,7 @@ from app.services.semantic_cache import (
 router = APIRouter()
 router.include_router(auth_router)
 logger = logging.getLogger(__name__)
+LEGAL_DATA_UNAVAILABLE_MESSAGE = "Dữ liệu không có sẵn"
 
 
 CONTRACT_TEMPLATES = [
@@ -347,7 +349,21 @@ async def _legal_sources(
     query: str,
     retrieval: RetrievalService,
     freshness: LegalFreshnessService,
+    *,
+    allow_empty: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def unavailable_result() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return (
+            [],
+            VerificationReport(
+                checked=False,
+                all_current=False,
+                checked_at=datetime.now(UTC),
+                items=[],
+                note=LEGAL_DATA_UNAVAILABLE_MESSAGE,
+            ).model_dump(mode="json"),
+        )
+
     configured_limit = getattr(
         getattr(freshness, "settings", None),
         "max_laws_verified_per_request",
@@ -394,6 +410,8 @@ async def _legal_sources(
         logger.warning("Retrieval failed: %s", exc)
         sources = []
     if not sources:
+        if allow_empty:
+            return unavailable_result()
         raise HTTPException(
             status_code=422,
             detail=(
@@ -470,6 +488,8 @@ async def _legal_sources(
             retrieval_query = " ".join([query, *sorted(followed_replacements)])
             sources = usable_sources(await retrieval.retrieve(retrieval_query))
             if not sources:
+                if allow_empty:
+                    return unavailable_result()
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -1094,6 +1114,14 @@ async def chat(
             detail="Đăng nhập bằng Google để tiếp tục một cuộc trò chuyện đã lưu",
         )
 
+    query_rewrite = await rewrite_query_if_needed(
+        ai,
+        payload.message,
+        history=history_turns,
+        settings=settings,
+    )
+    retrieval_query = query_rewrite.retrieval_query
+
     cache_lookup: CacheLookup | None = None
     cache_hit = False
     cache_similarity: float | None = None
@@ -1109,7 +1137,7 @@ async def chat(
     if cache_eligible:
         try:
             cache_lookup = await answer_cache.lookup(
-                payload.message,
+                retrieval_query,
                 scope=cache_scope,
             )
         except Exception:
@@ -1126,9 +1154,10 @@ async def chat(
                 require_claim_coverage=True,
             )
             current_sources, current_verification = await _legal_sources(
-                payload.message,
+                retrieval_query,
                 retrieval,
                 freshness,
+                allow_empty=True,
             )
             fingerprint_matches = (
                 legal_fingerprint(current_sources, current_verification)
@@ -1179,42 +1208,52 @@ async def chat(
                 logger.exception("Cannot invalidate semantic answer cache entry %s", cached.id)
 
     if not cache_hit:
-        if not sources:
+        data_unavailable = (
+            not sources
+            and verification.get("note") == LEGAL_DATA_UNAVAILABLE_MESSAGE
+        )
+        if not sources and not data_unavailable:
             sources, verification = await _legal_sources(
-                payload.message,
+                retrieval_query,
                 retrieval,
                 freshness,
+                allow_empty=True,
             )
-        answer = await _complete_with_citation_repair(
-            ai,
-            LEGAL_SYSTEM_PROMPT,
-            "BỘ NHỚ TÓM TẮT:\n"
-            f"{_summary_prompt(summary_context)}\n\n"
-            f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
-            "KẾ HOẠCH PHỦ CÂU HỎI:\n"
-            f"{untrusted_data_block('ANSWER_PLAN', build_answer_plan(payload.message))}\n\n"
-            f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-            f"NGUỒN:\n{build_context(sources)}\n\n"
-            f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
-            f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
-            f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
-            "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
-            "không được sao chép các kết luận không còn phù hợp.",
-            allowed_ids=[source["source_id"] for source in sources],
-            sources=sources,
-            max_tokens=2200,
-        )
-        answer = append_detailed_citations(answer, sources)
-        if cache_lookup and verification.get("checked") and verification.get("all_current"):
-            try:
-                await answer_cache.store(
-                    cache_lookup,
-                    answer,
-                    sources,
-                    verification,
-                )
-            except Exception:
-                logger.exception("Cannot store semantic answer cache entry")
+        if not sources:
+            answer = LEGAL_DATA_UNAVAILABLE_MESSAGE
+        else:
+            answer = await _complete_with_citation_repair(
+                ai,
+                LEGAL_SYSTEM_PROMPT,
+                "BỘ NHỚ TÓM TẮT:\n"
+                f"{_summary_prompt(summary_context)}\n\n"
+                f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
+                "KẾ HOẠCH PHỦ CÂU HỎI:\n"
+                f"{untrusted_data_block('ANSWER_PLAN', build_answer_plan(retrieval_query))}\n\n"
+                f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
+                f"NGUỒN:\n{build_context(sources)}\n\n"
+                f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
+                "\n\nCÁCH HIỂU ĐÃ CHUẨN HÓA:\n"
+                f"{untrusted_data_block('REWRITTEN_QUERY', retrieval_query) if query_rewrite.rewritten else '(Không cần chuẩn hóa)'}"
+                f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
+                f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
+                "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
+                "không được sao chép các kết luận không còn phù hợp.",
+                allowed_ids=[source["source_id"] for source in sources],
+                sources=sources,
+                max_tokens=2200,
+            )
+            answer = append_detailed_citations(answer, sources)
+            if cache_lookup and verification.get("checked") and verification.get("all_current"):
+                try:
+                    await answer_cache.store(
+                        cache_lookup,
+                        answer,
+                        sources,
+                        verification,
+                    )
+                except Exception:
+                    logger.exception("Cannot store semantic answer cache entry")
     message_id = uuid.uuid4()
     if user:
         if conversation_id is None:

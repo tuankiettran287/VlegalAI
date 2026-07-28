@@ -57,6 +57,51 @@ def test_compound_question_is_split_and_keeps_focus_actor() -> None:
     assert len(actor_plan["must_answer"]) == 2
 
 
+def test_short_forced_labor_query_expands_to_definition_and_prohibition() -> None:
+    queries = plan_retrieval_queries("Cưỡng bức lao động")
+
+    assert queries[0] == "Cưỡng bức lao động"
+    assert any(
+        "Điều 3" in query
+        and "Điều 8" in query
+        and "45/2019/QH14" in query
+        for query in queries[1:]
+    )
+
+
+def test_short_forced_labor_query_retrieves_expanded_legal_definition() -> None:
+    class _Store:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def retrieve(self, query: str, _: int) -> list[dict]:
+            self.queries.append(query)
+            if "Điều 3" not in query:
+                return []
+            return [
+                _source(
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > Chương I > "
+                        "Điều 3. Giải thích từ ngữ > Khoản 7"
+                    ),
+                    text=(
+                        "Cưỡng bức lao động là việc dùng vũ lực, đe dọa dùng "
+                        "vũ lực hoặc các thủ đoạn khác để ép buộc người lao động."
+                    ),
+                )
+            ]
+
+    store = _Store()
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    service._store = store
+
+    rows = asyncio.run(service.retrieve("Cưỡng bức lao động"))
+
+    assert store.queries == plan_retrieval_queries("Cưỡng bức lao động")
+    assert len(rows) == 1
+    assert "Cưỡng bức lao động" in rows[0]["text"]
+
+
 def test_retrieval_runs_each_compound_facet_and_merges_results() -> None:
     class _Store:
         def __init__(self) -> None:

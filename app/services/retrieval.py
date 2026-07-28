@@ -86,6 +86,10 @@ _QUERY_STOP_WORDS = {
 }
 _SPECIFIC_DOMAIN_ANCHORS: tuple[tuple[str, ...], ...] = (
     (
+        "cuong buc lao dong",
+        "cuong buc",
+    ),
+    (
         "giet nguoi",
         "giet",
         "sat hai",
@@ -122,6 +126,13 @@ _SHARED_TOPIC_TERMS = {
     "trợ cấp",
 }
 _LEGAL_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("cuong buc lao dong", "cuong buc"),
+        (
+            "cưỡng bức lao động định nghĩa hành vi bị nghiêm cấm "
+            "Điều 3 Điều 8 Bộ luật Lao động 45/2019/QH14"
+        ),
+    ),
     (
         ("luong co ban",),
         "tiền lương mức lương theo công việc mức lương tối thiểu Điều 90 Điều 91",
@@ -192,26 +203,26 @@ def plan_retrieval_queries(query: str) -> list[str]:
     if not normalized:
         return []
 
-    facets = _question_facets(normalized)
-    if len(facets) < 2:
-        return [normalized]
-
-    first_ascii = _ascii(facets[0])
-    first_terms = [
-        topic
-        for topic in sorted(_SHARED_TOPIC_TERMS, key=len, reverse=True)
-        if _ascii(topic) in first_ascii
-    ][:2]
-    shared_prefix = " ".join(first_terms)
     planned = [normalized]
-    for index, facet in enumerate(facets):
-        expanded = facet
-        if index and shared_prefix:
-            facet_terms = set(_significant_terms(facet))
-            if not facet_terms.intersection(_ascii(term) for term in first_terms):
-                expanded = f"{shared_prefix} {facet}"
-        if expanded.casefold() != normalized.casefold():
-            planned.append(expanded)
+    facets = _question_facets(normalized)
+    if len(facets) >= 2:
+        first_ascii = _ascii(facets[0])
+        first_terms = [
+            topic
+            for topic in sorted(_SHARED_TOPIC_TERMS, key=len, reverse=True)
+            if _ascii(topic) in first_ascii
+        ][:2]
+        shared_prefix = " ".join(first_terms)
+        for index, facet in enumerate(facets):
+            expanded = facet
+            if index and shared_prefix:
+                facet_terms = set(_significant_terms(facet))
+                if not facet_terms.intersection(
+                    _ascii(term) for term in first_terms
+                ):
+                    expanded = f"{shared_prefix} {facet}"
+            if expanded.casefold() != normalized.casefold():
+                planned.append(expanded)
     query_ascii = _ascii(normalized)
     for markers, expansion in _LEGAL_QUERY_EXPANSIONS:
         if any(marker in query_ascii for marker in markers):
