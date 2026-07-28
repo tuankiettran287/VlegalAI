@@ -17,6 +17,12 @@ def _positive_int(name: str, default: int) -> int:
 bind = f"0.0.0.0:{_positive_int('PORT', 8080)}"
 workers = _positive_int("WEB_CONCURRENCY", 1)
 worker_class = "uvicorn.workers.UvicornWorker"
+configured_log_level = os.getenv("LOG_LEVEL", "INFO").strip().lower()
+loglevel = (
+    configured_log_level
+    if configured_log_level in {"debug", "info", "warning", "error", "critical"}
+    else "info"
+)
 
 timeout = _positive_int("GUNICORN_TIMEOUT_SECONDS", 3600)
 graceful_timeout = _positive_int("GUNICORN_GRACEFUL_TIMEOUT_SECONDS", 30)

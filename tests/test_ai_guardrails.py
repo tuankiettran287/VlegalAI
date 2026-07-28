@@ -590,6 +590,8 @@ def test_chat_returns_and_persists_data_unavailable_without_calling_ai() -> None
         {"legal_freshness_ttl_hours": -1},
         {"legal_verification_concurrency": 0},
         {"legal_verification_concurrency": 33},
+        {"legal_freshness_timeout_seconds": 9},
+        {"legal_freshness_timeout_seconds": 301},
         {"max_laws_verified_per_request": 0},
         {"retrieval_top_k": 0},
         {"gemini_google_search_max_output_tokens": 1_023},

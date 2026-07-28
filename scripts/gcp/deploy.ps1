@@ -244,6 +244,7 @@ function Deploy-Reindex {
 function Deploy-Web {
     $envVars = @(
         "APP_ENV=production",
+        "LOG_LEVEL=INFO",
         "GEMINI_USE_ADC=true",
         "GEMINI_PROJECT_ID=$ProjectId",
         "GEMINI_LOCATION=global",
@@ -252,6 +253,7 @@ function Deploy-Web {
         "QUERY_REWRITE_ENABLED=true",
         "QUERY_REWRITE_TIMEOUT_SECONDS=12",
         "QUERY_REWRITE_MIN_CONFIDENCE=0.75",
+        "LEGAL_FRESHNESS_TIMEOUT_SECONDS=90",
         "EMBEDDING_PROVIDER=vertex",
         "EMBEDDING_MODEL=gemini-embedding-001",
         "EMBEDDING_LOCATION=$EmbeddingLocation",
@@ -304,11 +306,13 @@ function Set-WebExternalUrl {
 function Deploy-Worker {
     $envVars = @(
         "APP_ENV=production",
+        "LOG_LEVEL=INFO",
         "GEMINI_USE_ADC=true",
         "GEMINI_PROJECT_ID=$ProjectId",
         "GEMINI_LOCATION=global",
         "GEMINI_MODEL=gemini-2.5-flash",
         "GEMINI_MAX_CONCURRENT_GENERATIONS=8",
+        "LEGAL_FRESHNESS_TIMEOUT_SECONDS=90",
         "EMBEDDING_PROVIDER=vertex",
         "EMBEDDING_MODEL=gemini-embedding-001",
         "EMBEDDING_LOCATION=$EmbeddingLocation",

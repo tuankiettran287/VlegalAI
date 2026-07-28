@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from types import SimpleNamespace
 
 import pytest
+from fastapi import Request, Response
 
 from app import main
 
@@ -22,6 +24,41 @@ def test_request_id_accepts_only_log_and_header_safe_values() -> None:
         generated = main._normalized_request_id(unsafe)
         assert generated != unsafe
         assert re.fullmatch(r"[0-9a-f]{32}", generated)
+
+
+def test_mutating_request_is_logged_before_and_after_processing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/api/chat",
+        "raw_path": b"/api/chat",
+        "query_string": b"",
+        "headers": [(b"x-request-id", b"request-42")],
+        "client": ("127.0.0.1", 1234),
+        "server": ("testserver", 443),
+        "app": SimpleNamespace(
+            state=SimpleNamespace(request_slots=asyncio.Semaphore(1))
+        ),
+    }
+
+    async def scenario() -> Response:
+        request = Request(scope)
+
+        async def call_next(_: Request) -> Response:
+            return Response(status_code=200)
+
+        return await main.request_context(request, call_next)
+
+    with caplog.at_level(logging.INFO, logger="app.main"):
+        response = asyncio.run(scenario())
+
+    assert response.headers["X-Request-ID"] == "request-42"
+    assert "stage=received request_id=request-42" in caplog.text
+    assert "stage=completed request_id=request-42" in caplog.text
 
 
 def _patch_lifespan_dependencies(

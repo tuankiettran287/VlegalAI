@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -14,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.api import router as api_router
 from app.core.config import get_settings
+from app.core.observability import reset_request_id, set_request_id
 from app.services.ai import GeminiError, GeminiService
 from app.services.articles import ArticleResearchError, ArticleResearchService
 from app.services.conversation_memory import ConversationMemoryService
@@ -27,6 +29,17 @@ from app.services.tavily import TavilyError, TavilyService
 
 
 settings = get_settings()
+application_logger = logging.getLogger("app")
+configured_log_level = getattr(
+    logging,
+    settings.log_level.strip().upper(),
+    logging.INFO,
+)
+application_logger.setLevel(
+    configured_log_level
+    if isinstance(configured_log_level, int)
+    else logging.INFO
+)
 logger = logging.getLogger(__name__)
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -86,8 +99,45 @@ app.add_middleware(
 async def request_context(request: Request, call_next):
     request_id = _normalized_request_id(request.headers.get("X-Request-ID"))
     request.state.request_id = request_id
-    async with request.app.state.request_slots:
-        response = await call_next(request)
+    request_id_token = set_request_id(request_id)
+    started_at = time.perf_counter()
+    should_log_progress = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+    response: Response | None = None
+    if should_log_progress:
+        logger.info(
+            "progress operation=http_request stage=received request_id=%s "
+            "elapsed_ms=0 method=%s path=%s",
+            request_id,
+            request.method,
+            request.url.path,
+        )
+    try:
+        async with request.app.state.request_slots:
+            response = await call_next(request)
+    except BaseException as exc:
+        logger.error(
+            "progress operation=http_request stage=failed request_id=%s "
+            "elapsed_ms=%d method=%s path=%s error_type=%s",
+            request_id,
+            round((time.perf_counter() - started_at) * 1000),
+            request.method,
+            request.url.path,
+            type(exc).__name__,
+        )
+        raise
+    finally:
+        if should_log_progress and response is not None:
+            logger.info(
+                "progress operation=http_request stage=completed request_id=%s "
+                "elapsed_ms=%d method=%s path=%s status=%d",
+                request_id,
+                round((time.perf_counter() - started_at) * 1000),
+                request.method,
+                request.url.path,
+                response.status_code,
+            )
+        reset_request_id(request_id_token)
+    assert response is not None
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"

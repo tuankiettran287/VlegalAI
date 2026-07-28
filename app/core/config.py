@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=10, ge=1, le=64)
     legal_freshness_ttl_hours: int = Field(default=24, ge=0, le=168)
     legal_verification_concurrency: int = Field(default=4, ge=1, le=32)
+    legal_freshness_timeout_seconds: int = Field(default=90, ge=10, le=300)
     freshness_lock_wait_seconds: int = Field(default=120, ge=1, le=600)
     require_freshness_check: bool = True
     legal_search_require_both: bool = True

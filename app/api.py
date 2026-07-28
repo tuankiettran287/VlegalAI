@@ -4,6 +4,7 @@ import difflib
 import hashlib
 import logging
 import re
+import time
 import unicodedata
 import uuid
 from binascii import Error as BinasciiError
@@ -20,6 +21,7 @@ from sqlalchemy.orm import selectinload
 
 from app.auth import current_user, optional_user, require_roles, router as auth_router
 from app.core.config import Settings, get_settings
+from app.core.observability import log_progress
 from app.core.security import create_guest_token, decode_guest_token, decrypt_text, encrypt_text
 from app.db import get_db
 from app.models import (
@@ -352,7 +354,24 @@ async def _legal_sources(
     *,
     allow_empty: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    operation_started = time.perf_counter()
+    log_progress(
+        logger,
+        "legal_sources",
+        "started",
+        operation_started,
+        allow_empty=allow_empty,
+    )
+
     def unavailable_result() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        log_progress(
+            logger,
+            "legal_sources",
+            "completed",
+            operation_started,
+            outcome="data_unavailable",
+            source_count=0,
+        )
         return (
             [],
             VerificationReport(
@@ -404,11 +423,21 @@ async def _legal_sources(
             source.get("doc_id") or source.get("title") or "Không rõ"
         )[:120].strip().upper()
 
+    retrieval_started = time.perf_counter()
+    log_progress(logger, "legal_sources", "retrieval_started", operation_started)
     try:
         sources = usable_sources(await retrieval.retrieve(query))
     except Exception as exc:
         logger.warning("Retrieval failed: %s", exc)
         sources = []
+    log_progress(
+        logger,
+        "legal_sources",
+        "retrieval_completed",
+        operation_started,
+        phase_ms=round((time.perf_counter() - retrieval_started) * 1000),
+        source_count=len(sources),
+    )
     if not sources:
         if allow_empty:
             return unavailable_result()
@@ -430,7 +459,16 @@ async def _legal_sources(
             True,
         )
     )
-    for _ in range(3):
+    for attempt in range(1, 4):
+        freshness_started = time.perf_counter()
+        log_progress(
+            logger,
+            "legal_sources",
+            "freshness_started",
+            operation_started,
+            attempt=attempt,
+            source_count=len(sources),
+        )
         try:
             verification, updated = await freshness.verify_sources(sources)
         except FreshnessUnavailable as exc:
@@ -457,6 +495,16 @@ async def _legal_sources(
             list(raw_items or [])
             if not callable(raw_items)
             else []
+        )
+        log_progress(
+            logger,
+            "legal_sources",
+            "freshness_completed",
+            operation_started,
+            attempt=attempt,
+            item_count=len(verification_items),
+            phase_ms=round((time.perf_counter() - freshness_started) * 1000),
+            updated=updated,
         )
         verified_statuses = {
             str(getattr(item, "code", "") or "").strip().upper():
@@ -486,7 +534,25 @@ async def _legal_sources(
         if updated or replacement_codes:
             followed_replacements.update(replacement_codes)
             retrieval_query = " ".join([query, *sorted(followed_replacements)])
+            replacement_retrieval_started = time.perf_counter()
+            log_progress(
+                logger,
+                "legal_sources",
+                "replacement_retrieval_started",
+                operation_started,
+                replacement_count=len(followed_replacements),
+            )
             sources = usable_sources(await retrieval.retrieve(retrieval_query))
+            log_progress(
+                logger,
+                "legal_sources",
+                "replacement_retrieval_completed",
+                operation_started,
+                phase_ms=round(
+                    (time.perf_counter() - replacement_retrieval_started) * 1000
+                ),
+                source_count=len(sources),
+            )
             if not sources:
                 if allow_empty:
                     return unavailable_result()
@@ -569,6 +635,15 @@ async def _legal_sources(
             "all_current": False,
             "items": [],
         }
+    )
+    log_progress(
+        logger,
+        "legal_sources",
+        "completed",
+        operation_started,
+        outcome="verified",
+        source_count=len(sources),
+        verified_law_count=len(final_items),
     )
     return sources, verification_payload
 
@@ -724,11 +799,26 @@ async def _complete_with_citation_repair(
     max_tokens: int,
     temperature: float = 0.1,
 ) -> str:
+    operation_started = time.perf_counter()
+    log_progress(
+        logger,
+        "answer_generation",
+        "draft_started",
+        operation_started,
+        source_count=len(allowed_ids),
+    )
     answer = await ai.complete(
         system,
         prompt,
         max_tokens=max_tokens,
         temperature=temperature,
+    )
+    log_progress(
+        logger,
+        "answer_generation",
+        "draft_completed",
+        operation_started,
+        answer_chars=len(answer),
     )
     try:
         validate_citations(
@@ -739,8 +829,21 @@ async def _complete_with_citation_repair(
         if sources is not None:
             _validate_grounded_legal_references(answer, sources)
             _validate_professional_legal_opening(answer)
+        log_progress(
+            logger,
+            "answer_generation",
+            "completed",
+            operation_started,
+            outcome="draft_valid",
+        )
         return answer
     except GeminiError:
+        log_progress(
+            logger,
+            "answer_generation",
+            "citation_repair_started",
+            operation_started,
+        )
         repair_prompt = (
             f"{prompt}\n\n"
             "YÊU CẦU SỬA TRÍCH DẪN BẮT BUỘC:\n"
@@ -789,6 +892,12 @@ async def _complete_with_citation_repair(
             max_tokens=max_tokens,
             temperature=0,
         )
+        log_progress(
+            logger,
+            "answer_generation",
+            "citation_repair_response_received",
+            operation_started,
+        )
         validate_citations(structured, allowed_ids)
         repaired_units: list[str] = []
         for statement in structured["statements"]:
@@ -827,6 +936,13 @@ async def _complete_with_citation_repair(
             if sources is not None:
                 _validate_grounded_legal_references(repaired, sources)
                 _validate_professional_legal_opening(repaired)
+            log_progress(
+                logger,
+                "answer_generation",
+                "completed",
+                operation_started,
+                outcome="citation_repaired",
+            )
             return repaired
         except Exception as exc:
             raise GeminiError(
@@ -1081,9 +1197,19 @@ async def chat(
     memory: ConversationMemoryService = Depends(conversation_memory_service),
     answer_cache: SemanticAnswerCacheService = Depends(semantic_answer_cache_service),
 ) -> ChatResponse:
+    operation_started = time.perf_counter()
     conversation: Conversation | None = None
     conversation_id: uuid.UUID | None = None
     authenticated_user_id = user.id if user else None
+    log_progress(
+        logger,
+        "chat",
+        "started",
+        operation_started,
+        authenticated=bool(user),
+        has_conversation_id=bool(payload.conversation_id),
+        history_turn_count=len(payload.history),
+    )
     cache_scope = f"user:{authenticated_user_id}" if authenticated_user_id else ""
     summary_context = ""
     # Client-provided history is only for an anonymous, temporary browser
@@ -1114,6 +1240,16 @@ async def chat(
             detail="Đăng nhập bằng Google để tiếp tục một cuộc trò chuyện đã lưu",
         )
 
+    log_progress(
+        logger,
+        "chat",
+        "context_ready",
+        operation_started,
+        history_turn_count=len(history_turns),
+        summary_available=bool(summary_context),
+    )
+    rewrite_started = time.perf_counter()
+    log_progress(logger, "chat", "query_rewrite_started", operation_started)
     query_rewrite = await rewrite_query_if_needed(
         ai,
         payload.message,
@@ -1121,6 +1257,15 @@ async def chat(
         settings=settings,
     )
     retrieval_query = query_rewrite.retrieval_query
+    log_progress(
+        logger,
+        "chat",
+        "query_rewrite_completed",
+        operation_started,
+        attempted=query_rewrite.attempted,
+        phase_ms=round((time.perf_counter() - rewrite_started) * 1000),
+        rewritten=query_rewrite.rewritten,
+    )
 
     cache_lookup: CacheLookup | None = None
     cache_hit = False
@@ -1134,6 +1279,14 @@ async def chat(
         payload.message,
         has_conversation_context=bool(history_turns or summary_context),
     )
+    cache_lookup_started = time.perf_counter()
+    log_progress(
+        logger,
+        "chat",
+        "cache_lookup_started",
+        operation_started,
+        eligible=cache_eligible,
+    )
     if cache_eligible:
         try:
             cache_lookup = await answer_cache.lookup(
@@ -1142,6 +1295,14 @@ async def chat(
             )
         except Exception:
             logger.exception("Cannot query semantic answer cache")
+    log_progress(
+        logger,
+        "chat",
+        "cache_lookup_completed",
+        operation_started,
+        candidate_found=bool(cache_lookup and cache_lookup.hit),
+        phase_ms=round((time.perf_counter() - cache_lookup_started) * 1000),
+    )
 
     if cache_lookup and cache_lookup.hit:
         cached = cache_lookup.hit
@@ -1221,7 +1382,22 @@ async def chat(
             )
         if not sources:
             answer = LEGAL_DATA_UNAVAILABLE_MESSAGE
+            log_progress(
+                logger,
+                "chat",
+                "answer_completed",
+                operation_started,
+                outcome="data_unavailable",
+                source_count=0,
+            )
         else:
+            log_progress(
+                logger,
+                "chat",
+                "answer_generation_started",
+                operation_started,
+                source_count=len(sources),
+            )
             answer = await _complete_with_citation_repair(
                 ai,
                 LEGAL_SYSTEM_PROMPT,
@@ -1244,6 +1420,14 @@ async def chat(
                 max_tokens=2200,
             )
             answer = append_detailed_citations(answer, sources)
+            log_progress(
+                logger,
+                "chat",
+                "answer_generation_completed",
+                operation_started,
+                answer_chars=len(answer),
+                source_count=len(sources),
+            )
             if cache_lookup and verification.get("checked") and verification.get("all_current"):
                 try:
                     await answer_cache.store(
@@ -1256,6 +1440,8 @@ async def chat(
                     logger.exception("Cannot store semantic answer cache entry")
     message_id = uuid.uuid4()
     if user:
+        persistence_started = time.perf_counter()
+        log_progress(logger, "chat", "persistence_started", operation_started)
         if conversation_id is None:
             conversation = Conversation(
                 user_id=authenticated_user_id,
@@ -1324,6 +1510,22 @@ async def chat(
             # The full encrypted transcript is already durable. A later turn
             # retries every message after last_message_sequence automatically.
             logger.exception("Cannot refresh conversation summary for %s", conversation_id)
+        log_progress(
+            logger,
+            "chat",
+            "persistence_completed",
+            operation_started,
+            phase_ms=round((time.perf_counter() - persistence_started) * 1000),
+        )
+    log_progress(
+        logger,
+        "chat",
+        "completed",
+        operation_started,
+        cache_mode=cache_mode,
+        source_count=len(sources),
+        temporary=conversation is None,
+    )
     return ChatResponse(
         conversation_id=conversation_id,
         message_id=message_id,
