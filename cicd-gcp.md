@@ -1,16 +1,22 @@
 # CI/CD VLegalAI với GitHub Actions và Google Cloud
 
 Workflow [`.github/workflows/deploy-gcp.yml`](.github/workflows/deploy-gcp.yml)
-chạy tự động khi có commit mới được push vào nhánh `master`:
+chạy CI khi có pull request vào `master`; khi push vào `master` hoặc chạy thủ
+công, workflow tiếp tục chạy toàn bộ CD production:
 
-1. Cài dependency và chạy toàn bộ test backend.
-2. Chạy TypeScript check và production build cho frontend.
-3. Đăng nhập Google Cloud bằng GitHub OIDC/Workload Identity Federation.
-4. Build đúng hai image `vlegal-backend` và `vlegal-frontend`.
-5. Push image với cả tag Git commit SHA và tag `latest`.
-6. Chạy Cloud Run migration job và chờ hoàn tất.
-7. Deploy API, frontend, Celery worker, Celery beat và cập nhật reindex job.
-8. Gọi `/api/health/live` qua frontend để xác nhận production hoạt động.
+1. Kiểm tra dependency Python, compile source, Alembic chỉ có một head, cú pháp
+   Bash/PowerShell và hai Docker Compose manifest.
+2. Chạy toàn bộ test backend.
+3. Chạy TypeScript check và production build cho frontend.
+4. Với pull request, build thử container hợp nhất nhưng không push và không truy cập
+   GitHub environment `production`.
+5. Đăng nhập Google Cloud bằng GitHub OIDC/Workload Identity Federation.
+6. Build và push image `vlegal-app` bằng tag Git commit SHA bất biến.
+7. Chạy Cloud Run migration job và chờ hoàn tất.
+8. Deploy service hợp nhất `vlegal-unified`, Celery worker/beat và cập nhật reindex job.
+9. Gọi cả `/api/health/live` và `/api/health/ready` qua service hợp nhất.
+10. Chỉ sau khi hai health check thành công mới chuyển tag `latest` sang image
+    vừa được xác minh.
 
 Reindex toàn bộ vector không chạy ở mỗi lần push. Nó reset chỉ mục và gọi Vertex
 AI cho toàn bộ corpus, vì vậy chỉ được bật khi chạy workflow thủ công với input
@@ -27,22 +33,17 @@ ID `1299341579` và owner ID `148296828`. Chạy bootstrap một lần:
 ```powershell
 .\scripts\gcp\setup-github-cicd.ps1 `
   -ProjectId "YOUR_PROJECT_ID" `
-  -Region "asia-southeast1" `
-  -Network "default" `
-  -Subnet "default"
+  -Region "asia-southeast1"
 ```
 
 Nếu chạy từ một fork, truyền lại `-GitHubRepositoryId`,
 `-GitHubRepositoryOwnerId` và repository variables tương ứng.
-Nếu project không còn default VPC, truyền tên network/subnet thực tế; subnet phải
-nằm trong cùng region với Cloud Run.
-
 Script thực hiện idempotent:
 
 - bật các Google Cloud API cần thiết;
 - tạo Artifact Registry repository và corpus bucket nếu chưa có;
 - tạo deployment/runtime service account nếu chưa có;
-- cấp quyền Cloud Run, Artifact Registry, Vertex AI, Secret Manager và Direct VPC;
+- cấp quyền Cloud Run, Artifact Registry, Vertex AI, Cloud SQL và Secret Manager;
 - tạo GitHub OIDC provider;
 - chỉ cho phép đúng numeric repository ID, owner ID và nhánh `master`;
 - in ra toàn bộ giá trị cần thêm vào GitHub.
@@ -61,14 +62,18 @@ Thêm các environment variables do script bootstrap in ra:
 | --- | --- |
 | `GCP_PROJECT_ID` | `your-project-id` |
 | `GCP_REGION` | `asia-southeast1` |
-| `GCP_EMBEDDING_LOCATION` | `asia-southeast1` |
+| `GCP_EMBEDDING_LOCATION` | `global` |
+| `EMBEDDING_VERTEX_LOCATIONS` | `asia-east1|asia-east2|...|us-west4` (bỏ trống để dùng pool mặc định) |
+| `EMBEDDING_VERTEX_REQUESTS_PER_MINUTE` | `4.5` |
 | `GCP_REPOSITORY` | `vlegal` |
+| `GCP_RUN_SERVICE` | `vlegal-unified` |
 | `GCP_RUN_SERVICE_ACCOUNT` | `vlegal-run@PROJECT_ID.iam.gserviceaccount.com` |
 | `GCP_DEPLOY_SERVICE_ACCOUNT` | `vlegal-github-deploy@PROJECT_ID.iam.gserviceaccount.com` |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/providers/vlegal` |
 | `GCP_CORPUS_BUCKET` | `PROJECT_ID-vlegal-corpus` |
-| `GCP_NETWORK` | `default` |
-| `GCP_SUBNET` | `default` |
+| `GCP_CLOUD_SQL_INSTANCE` | `PROJECT_ID:asia-east2:PROJECT_ID-instance` |
+| `NEO4J_USER` | username được Aura cấp (có thể bỏ trống nếu trùng instance ID trong URI) |
+| `NEO4J_DATABASE` | database được Aura cấp (có thể bỏ trống nếu trùng instance ID trong URI) |
 
 Thêm environment secret:
 
@@ -106,9 +111,10 @@ gh run watch
 ```
 
 Workflow dùng commit SHA làm image tag để mỗi Cloud Run revision trỏ tới một
-artifact bất biến. Các deployment được xếp hàng bằng concurrency group
-`vlegal-production`; một deployment đang chạy sẽ không bị commit mới hủy giữa
-chừng.
+artifact bất biến. Tag `latest` vẫn trỏ tới release khỏe gần nhất nếu deployment
+mới lỗi. Các deployment được xếp hàng bằng concurrency group
+`vlegal-production`; CI của pull request không chiếm hàng đợi production và một
+deployment đang chạy sẽ không bị commit mới hủy giữa chừng.
 
 ## 4. Chạy reindex thủ công
 

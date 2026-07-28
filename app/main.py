@@ -5,11 +5,12 @@ import logging
 import re
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.api import router as api_router
 from app.core.config import get_settings
@@ -156,6 +157,54 @@ from app.auth import router as auth_router
 app.include_router(api_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix="/api")
 
-@app.get("/", include_in_schema=False)
-async def root() -> dict[str, str]:
+frontend_dist = (
+    Path(settings.frontend_dist_dir).resolve()
+    if settings.frontend_dist_dir.strip()
+    else None
+)
+
+
+def _frontend_response(relative_path: str = "") -> FileResponse | None:
+    if frontend_dist is None:
+        return None
+
+    index_path = frontend_dist / "index.html"
+    requested_path = (frontend_dist / relative_path).resolve()
+    try:
+        requested_path.relative_to(frontend_dist)
+    except ValueError:
+        return None
+
+    if requested_path.is_file():
+        cache_control = (
+            "public, max-age=31536000, immutable"
+            if relative_path.startswith("assets/")
+            else "no-cache"
+        )
+        return FileResponse(requested_path, headers={"Cache-Control": cache_control})
+    if index_path.is_file():
+        return FileResponse(index_path, headers={"Cache-Control": "no-cache"})
+    return None
+
+
+@app.api_route(
+    "/",
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+    response_model=None,
+)
+async def root() -> Response | dict[str, str]:
+    frontend_response = _frontend_response()
+    if frontend_response is not None:
+        return frontend_response
     return {"service": "vlegal-api", "status": "ok"}
+
+
+@app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def frontend_spa(full_path: str) -> Response:
+    if full_path == "api" or full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    frontend_response = _frontend_response(full_path)
+    if frontend_response is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return frontend_response

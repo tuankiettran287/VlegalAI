@@ -1,16 +1,10 @@
 # Deploy VLegalAI lên Google Cloud
 
-> Deploy thủ công riêng `vlegal-api` từ Google Cloud Shell bằng Buildpacks và
-> Secret Manager: xem
-> [`scripts/gcp/CLOUD_SHELL_BUILDPACKS.md`](scripts/gcp/CLOUD_SHELL_BUILDPACKS.md).
-> Luồng này giữ frontend Nginx hiện tại và không yêu cầu Dockerfile backend.
-
 Kiến trúc triển khai không cần GPU hoặc volume chứa model embedding:
 
 | Image | Tài nguyên | Vai trò |
 | --- | --- | --- |
-| `vlegal-backend` | Cloud Run Service, Worker Pool và Job | FastAPI, Celery worker/beat, migration, reindex và Vertex AI embeddings |
-| `vlegal-frontend` | Cloud Run Service | React SPA và reverse proxy `/api` |
+| `vlegal-app` | Cloud Run Service, Worker Pool và Job | React SPA, FastAPI, Celery worker/beat, migration, reindex và Vertex AI embeddings |
 
 PostgreSQL/pgvector nên chạy trên Cloud SQL; Neo4j chạy trên Aura, Compute
 Engine hoặc GKE. Embedding dùng `gemini-embedding-001` qua Vertex AI với service
@@ -23,14 +17,12 @@ cd F:\VlegalAI
 
 $PROJECT_ID = "your-gcp-project-id"
 $REGION = "asia-southeast1"
-$EMBEDDING_LOCATION = "asia-southeast1"
+$EMBEDDING_LOCATION = "global"
 $AR_REPO = "vlegal"
 $TAG = git rev-parse --short HEAD
 $RUN_SA_NAME = "vlegal-run"
 $RUN_SA = "$RUN_SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
 $CORPUS_BUCKET = "$PROJECT_ID-vlegal-corpus"
-$NETWORK = "default"
-$SUBNET = "default"
 $NEO4J_URI = "neo4j+s://your-neo4j-host:7687"
 
 gcloud auth login
@@ -109,8 +101,8 @@ Nếu secret đã tồn tại, thêm version mới bằng `gcloud secrets versio
   -Push
 ```
 
-Hai Dockerfile runtime nằm trong `docker/`: backend và frontend. Các tiến trình
-backend dùng chung một image và được Cloud Run cấu hình command/args riêng.
+`docker/app.Dockerfile` tạo một image bất biến cho web, jobs và worker pools.
+Cloud Run cấu hình command/args riêng cho migration, reindex và Celery.
 
 ## 5. Deploy và reindex
 
@@ -123,19 +115,18 @@ backend dùng chung một image và được Cloud Run cấu hình command/args 
   -Tag $TAG `
   -RunServiceAccount $RUN_SA `
   -CorpusBucket $CORPUS_BUCKET `
-  -Network $NETWORK `
-  -Subnet $SUBNET `
   -Neo4jUri $NEO4J_URI `
   -Component all `
-  -ExecuteJobs
+  -ExecuteMigrate
 ```
 
-Script thực hiện theo thứ tự: migration, reindex, API, frontend, worker và beat.
+Script thực hiện theo thứ tự: migration, cập nhật reindex job, web service hợp
+nhất, worker và beat. Thêm `-ExecuteReindex` khi cần chạy lại toàn bộ reindex.
 Reindex tạo vector bằng Vertex AI với:
 
 ```dotenv
 EMBEDDING_MODEL=gemini-embedding-001
-EMBEDDING_LOCATION=asia-southeast1
+EMBEDDING_LOCATION=global
 EMBEDDING_MAX_CONCURRENCY=8
 POSTGRES_VECTOR_SIZE=1024
 ```
@@ -147,10 +138,10 @@ Semantic cache dùng `SEMANTIC_SIMILARITY` vì nó so sánh query với query.
 ## 6. OAuth và kiểm tra
 
 Trong Google Cloud Console, tạo OAuth client loại **Web application**. Thêm URL
-frontend Cloud Run vào Authorized JavaScript origins và:
+service Cloud Run vào Authorized JavaScript origins và:
 
 ```text
-https://<frontend-run-app>/api/auth/google/callback
+https://<service-run-app>/api/auth/google/callback
 ```
 
 vào Authorized redirect URIs.
@@ -158,8 +149,8 @@ vào Authorized redirect URIs.
 Kiểm tra:
 
 ```powershell
-curl.exe https://<frontend-run-app>/api/health/live
-curl.exe https://<frontend-run-app>/api/health/ready
+curl.exe https://<service-run-app>/api/health/live
+curl.exe https://<service-run-app>/api/health/ready
 ```
 
 `/api/health/ready` kiểm tra database, cấu hình Vertex AI/Gemini và dịch vụ kiểm
@@ -178,11 +169,9 @@ Sau mọi thay đổi model embedding hoặc task type, chạy:
   -Tag $TAG `
   -RunServiceAccount $RUN_SA `
   -CorpusBucket $CORPUS_BUCKET `
-  -Network $NETWORK `
-  -Subnet $SUBNET `
   -Neo4jUri $NEO4J_URI `
   -Component reindex `
-  -ExecuteJobs
+  -ExecuteReindex
 ```
 
 Migration `20260727_0012` xoá vector của provider cũ vì hai model embedding không
@@ -191,5 +180,5 @@ truy hồi vector.
 
 ## 8. CI/CD
 
-Để tự động test, build hai image và deploy khi push vào nhánh `master`, xem
+Để tự động test, build image hợp nhất và deploy khi push vào nhánh `master`, xem
 [CI/CD với GitHub Actions và Workload Identity Federation](cicd-gcp.md).

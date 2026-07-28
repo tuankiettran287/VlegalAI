@@ -21,9 +21,7 @@ param(
     [ValidatePattern("^[a-z][a-z0-9-]{4,28}[a-z0-9]$")]
     [string]$RuntimeServiceAccountName = "vlegal-run",
     [string]$ArtifactRepository = "vlegal",
-    [string]$CorpusBucket = "",
-    [string]$Network = "default",
-    [string]$Subnet = "default"
+    [string]$CorpusBucket = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,8 +38,43 @@ function Invoke-Gcloud {
 function Test-GcloudResource {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
-    & gcloud @Arguments *> $null
-    return $LASTEXITCODE -eq 0
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows gcloud is a PowerShell wrapper around python.exe. A normal
+        # NOT_FOUND probe is written to PowerShell's error stream and would
+        # become terminating while the script uses ErrorActionPreference=Stop.
+        $ErrorActionPreference = "Continue"
+        & gcloud @Arguments *> $null
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    return $exitCode -eq 0
+}
+
+function Get-GcloudValue {
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$CommandArguments,
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $commandOutput = @(& gcloud @CommandArguments)
+    $exitCode = $LASTEXITCODE
+    $value = ($commandOutput -join [Environment]::NewLine).Trim()
+
+    if ($exitCode -ne 0 -or [string]::IsNullOrWhiteSpace($value)) {
+        $command = "gcloud $($CommandArguments -join ' ')"
+        throw "Cannot resolve ${Description}. Command '$command' exited with code $exitCode."
+    }
+
+    return $value
 }
 
 if (-not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
@@ -52,17 +85,8 @@ if ([string]::IsNullOrWhiteSpace($CorpusBucket)) {
     $CorpusBucket = "$ProjectId-vlegal-corpus"
 }
 
-$projectNumber = (
-    & gcloud projects describe $ProjectId --format="value(projectNumber)"
-).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($projectNumber)) {
-    throw "Cannot resolve project number for $ProjectId."
-}
-
 $deployServiceAccount = "$DeployServiceAccountName@$ProjectId.iam.gserviceaccount.com"
 $runtimeServiceAccount = "$RuntimeServiceAccountName@$ProjectId.iam.gserviceaccount.com"
-$cloudRunServiceAgent = "service-$projectNumber@serverless-robot-prod.iam.gserviceaccount.com"
-
 Invoke-Gcloud @(
     "services", "enable",
     "run.googleapis.com",
@@ -70,26 +94,12 @@ Invoke-Gcloud @(
     "secretmanager.googleapis.com",
     "storage.googleapis.com",
     "aiplatform.googleapis.com",
-    "compute.googleapis.com",
+    "sqladmin.googleapis.com",
     "iamcredentials.googleapis.com",
     "sts.googleapis.com",
     "--project=$ProjectId",
     "--quiet"
 )
-
-if (-not (Test-GcloudResource @(
-    "compute", "networks", "describe", $Network,
-    "--project=$ProjectId"
-))) {
-    throw "VPC network '$Network' does not exist in project $ProjectId."
-}
-if (-not (Test-GcloudResource @(
-    "compute", "networks", "subnets", "describe", $Subnet,
-    "--project=$ProjectId",
-    "--region=$Region"
-))) {
-    throw "Subnet '$Subnet' does not exist in region $Region."
-}
 
 if (-not (Test-GcloudResource @(
     "iam", "service-accounts", "describe", $deployServiceAccount,
@@ -202,9 +212,9 @@ $projectBindings = @(
     @($deployServiceAccount, "roles/run.admin"),
     @($deployServiceAccount, "roles/serviceusage.serviceUsageConsumer"),
     @($runtimeServiceAccount, "roles/aiplatform.user"),
+    @($runtimeServiceAccount, "roles/cloudsql.client"),
     @($runtimeServiceAccount, "roles/secretmanager.secretAccessor"),
-    @($runtimeServiceAccount, "roles/serviceusage.serviceUsageConsumer"),
-    @($cloudRunServiceAgent, "roles/compute.networkUser")
+    @($runtimeServiceAccount, "roles/serviceusage.serviceUsageConsumer")
 )
 foreach ($binding in $projectBindings) {
     Invoke-Gcloud @(
@@ -231,15 +241,14 @@ Invoke-Gcloud @(
     "--quiet"
 )
 
-$workloadIdentityPoolName = (
-    & gcloud iam workload-identity-pools describe $PoolId `
-        --project=$ProjectId `
-        --location=global `
-        --format="value(name)"
-).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($workloadIdentityPoolName)) {
-    throw "Cannot resolve the Workload Identity Pool resource name."
-}
+$workloadIdentityPoolName = Get-GcloudValue `
+    -CommandArguments @(
+        "iam", "workload-identity-pools", "describe", $PoolId,
+        "--project=$ProjectId",
+        "--location=global",
+        "--format=value(name)"
+    ) `
+    -Description "Workload Identity Pool resource name for '$PoolId'"
 
 $githubPrincipal = "principalSet://iam.googleapis.com/$workloadIdentityPoolName/attribute.repository_id/$GitHubRepositoryId"
 Invoke-Gcloud @(
@@ -250,16 +259,15 @@ Invoke-Gcloud @(
     "--quiet"
 )
 
-$providerName = (
-    & gcloud iam workload-identity-pools providers describe $ProviderId `
-        --project=$ProjectId `
-        --location=global `
-        --workload-identity-pool=$PoolId `
-        --format="value(name)"
-).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($providerName)) {
-    throw "Cannot resolve the Workload Identity Provider resource name."
-}
+$providerName = Get-GcloudValue `
+    -CommandArguments @(
+        "iam", "workload-identity-pools", "providers", "describe", $ProviderId,
+        "--project=$ProjectId",
+        "--location=global",
+        "--workload-identity-pool=$PoolId",
+        "--format=value(name)"
+    ) `
+    -Description "Workload Identity Provider resource name for '$ProviderId'"
 
 Write-Host ""
 Write-Host "GCP bootstrap completed. Configure the GitHub environment 'production' with:"
@@ -267,14 +275,15 @@ Write-Host ""
 Write-Host "Variables:"
 Write-Host "  GCP_PROJECT_ID=$ProjectId"
 Write-Host "  GCP_REGION=$Region"
-Write-Host "  GCP_EMBEDDING_LOCATION=$Region"
+Write-Host "  GCP_EMBEDDING_LOCATION=global"
+Write-Host "  EMBEDDING_VERTEX_REQUESTS_PER_MINUTE=4.5"
+Write-Host "  EMBEDDING_VERTEX_LOCATIONS can be left empty to use the workflow default regional pool"
 Write-Host "  GCP_REPOSITORY=$ArtifactRepository"
+Write-Host "  GCP_RUN_SERVICE=vlegal-unified"
 Write-Host "  GCP_RUN_SERVICE_ACCOUNT=$runtimeServiceAccount"
 Write-Host "  GCP_DEPLOY_SERVICE_ACCOUNT=$deployServiceAccount"
 Write-Host "  GCP_WORKLOAD_IDENTITY_PROVIDER=$providerName"
 Write-Host "  GCP_CORPUS_BUCKET=$CorpusBucket"
-Write-Host "  GCP_NETWORK=$Network"
-Write-Host "  GCP_SUBNET=$Subnet"
 Write-Host ""
 Write-Host "Secret:"
 Write-Host "  NEO4J_URI=<your Neo4j URI>"

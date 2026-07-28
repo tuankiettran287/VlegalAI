@@ -1,25 +1,18 @@
 # Build/tag manifest for Google Artifact Registry.
-# Runtime services, worker pools and jobs all reuse these two application images.
+# The web service, worker pools and jobs all reuse one immutable commit image.
 name: vlegal-gcp
 
 x-build: &build
   pull_policy: build
 
 services:
-  backend:
+  app:
     <<: *build
-    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-backend:${IMAGE_TAG:-latest}"
+    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-app:${IMAGE_TAG:-latest}"
     build:
       context: .
-      dockerfile: docker/backend.Dockerfile
-      platforms:
-        - linux/amd64
-
-  frontend:
-    <<: *build
-    image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-frontend:${IMAGE_TAG:-latest}"
-    build:
-      context: .
-      dockerfile: docker/frontend.Dockerfile
+      dockerfile: docker/app.Dockerfile
+      args:
+        VCS_REF: "${IMAGE_TAG:-latest}"
       platforms:
         - linux/amd64

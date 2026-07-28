@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     public_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:5173"
+    frontend_dist_dir: str = ""
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["http://localhost:5173"])
     log_level: str = "INFO"
 
@@ -96,12 +97,18 @@ class Settings(BaseSettings):
     # Vertex while bulk embedding uses the API-key-backed batch endpoint.
     embedding_provider: Literal["vertex", "gemini-api"] = "vertex"
     embedding_model: str = "gemini-embedding-001"
-    embedding_location: str = "asia-southeast1"
+    embedding_location: str = "global"
     embedding_max_concurrency: int = Field(default=8, ge=1, le=64)
     embedding_batch_size: int = Field(default=20, ge=1, le=100)
     embedding_timeout_seconds: int = Field(default=60, ge=5, le=600)
     embedding_max_retries: int = Field(default=3, ge=1, le=10)
     embedding_auto_truncate: bool = True
+    embedding_vertex_locations: str = ""
+    embedding_vertex_requests_per_minute: float = Field(
+        default=0,
+        ge=0,
+        le=10_000,
+    )
 
     tavily_api_key: str = ""
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"

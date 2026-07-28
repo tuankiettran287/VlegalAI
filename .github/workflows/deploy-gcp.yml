@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - master
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
     inputs:
       run_reindex:
@@ -12,18 +15,14 @@ on:
         default: false
         type: boolean
 
-concurrency:
-  group: vlegal-production
-  cancel-in-progress: false
-
 permissions:
   contents: read
 
 jobs:
   quality:
-    name: Test backend and build frontend
+    name: Validate, test and build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repository
@@ -40,6 +39,60 @@ jobs:
 
       - name: Install backend dependencies
         run: python -m pip install --requirement requirements-dev.txt
+
+      - name: Validate Python dependencies and source
+        run: |
+          python -m pip check
+          python -m compileall -q app scripts migrations
+
+      - name: Validate Alembic migration graph
+        shell: bash
+        run: |
+          migration_heads="$(python -m alembic heads)"
+          printf '%s\n' "${migration_heads}"
+          head_count="$(grep -c '(head)' <<< "${migration_heads}" || true)"
+          if [[ "${head_count}" -ne 1 ]]; then
+            echo "::error::Expected exactly one Alembic head, found ${head_count}."
+            exit 1
+          fi
+
+      - name: Validate Bash scripts
+        shell: bash
+        run: |
+          while IFS= read -r -d '' script; do
+            bash -n "${script}"
+          done < <(find scripts -type f -name '*.sh' -print0)
+
+      - name: Validate PowerShell scripts
+        shell: pwsh
+        run: |
+          $parseErrors = @()
+          Get-ChildItem -LiteralPath scripts -Recurse -Filter "*.ps1" |
+            ForEach-Object {
+              $tokens = $null
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName,
+                [ref]$tokens,
+                [ref]$errors
+              ) | Out-Null
+              $parseErrors += $errors
+            }
+
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | ForEach-Object { Write-Error $_.Message }
+            throw "PowerShell syntax validation failed."
+          }
+
+      - name: Validate Docker Compose manifests
+        env:
+          DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
+          NEO4J_PASSWORD: ci-only-password
+          GCP_PROJECT_ID: ci-project
+          IMAGE_TAG: ci
+        run: |
+          docker compose --file docker-compose.yml config --quiet
+          docker compose --file compose.gcp.yml config --quiet
 
       - name: Run backend tests
         run: python -m pytest -q
@@ -59,46 +112,163 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Set up Docker Buildx for pull request
+        if: github.event_name == 'pull_request'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build unified application container for pull request
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/app.Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: vlegal-app:ci
+          cache-from: type=gha,scope=vlegal-app
+
   deploy:
     name: Build images and deploy production
+    if: github.event_name != 'pull_request'
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: production
+    concurrency:
+      group: vlegal-production
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
 
     env:
-      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      PROJECT_ID: ${{ vars.PROJECT_ID || vars.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION || 'asia-southeast1' }}
-      GCP_EMBEDDING_LOCATION: ${{ vars.GCP_EMBEDDING_LOCATION || 'asia-southeast1' }}
+      EMBEDDING_LOCATION: ${{ vars.EMBEDDING_LOCATION || vars.GCP_EMBEDDING_LOCATION || 'global' }}
+      EMBEDDING_VERTEX_LOCATIONS: ${{ vars.EMBEDDING_VERTEX_LOCATIONS }}
+      EMBEDDING_VERTEX_REQUESTS_PER_MINUTE: ${{ vars.EMBEDDING_VERTEX_REQUESTS_PER_MINUTE || '4.5' }}
       GCP_REPOSITORY: ${{ vars.GCP_REPOSITORY || 'vlegal' }}
+      GCP_RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE || 'vlegal-unified' }}
       GCP_RUN_SERVICE_ACCOUNT: ${{ vars.GCP_RUN_SERVICE_ACCOUNT }}
       GCP_CORPUS_BUCKET: ${{ vars.GCP_CORPUS_BUCKET }}
-      GCP_NETWORK: ${{ vars.GCP_NETWORK || 'default' }}
-      GCP_SUBNET: ${{ vars.GCP_SUBNET || 'default' }}
+      GCP_CLOUD_SQL_INSTANCE: ${{ vars.GCP_CLOUD_SQL_INSTANCE }}
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS_JSON || secrets.GEMINI_CREDENTIALS_JSON || secrets.ENV_JSON }}
       NEO4J_URI: ${{ secrets.NEO4J_URI }}
+      NEO4J_USER: ${{ vars.NEO4J_USER }}
+      NEO4J_DATABASE: ${{ vars.NEO4J_DATABASE }}
       IMAGE_TAG: ${{ github.sha }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Resolve GCP credentials and deployment defaults
+        shell: pwsh
+        run: |
+          $credentialProjectId = ""
+          if (-not [string]::IsNullOrWhiteSpace($env:GCP_CREDENTIALS_JSON)) {
+            try {
+              $credential = $env:GCP_CREDENTIALS_JSON | ConvertFrom-Json
+            }
+            catch {
+              throw "The GCP credential environment secret is not valid JSON."
+            }
+
+            if ($credential.type -ne "service_account") {
+              throw "The GCP credential environment secret must contain a service-account JSON key."
+            }
+            $credentialProjectId = [string]$credential.project_id
+          }
+
+          $projectId = $env:PROJECT_ID
+          if ([string]::IsNullOrWhiteSpace($projectId)) {
+            $projectId = $credentialProjectId
+          }
+          if ([string]::IsNullOrWhiteSpace($projectId)) {
+            throw "Missing PROJECT_ID and the credential JSON does not contain project_id."
+          }
+
+          $runServiceAccount = $env:GCP_RUN_SERVICE_ACCOUNT
+          if ([string]::IsNullOrWhiteSpace($runServiceAccount)) {
+            $runServiceAccount = "vlegal-run@$projectId.iam.gserviceaccount.com"
+          }
+
+          $corpusBucket = $env:GCP_CORPUS_BUCKET
+          if ([string]::IsNullOrWhiteSpace($corpusBucket)) {
+            $corpusBucket = "$projectId-vlegal-corpus"
+          }
+
+          $cloudSqlInstance = $env:GCP_CLOUD_SQL_INSTANCE
+          if ([string]::IsNullOrWhiteSpace($cloudSqlInstance)) {
+            $cloudSqlInstance = "${projectId}:asia-east2:${projectId}-instance"
+          }
+
+          $embeddingVertexLocations = $env:EMBEDDING_VERTEX_LOCATIONS
+          if ([string]::IsNullOrWhiteSpace($embeddingVertexLocations)) {
+            $embeddingVertexLocations = @(
+              "asia-east1", "asia-east2", "asia-northeast1", "asia-northeast3",
+              "asia-south1", "asia-southeast1", "australia-southeast1",
+              "europe-central2", "europe-north1", "europe-southwest1",
+              "europe-west1", "europe-west2", "europe-west3", "europe-west4",
+              "europe-west6", "europe-west8", "europe-west9", "me-central1",
+              "me-central2", "me-west1", "northamerica-northeast1",
+              "southamerica-east1", "us-central1", "us-east1", "us-east4",
+              "us-east5", "us-south1", "us-west1", "us-west4"
+            ) -join "|"
+          }
+
+          $neo4jUser = $env:NEO4J_USER
+          $neo4jDatabase = $env:NEO4J_DATABASE
+          if (
+            [string]::IsNullOrWhiteSpace($neo4jUser) -or
+            [string]::IsNullOrWhiteSpace($neo4jDatabase)
+          ) {
+            try {
+              $neo4jInstanceId = ([uri]$env:NEO4J_URI).Host.Split(".")[0]
+            }
+            catch {
+              throw "NEO4J_URI is invalid and Neo4j user/database defaults cannot be derived."
+            }
+            if ([string]::IsNullOrWhiteSpace($neo4jInstanceId)) {
+              throw "Set NEO4J_USER and NEO4J_DATABASE as production environment variables."
+            }
+            if ([string]::IsNullOrWhiteSpace($neo4jUser)) {
+              $neo4jUser = $neo4jInstanceId
+            }
+            if ([string]::IsNullOrWhiteSpace($neo4jDatabase)) {
+              $neo4jDatabase = $neo4jInstanceId
+            }
+          }
+
+          @(
+            "PROJECT_ID=$projectId"
+            "GCP_RUN_SERVICE_ACCOUNT=$runServiceAccount"
+            "GCP_CORPUS_BUCKET=$corpusBucket"
+            "GCP_CLOUD_SQL_INSTANCE=$cloudSqlInstance"
+            "EMBEDDING_VERTEX_LOCATIONS=$embeddingVertexLocations"
+            "NEO4J_USER=$neo4jUser"
+            "NEO4J_DATABASE=$neo4jDatabase"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Validate deployment configuration
         shell: bash
         run: |
           required=(
-            GCP_PROJECT_ID
+            PROJECT_ID
             GCP_REGION
-            GCP_EMBEDDING_LOCATION
+            EMBEDDING_LOCATION
+            EMBEDDING_VERTEX_LOCATIONS
+            EMBEDDING_VERTEX_REQUESTS_PER_MINUTE
             GCP_REPOSITORY
+            GCP_RUN_SERVICE
             GCP_RUN_SERVICE_ACCOUNT
-            GCP_WORKLOAD_IDENTITY_PROVIDER
-            GCP_DEPLOY_SERVICE_ACCOUNT
+            GCP_CORPUS_BUCKET
+            GCP_CLOUD_SQL_INSTANCE
             NEO4J_URI
+            NEO4J_USER
+            NEO4J_DATABASE
           )
           for key in "${required[@]}"; do
             if [[ -z "${!key}" ]]; then
@@ -107,18 +277,32 @@ jobs:
             fi
           done
 
-      - name: Authenticate to Google Cloud
-        id: auth
+          if [[ -z "${GCP_CREDENTIALS_JSON}" ]] &&
+             { [[ -z "${GCP_WORKLOAD_IDENTITY_PROVIDER}" ]] ||
+               [[ -z "${GCP_DEPLOY_SERVICE_ACCOUNT}" ]]; }; then
+            echo "::error::Configure GCP_CREDENTIALS_JSON (or GEMINI_CREDENTIALS_JSON/ENV_JSON), or configure both Workload Identity variables."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud with credential JSON
+        if: env.GCP_WORKLOAD_IDENTITY_PROVIDER == '' || env.GCP_DEPLOY_SERVICE_ACCOUNT == ''
         uses: google-github-actions/auth@v3
         with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
+          project_id: ${{ env.PROJECT_ID }}
+          credentials_json: ${{ env.GCP_CREDENTIALS_JSON }}
+
+      - name: Authenticate to Google Cloud with Workload Identity
+        if: env.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && env.GCP_DEPLOY_SERVICE_ACCOUNT != ''
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
           workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
 
       - name: Set up Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v3
         with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
+          project_id: ${{ env.PROJECT_ID }}
           version: ">= 576.0.0"
 
       - name: Configure Artifact Registry authentication
@@ -128,46 +312,36 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and push backend image
+      - name: Build and push immutable application image
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: docker/backend.Dockerfile
+          file: docker/app.Dockerfile
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPOSITORY }}/vlegal-backend:${{ env.IMAGE_TAG }}
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPOSITORY }}/vlegal-backend:latest
-          cache-from: type=gha,scope=vlegal-backend
-          cache-to: type=gha,mode=max,scope=vlegal-backend
-
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docker/frontend.Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPOSITORY }}/vlegal-frontend:${{ env.IMAGE_TAG }}
-            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_REPOSITORY }}/vlegal-frontend:latest
-          cache-from: type=gha,scope=vlegal-frontend
-          cache-to: type=gha,mode=max,scope=vlegal-frontend
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GCP_REPOSITORY }}/vlegal-app:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=vlegal-app
+          cache-to: type=gha,mode=max,scope=vlegal-app
 
       - name: Deploy Cloud Run services, jobs and worker pools
         shell: pwsh
         run: |
           $parameters = @{
-            ProjectId = $env:GCP_PROJECT_ID
+            ProjectId = $env:PROJECT_ID
             Region = $env:GCP_REGION
-            EmbeddingLocation = $env:GCP_EMBEDDING_LOCATION
+            EmbeddingLocation = $env:EMBEDDING_LOCATION
+            EmbeddingVertexLocations = $env:EMBEDDING_VERTEX_LOCATIONS
+            EmbeddingVertexRequestsPerMinute = [double]$env:EMBEDDING_VERTEX_REQUESTS_PER_MINUTE
             Repository = $env:GCP_REPOSITORY
             Tag = $env:IMAGE_TAG
+            ServiceName = $env:GCP_RUN_SERVICE
             RunServiceAccount = $env:GCP_RUN_SERVICE_ACCOUNT
             CorpusBucket = $env:GCP_CORPUS_BUCKET
-            Network = $env:GCP_NETWORK
-            Subnet = $env:GCP_SUBNET
+            CloudSqlInstance = $env:GCP_CLOUD_SQL_INSTANCE
             Neo4jUri = $env:NEO4J_URI
+            Neo4jUser = $env:NEO4J_USER
+            Neo4jDatabase = $env:NEO4J_DATABASE
             Component = "all"
             ExecuteMigrate = $true
           }
@@ -184,26 +358,56 @@ jobs:
       - name: Verify production health
         shell: bash
         run: |
-          frontend_url="$(
-            gcloud run services describe vlegal-frontend \
-              --project="${GCP_PROJECT_ID}" \
+          service_url="$(
+            gcloud run services describe "${GCP_RUN_SERVICE}" \
+              --project="${PROJECT_ID}" \
               --region="${GCP_REGION}" \
               --format='value(status.url)'
           )"
 
-          for attempt in {1..12}; do
-            if curl --fail --silent --show-error \
-              --max-time 15 \
-              "${frontend_url}/api/health/live"; then
-              echo
-              echo "Production is healthy: ${frontend_url}"
-              echo "### Deployment completed" >> "${GITHUB_STEP_SUMMARY}"
-              echo "- Commit: \`${IMAGE_TAG}\`" >> "${GITHUB_STEP_SUMMARY}"
-              echo "- Frontend: ${frontend_url}" >> "${GITHUB_STEP_SUMMARY}"
-              exit 0
-            fi
-            sleep 10
-          done
+          check_health() {
+            local path="$1"
+            local label="$2"
 
-          echo "::error::Production health check failed: ${frontend_url}/api/health/live"
-          exit 1
+            for _ in {1..12}; do
+              if curl --fail --silent --show-error \
+                --max-time 30 \
+                "${service_url}${path}"; then
+                echo
+                echo "${label} check passed: ${service_url}${path}"
+                return 0
+              fi
+              sleep 10
+            done
+
+            echo "::error::${label} check failed: ${service_url}${path}"
+            return 1
+          }
+
+          check_health "/api/health/live" "Liveness"
+          check_health "/api/health/ready" "Readiness"
+
+      - name: Promote verified images to latest
+        shell: bash
+        run: |
+          image_root="${GCP_REGION}-docker.pkg.dev/${PROJECT_ID}/${GCP_REPOSITORY}"
+
+          gcloud artifacts docker tags add \
+            "${image_root}/vlegal-app:${IMAGE_TAG}" \
+            "${image_root}/vlegal-app:latest" \
+            --quiet
+
+          service_url="$(
+            gcloud run services describe "${GCP_RUN_SERVICE}" \
+              --project="${PROJECT_ID}" \
+              --region="${GCP_REGION}" \
+              --format='value(status.url)'
+          )"
+
+          {
+            echo "### Deployment completed"
+            echo "- Commit: \`${IMAGE_TAG}\`"
+            echo "- Service: ${service_url}"
+            echo "- Health: live and ready"
+            echo "- Promoted tag: vlegal-app/latest"
+          } >> "${GITHUB_STEP_SUMMARY}"

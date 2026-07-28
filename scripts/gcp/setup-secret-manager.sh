@@ -7,7 +7,7 @@ umask 077
 
 PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-}"
 REGION="${GCP_REGION:-asia-southeast1}"
-SERVICE="${GCP_API_SERVICE:-vlegal-api}"
+SERVICE="${GCP_RUN_SERVICE:-vlegal-unified}"
 RUNTIME_SERVICE_ACCOUNT="${GCP_RUN_SERVICE_ACCOUNT:-}"
 
 usage() {
@@ -88,10 +88,7 @@ if [[ -z "$RUNTIME_SERVICE_ACCOUNT" ]]; then
   )"
 fi
 if [[ -z "$RUNTIME_SERVICE_ACCOUNT" ]]; then
-  project_number="$(
-    gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)'
-  )"
-  RUNTIME_SERVICE_ACCOUNT="${project_number}-compute@developer.gserviceaccount.com"
+  RUNTIME_SERVICE_ACCOUNT="vlegal-run@${PROJECT_ID}.iam.gserviceaccount.com"
 fi
 
 echo "Project: $PROJECT_ID"
@@ -105,6 +102,7 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   secretmanager.googleapis.com \
   aiplatform.googleapis.com \
+  sqladmin.googleapis.com \
   --project="$PROJECT_ID" \
   --quiet
 

@@ -364,6 +364,17 @@ class LegalIndexer:
             embedding_max_retries=self.settings.embedding_max_retries,
             embedding_auto_truncate=self.settings.embedding_auto_truncate,
             embedding_data_policy=self.settings.gemini_data_policy,
+            embedding_vertex_locations=tuple(
+                location
+                for location in re.split(
+                    r"[\s,;|]+",
+                    self.settings.embedding_vertex_locations,
+                )
+                if location
+            ),
+            embedding_vertex_requests_per_minute=(
+                self.settings.embedding_vertex_requests_per_minute
+            ),
         )
 
     async def index_candidate(self, db: AsyncSession, candidate: LegalCandidate) -> LegalDocument:

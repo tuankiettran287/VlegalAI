@@ -30,7 +30,7 @@ GEMINI_API_PROVIDER_REVISION = "gemini-api-v1"
 VERTEX_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 VERTEX_API_SERVICE = "aiplatform.googleapis.com"
 GEMINI_API_SERVICE = "generativelanguage.googleapis.com"
-RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {408, 417, 429, 500, 502, 503, 504}
 VERTEX_LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 EMBEDDING_PROVIDERS = {"vertex", "gemini-api"}
 
@@ -46,12 +46,35 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def parse_vertex_locations(value: Any) -> tuple[str, ...]:
+    """Parse an ordered, de-duplicated Vertex location pool."""
+
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        candidates = re.split(r"[\s,;|]+", value)
+    else:
+        try:
+            candidates = list(value)
+        except TypeError:
+            candidates = [value]
+
+    locations: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        location = str(candidate or "").strip()
+        if location and location not in seen:
+            locations.append(location)
+            seen.add(location)
+    return tuple(locations)
+
+
 @dataclass(frozen=True, slots=True)
 class EmbeddingConfig:
     provider: str = "vertex"
     model: str = DEFAULT_EMBEDDING_MODEL
     project_id: str = ""
-    location: str = "asia-southeast1"
+    location: str = "global"
     credentials_path: str = str(PROJECT_ROOT / "env.json")
     use_adc: bool = False
     api_key: str = field(default="", repr=False)
@@ -62,6 +85,8 @@ class EmbeddingConfig:
     max_retries: int = 3
     auto_truncate: bool = True
     data_policy: str = "redact"
+    vertex_locations: tuple[str, ...] = ()
+    vertex_requests_per_minute: float = 0.0
 
     @classmethod
     def from_env(cls) -> "EmbeddingConfig":
@@ -71,7 +96,7 @@ class EmbeddingConfig:
             project_id=os.getenv("GEMINI_PROJECT_ID", ""),
             location=os.getenv(
                 "EMBEDDING_LOCATION",
-                "asia-southeast1",
+                "global",
             ),
             credentials_path=os.getenv(
                 "GEMINI_CREDENTIALS_PATH",
@@ -90,6 +115,12 @@ class EmbeddingConfig:
             data_policy=os.getenv("GEMINI_DATA_POLICY", "redact")
             .strip()
             .lower(),
+            vertex_locations=parse_vertex_locations(
+                os.getenv("EMBEDDING_VERTEX_LOCATIONS", "")
+            ),
+            vertex_requests_per_minute=float(
+                os.getenv("EMBEDDING_VERTEX_REQUESTS_PER_MINUTE", "0")
+            ),
         )
 
     @property
@@ -117,6 +148,7 @@ class EmbeddingConfig:
     @property
     def ready(self) -> bool:
         provider = self.normalized_provider
+        vertex_locations = self.vertex_locations or (self.location.strip(),)
         credentials_configured = (
             bool(self.api_key.strip())
             if provider == "gemini-api"
@@ -131,7 +163,13 @@ class EmbeddingConfig:
             and self.model.strip()
             and (
                 provider == "gemini-api"
-                or VERTEX_LOCATION_RE.fullmatch(self.location.strip())
+                or (
+                    all(
+                        VERTEX_LOCATION_RE.fullmatch(location)
+                        for location in vertex_locations
+                    )
+                    and self.vertex_requests_per_minute >= 0
+                )
             )
             and 128 <= self.dimensions <= 3072
             and self.max_concurrency >= 1
@@ -161,6 +199,12 @@ def embedding_config_from_settings(settings: Any) -> EmbeddingConfig:
         max_retries=settings.embedding_max_retries,
         auto_truncate=settings.embedding_auto_truncate,
         data_policy=settings.gemini_data_policy,
+        vertex_locations=parse_vertex_locations(
+            settings.embedding_vertex_locations
+        ),
+        vertex_requests_per_minute=(
+            settings.embedding_vertex_requests_per_minute
+        ),
     )
 
 
@@ -178,6 +222,14 @@ class VertexAIEmbeddingService:
         self._project_id = ""
         self._credentials_lock = threading.Lock()
         self._readiness_lock = threading.Lock()
+        self._location_lock = threading.Lock()
+        self._location_cursor = 0
+        self._location_next_ready = {
+            location: 0.0
+            for location in (
+                config.vertex_locations or (config.location.strip(),)
+            )
+        }
         self._vertex_ready = False
         self._owns_client = client is None
         self._client = client or httpx.Client(
@@ -196,6 +248,20 @@ class VertexAIEmbeddingService:
                 "EMBEDDING_PROVIDER must be 'vertex' or 'gemini-api'."
             )
         return provider
+
+    @property
+    def _vertex_locations(self) -> tuple[str, ...]:
+        locations = self.config.vertex_locations or (
+            self.config.location.strip(),
+        )
+        if not locations or not all(
+            VERTEX_LOCATION_RE.fullmatch(location)
+            for location in locations
+        ):
+            raise EmbeddingModelError(
+                "Vertex AI embedding model and valid locations must be configured."
+            )
+        return locations
 
     def _load_credentials(self) -> tuple[Credentials, str]:
         detected_project_id = ""
@@ -270,13 +336,11 @@ class VertexAIEmbeddingService:
                 )
             return credentials.token
 
-    @property
-    def _predict_url(self) -> str:
+    def _predict_url_for_location(self, location: str) -> str:
         if self._provider != "vertex":
             raise EmbeddingModelError(
                 "The Vertex AI prediction endpoint requires EMBEDDING_PROVIDER=vertex."
             )
-        location = self.config.location.strip()
         model = self.config.model.strip()
         if not VERTEX_LOCATION_RE.fullmatch(location) or not model:
             raise EmbeddingModelError(
@@ -294,6 +358,36 @@ class VertexAIEmbeddingService:
             f"locations/{quote(location, safe='')}/publishers/google/models/"
             f"{quote(model, safe='')}:predict"
         )
+
+    @property
+    def _predict_url(self) -> str:
+        return self._predict_url_for_location(self.config.location.strip())
+
+    def _reserve_vertex_location(self) -> str:
+        """Reserve one location while respecting its configured request rate."""
+
+        locations = self._vertex_locations
+        rate = self.config.vertex_requests_per_minute
+        if rate < 0:
+            raise EmbeddingModelError(
+                "EMBEDDING_VERTEX_REQUESTS_PER_MINUTE cannot be negative."
+            )
+        interval = 60.0 / rate if rate > 0 else 0.0
+
+        while True:
+            with self._location_lock:
+                now = time.monotonic()
+                for offset in range(len(locations)):
+                    index = (self._location_cursor + offset) % len(locations)
+                    location = locations[index]
+                    if self._location_next_ready[location] <= now:
+                        self._location_cursor = (index + 1) % len(locations)
+                        self._location_next_ready[location] = now + interval
+                        return location
+
+                next_ready = min(self._location_next_ready.values())
+                delay = max(next_ready - now, 0.001)
+            time.sleep(delay)
 
     def _gemini_api_url(self, action: str) -> str:
         if self._provider != "gemini-api":
@@ -350,15 +444,29 @@ class VertexAIEmbeddingService:
             )
         return [value / magnitude for value in vector]
 
-    def _parse_vertex_vector(self, response: httpx.Response) -> list[float]:
+    def _parse_vertex_vectors(
+        self,
+        response: httpx.Response,
+        *,
+        expected_count: int,
+    ) -> list[list[float]]:
         try:
             payload = response.json()
-            values = payload["predictions"][0]["embeddings"]["values"]
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            predictions = payload["predictions"]
+            if len(predictions) != expected_count:
+                raise ValueError("embedding count mismatch")
+            values_list = [
+                prediction["embeddings"]["values"]
+                for prediction in predictions
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
             raise EmbeddingModelError(
                 "Vertex AI embedding response has an invalid structure."
             ) from exc
-        return self._normalize_vector(values, provider_label="Vertex AI")
+        return [
+            self._normalize_vector(values, provider_label="Vertex AI")
+            for values in values_list
+        ]
 
     def _parse_gemini_vectors(
         self,
@@ -416,7 +524,13 @@ class VertexAIEmbeddingService:
                 pass
         return min(2**attempt, 60) + random.uniform(0, 0.25)
 
-    def _request_vertex_one(self, text: str, task_type: str) -> list[float]:
+    def _request_vertex_batch(
+        self,
+        texts: list[str],
+        task_type: str,
+    ) -> list[list[float]]:
+        if not texts:
+            return []
         last_error: EmbeddingModelError | None = None
         force_refresh = False
         payload = {
@@ -425,6 +539,7 @@ class VertexAIEmbeddingService:
                     "content": self._prepare_text(text),
                     "task_type": task_type,
                 }
+                for text in texts
             ],
             "parameters": {
                 "autoTruncate": self.config.auto_truncate,
@@ -434,10 +549,11 @@ class VertexAIEmbeddingService:
         for attempt in range(self.config.max_retries):
             response: httpx.Response | None = None
             token = self._access_token(force_refresh=force_refresh)
+            location = self._reserve_vertex_location()
             force_refresh = False
             try:
                 response = self._client.post(
-                    self._predict_url,
+                    self._predict_url_for_location(location),
                     headers={
                         "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json; charset=utf-8",
@@ -452,7 +568,10 @@ class VertexAIEmbeddingService:
                     raise last_error from exc
             else:
                 if response.status_code == 200:
-                    return self._parse_vertex_vector(response)
+                    return self._parse_vertex_vectors(
+                        response,
+                        expected_count=len(texts),
+                    )
                 last_error = EmbeddingModelError(
                     f"Vertex AI embedding returned HTTP {response.status_code}: "
                     f"{self._response_detail(response)}"
@@ -472,6 +591,9 @@ class VertexAIEmbeddingService:
         raise last_error or EmbeddingModelError(
             "Vertex AI embedding request failed."
         )
+
+    def _request_vertex_one(self, text: str, task_type: str) -> list[float]:
+        return self._request_vertex_batch([text], task_type)[0]
 
     def _gemini_embed_request(self, text: str, task_type: str) -> dict[str, Any]:
         model = f"models/{self.config.model.strip()}"
@@ -581,17 +703,33 @@ class VertexAIEmbeddingService:
                 for vectors in batch_vectors
                 for vector in vectors
             ]
-        if len(texts) == 1 or self.config.max_concurrency == 1:
-            return [self._request_one(text, task_type) for text in texts]
+        batches = [
+            texts[offset : offset + self.config.batch_size]
+            for offset in range(0, len(texts), self.config.batch_size)
+        ]
+        if len(batches) == 1 or self.config.max_concurrency == 1:
+            return [
+                vector
+                for batch in batches
+                for vector in self._request_vertex_batch(batch, task_type)
+            ]
         with ThreadPoolExecutor(
-            max_workers=min(self.config.max_concurrency, len(texts))
+            max_workers=min(self.config.max_concurrency, len(batches))
         ) as executor:
-            return list(
+            batch_vectors = list(
                 executor.map(
-                    lambda text: self._request_one(text, task_type),
-                    texts,
+                    lambda batch: self._request_vertex_batch(
+                        batch,
+                        task_type,
+                    ),
+                    batches,
                 )
             )
+        return [
+            vector
+            for vectors in batch_vectors
+            for vector in vectors
+        ]
 
     def embed_documents(
         self,

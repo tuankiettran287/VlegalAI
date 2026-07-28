@@ -424,6 +424,17 @@ def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
         embedding_max_retries=settings.embedding_max_retries,
         embedding_auto_truncate=settings.embedding_auto_truncate,
         embedding_data_policy=settings.gemini_data_policy,
+        embedding_vertex_locations=tuple(
+            location
+            for location in re.split(
+                r"[\s,;|]+",
+                settings.embedding_vertex_locations,
+            )
+            if location
+        ),
+        embedding_vertex_requests_per_minute=(
+            settings.embedding_vertex_requests_per_minute
+        ),
         hybrid_vector_weight=settings.hybrid_vector_weight,
         hybrid_bm25_weight=settings.hybrid_bm25_weight,
         hybrid_rrf_k=settings.hybrid_rrf_k,

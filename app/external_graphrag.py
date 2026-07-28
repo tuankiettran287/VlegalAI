@@ -23,6 +23,7 @@ from app.legal_ontology import REVERSIBLE_RELATIONS as LEGAL_REVERSIBLE_RELATION
 from app.services.embeddings import (
     EmbeddingConfig,
     get_embedding_service,
+    parse_vertex_locations,
 )
 
 
@@ -297,7 +298,7 @@ class ExternalGraphRAGConfig:
     embedding_provider: str = "vertex"
     embedding_model: str = "gemini-embedding-001"
     embedding_project_id: str = ""
-    embedding_location: str = "asia-southeast1"
+    embedding_location: str = "global"
     embedding_credentials_path: str = "env.json"
     embedding_use_adc: bool = False
     embedding_api_key: str = field(default="", repr=False)
@@ -307,6 +308,8 @@ class ExternalGraphRAGConfig:
     embedding_max_retries: int = 3
     embedding_auto_truncate: bool = True
     embedding_data_policy: str = "redact"
+    embedding_vertex_locations: tuple[str, ...] = ()
+    embedding_vertex_requests_per_minute: float = 0.0
     hybrid_vector_weight: float = 0.55
     hybrid_bm25_weight: float = 0.45
     hybrid_rrf_k: int = 60
@@ -331,7 +334,7 @@ class ExternalGraphRAGConfig:
             embedding_project_id=os.getenv("GEMINI_PROJECT_ID", ""),
             embedding_location=os.getenv(
                 "EMBEDDING_LOCATION",
-                "asia-southeast1",
+                "global",
             ),
             embedding_credentials_path=os.getenv(
                 "GEMINI_CREDENTIALS_PATH",
@@ -357,6 +360,12 @@ class ExternalGraphRAGConfig:
                 "GEMINI_DATA_POLICY",
                 "redact",
             ).strip().lower(),
+            embedding_vertex_locations=parse_vertex_locations(
+                os.getenv("EMBEDDING_VERTEX_LOCATIONS", "")
+            ),
+            embedding_vertex_requests_per_minute=float(
+                os.getenv("EMBEDDING_VERTEX_REQUESTS_PER_MINUTE", "0")
+            ),
             hybrid_vector_weight=float(os.getenv("HYBRID_VECTOR_WEIGHT", "0.55")),
             hybrid_bm25_weight=float(os.getenv("HYBRID_BM25_WEIGHT", "0.45")),
             hybrid_rrf_k=int(os.getenv("HYBRID_RRF_K", "60")),
@@ -381,6 +390,10 @@ class ExternalGraphRAGConfig:
             max_retries=self.embedding_max_retries,
             auto_truncate=self.embedding_auto_truncate,
             data_policy=self.embedding_data_policy,
+            vertex_locations=self.embedding_vertex_locations,
+            vertex_requests_per_minute=(
+                self.embedding_vertex_requests_per_minute
+            ),
         )
 
     @property

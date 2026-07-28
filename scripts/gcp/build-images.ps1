@@ -4,8 +4,6 @@ param(
     [string]$Region = "asia-southeast1",
     [string]$Repository = "vlegal",
     [string]$Tag = "",
-    [ValidateSet("backend", "frontend")]
-    [string[]]$Image = @("backend", "frontend"),
     [switch]$Push
 )
 
@@ -35,22 +33,20 @@ if ($Push) {
 
 Push-Location $repoRoot
 try {
-    foreach ($name in $Image) {
-        $target = "$imageRoot/vlegal-$name`:$Tag"
-        $arguments = @(
-            "buildx", "build",
-            "--platform=linux/amd64",
-            "--file=docker/$name.Dockerfile",
-            "--tag=$target"
-        )
-        $arguments += if ($Push) { "--push" } else { "--load" }
-        $arguments += "."
+    $target = "$imageRoot/vlegal-app`:$Tag"
+    $arguments = @(
+        "buildx", "build",
+        "--platform=linux/amd64",
+        "--file=docker/app.Dockerfile",
+        "--tag=$target"
+    )
+    $arguments += if ($Push) { "--push" } else { "--load" }
+    $arguments += "."
 
-        Write-Host "Building $name -> $target"
-        & docker @arguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to build image: $name"
-        }
+    Write-Host "Building app -> $target"
+    & docker @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to build image: app"
     }
 }
 finally {

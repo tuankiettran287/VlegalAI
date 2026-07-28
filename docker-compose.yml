@@ -1,86 +1,99 @@
-# Local development stack. Production images are described by compose.gcp.yml
-# and deployed by scripts/gcp/deploy.ps1.
+# Optional container stack for reproducing the production image.
+#
+# Docker Compose reads .env for ${...} interpolation and injects it into every
+# backend process through env_file. The file is intentionally never copied into
+# an image. The Google service-account JSON is mounted as a read-only Compose
+# secret at /run/secrets/gcp_credentials.
 name: vlegal
 
-x-backend-image: &backend-image
-  image: "${VLEGAL_BACKEND_IMAGE:-vlegal-backend:local}"
+x-app-image: &app-image
+  image: "${VLEGAL_APP_IMAGE:-vlegal-app:local}"
   build:
     context: .
-    dockerfile: docker/backend.Dockerfile
+    dockerfile: docker/app.Dockerfile
 
 x-app-environment: &app-environment
-  APP_ENV: development
-  PUBLIC_URL: http://localhost:8000
-  FRONTEND_URL: http://localhost:5173
-  CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000
+  APP_ENV: "${APP_ENV:-development}"
+  PUBLIC_URL: "${PUBLIC_URL:-http://localhost:8000}"
+  FRONTEND_URL: "${FRONTEND_URL:-http://localhost:8000}"
+  CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}"
+
   DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in .env}"
   RETRIEVER_BACKEND: "${RETRIEVER_BACKEND:-hybrid_rag}"
   POSTGRES_VECTOR_SIZE: "${POSTGRES_VECTOR_SIZE:-1024}"
-  NEO4J_URI: bolt://neo4j:7687
-  NEO4J_USER: "${NEO4J_USER:-neo4j}"
-  NEO4J_PASSWORD: "${NEO4J_PASSWORD:-local-neo4j-password}"
-  NEO4J_DATABASE: "${NEO4J_DATABASE:-neo4j}"
-  GEMINI_CREDENTIALS_PATH: /app/env.json
+
+  NEO4J_URI: "${NEO4J_URI:?Set NEO4J_URI in .env}"
+  NEO4J_USER: "${NEO4J_USER:?Set NEO4J_USER in .env}"
+  NEO4J_PASSWORD: "${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env}"
+  NEO4J_DATABASE: "${NEO4J_DATABASE:?Set NEO4J_DATABASE in .env}"
+
+  # Both the application and google-auth can discover the same read-only
+  # credential. On Cloud Run these paths are replaced by the runtime identity.
+  GEMINI_CREDENTIALS_PATH: /run/secrets/gcp_credentials
+  GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp_credentials
   GEMINI_USE_ADC: "${GEMINI_USE_ADC:-true}"
-  GEMINI_PROJECT_ID: "${GEMINI_PROJECT_ID:-}"
-  GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.5-flash}"
+  GEMINI_PROJECT_ID: "${GEMINI_PROJECT_ID:?Set GEMINI_PROJECT_ID in .env}"
+  GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
   GEMINI_LOCATION: "${GEMINI_LOCATION:-global}"
   GEMINI_THINKING_LEVEL: "${GEMINI_THINKING_LEVEL:-low}"
   GEMINI_DATA_POLICY: "${GEMINI_DATA_POLICY:-redact}"
+
+  EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-vertex}"
   EMBEDDING_MODEL: "${EMBEDDING_MODEL:-gemini-embedding-001}"
-  EMBEDDING_LOCATION: "${EMBEDDING_LOCATION:-asia-southeast1}"
+  EMBEDDING_LOCATION: "${EMBEDDING_LOCATION:-global}"
   EMBEDDING_MAX_CONCURRENCY: "${EMBEDDING_MAX_CONCURRENCY:-8}"
+  EMBEDDING_BATCH_SIZE: "${EMBEDDING_BATCH_SIZE:-20}"
   EMBEDDING_TIMEOUT_SECONDS: "${EMBEDDING_TIMEOUT_SECONDS:-60}"
   EMBEDDING_MAX_RETRIES: "${EMBEDDING_MAX_RETRIES:-3}"
   EMBEDDING_AUTO_TRUNCATE: "${EMBEDDING_AUTO_TRUNCATE:-true}"
+  EMBEDDING_VERTEX_LOCATIONS: "${EMBEDDING_VERTEX_LOCATIONS:-}"
+  EMBEDDING_VERTEX_REQUESTS_PER_MINUTE: "${EMBEDDING_VERTEX_REQUESTS_PER_MINUTE:-0}"
 
-x-runtime-volumes: &runtime-volumes
-  - ./env.json:/app/env.json:ro
+x-app-service: &app-service
+  <<: *app-image
+  init: true
+  env_file:
+    - path: ./.env
+      required: true
+  environment: *app-environment
+  secrets:
+    - source: gcp_credentials
+      target: gcp_credentials
 
 services:
   migrate:
-    <<: *backend-image
-    command: [alembic, upgrade, head]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in .env}"
+    <<: *app-service
+    command: [python, -m, alembic, upgrade, head]
     restart: "no"
 
   reindex:
-    <<: *backend-image
+    <<: *app-service
     command:
       - python
       - scripts/sync_external_graphrag.py
       - --reset-neo4j
       - --reset-postgres
     profiles: [jobs]
-    env_file:
-      - .env
     environment:
       <<: *app-environment
       LEGAL_DATA_DIR: /app/legal-data
       LEGAL_STORAGE_DIR: /app/storage/graphrag
       LEGAL_GRAPHRAG_DB: /app/storage/graphrag/legal_graphrag.sqlite
     volumes:
-      - ./env.json:/app/env.json:ro
-      - "./Data (1):/app/legal-data:ro"
-      - ./storage:/app/storage
+      - type: bind
+        source: "./Data (1)"
+        target: /app/legal-data
+        read_only: true
+      - type: bind
+        source: ./storage
+        target: /app/storage
     depends_on:
       migrate:
         condition: service_completed_successfully
-      neo4j:
-        condition: service_healthy
     restart: "no"
 
-  api:
-    <<: *backend-image
-    init: true
-    env_file:
-      - .env
-    environment:
-      <<: *app-environment
-    volumes: *runtime-volumes
+  web:
+    <<: *app-service
     ports:
       - "${API_PORT:-8000}:8080"
     healthcheck:
@@ -99,27 +112,11 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      neo4j:
-        condition: service_healthy
-    restart: unless-stopped
-
-  frontend:
-    image: "${VLEGAL_FRONTEND_IMAGE:-vlegal-frontend:local}"
-    build:
-      context: .
-      dockerfile: docker/frontend.Dockerfile
-    environment:
-      PORT: "8080"
-      API_UPSTREAM: http://api:8080
-    ports:
-      - "${FRONTEND_PORT:-5173}:8080"
-    depends_on:
-      api:
-        condition: service_healthy
+    stop_grace_period: 45s
     restart: unless-stopped
 
   worker:
-    <<: *backend-image
+    <<: *app-service
     command:
       - celery
       - -A
@@ -127,55 +124,26 @@ services:
       - worker
       - --loglevel=INFO
       - "--concurrency=${CELERY_CONCURRENCY:-1}"
-    init: true
-    env_file:
-      - .env
-    environment:
-      <<: *app-environment
-    volumes: *runtime-volumes
     depends_on:
       migrate:
         condition: service_completed_successfully
-      neo4j:
-        condition: service_healthy
+    stop_grace_period: 60s
     restart: unless-stopped
 
   beat:
-    <<: *backend-image
+    <<: *app-service
     command:
       - celery
       - -A
       - app.scheduler.celery_app
       - beat
       - --loglevel=INFO
-    init: true
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in .env}"
     depends_on:
       migrate:
         condition: service_completed_successfully
+    stop_grace_period: 30s
     restart: unless-stopped
 
-  neo4j:
-    image: neo4j:5.26-community
-    environment:
-      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-local-neo4j-password}"
-      NEO4J_server_memory_heap_initial__size: "${NEO4J_HEAP_INITIAL:-512m}"
-      NEO4J_server_memory_heap_max__size: "${NEO4J_HEAP_MAX:-1G}"
-    volumes:
-      - neo4j_data:/data
-    ports:
-      - "${NEO4J_HTTP_PORT:-7474}:7474"
-      - "${NEO4J_BOLT_PORT:-7687}:7687"
-    healthcheck:
-      test: [CMD, wget, --spider, -q, "http://localhost:7474"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
-    restart: unless-stopped
-
-volumes:
-  neo4j_data:
+secrets:
+  gcp_credentials:
+    file: "${GCP_CREDENTIALS_FILE:-./env.json}"

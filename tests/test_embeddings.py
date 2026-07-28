@@ -253,6 +253,150 @@ def test_global_location_uses_the_global_vertex_hostname() -> None:
         client.close()
 
 
+def test_vertex_location_pool_preserves_order_and_round_robins() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": [1.0, 0.0, 0.0]}}
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            project_id="legal-project",
+            location="global",
+            vertex_locations=("asia-east1", "us-central1"),
+            dimensions=3,
+            max_concurrency=1,
+            batch_size=1,
+            max_retries=1,
+        ),
+        client=client,
+    )
+    service._credentials = SimpleNamespace(valid=True, token="access-token")
+    service._project_id = "legal-project"
+    try:
+        assert service.embed_documents(["one", "two", "three"]) == [
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]
+    finally:
+        client.close()
+
+    assert [request.url.host for request in requests] == [
+        "asia-east1-aiplatform.googleapis.com",
+        "us-central1-aiplatform.googleapis.com",
+        "asia-east1-aiplatform.googleapis.com",
+    ]
+
+
+def test_vertex_location_pool_rate_limits_each_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(
+        "app.services.embeddings.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "app.services.embeddings.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json={
+                    "predictions": [
+                        {"embeddings": {"values": [1.0, 0.0, 0.0]}}
+                    ]
+                },
+            )
+        )
+    )
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            project_id="legal-project",
+            vertex_locations=("asia-east1", "us-central1"),
+            vertex_requests_per_minute=5,
+            dimensions=3,
+            max_concurrency=1,
+            batch_size=1,
+            max_retries=1,
+        ),
+        client=client,
+    )
+    service._credentials = SimpleNamespace(valid=True, token="access-token")
+    service._project_id = "legal-project"
+    try:
+        service.embed_documents(["one", "two", "three"])
+    finally:
+        client.close()
+
+    assert clock[0] == pytest.approx(112.0)
+
+
+def test_vertex_batches_documents_and_preserves_order() -> None:
+    requests: list[httpx.Request] = []
+    vectors = {
+        "one": [1.0, 0.0, 0.0],
+        "two": [0.0, 2.0, 0.0],
+        "three": [0.0, 0.0, 3.0],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {
+                        "embeddings": {
+                            "values": vectors[instance["content"]]
+                        }
+                    }
+                    for instance in body["instances"]
+                ]
+            },
+        )
+
+    service, client = _service(handler)
+    service.config = EmbeddingConfig(
+        model="gemini-embedding-001",
+        project_id="legal-project",
+        location="asia-southeast1",
+        dimensions=3,
+        max_concurrency=1,
+        batch_size=2,
+        max_retries=1,
+        data_policy="allow",
+    )
+    try:
+        result = service.embed_documents(["one", "two", "three"])
+    finally:
+        client.close()
+
+    assert result == [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    assert [
+        [instance["content"] for instance in json.loads(request.content)["instances"]]
+        for request in requests
+    ] == [["one", "two"], ["three"]]
+
+
 def test_rejects_invalid_vertex_location_before_sending_a_request() -> None:
     requests: list[httpx.Request] = []
 

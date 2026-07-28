@@ -79,6 +79,7 @@ và Gemini dùng service identity qua ADC. Các biến bắt buộc cho producti
 - `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
 - `GEMINI_PROJECT_ID`, `GEMINI_USE_ADC=true`, `GEMINI_MODEL`, `GEMINI_LOCATION`, `TAVILY_API_KEY`
 - `EMBEDDING_MODEL`, `EMBEDDING_LOCATION`, `EMBEDDING_MAX_CONCURRENCY`
+- `EMBEDDING_VERTEX_LOCATIONS`, `EMBEDDING_VERTEX_REQUESTS_PER_MINUTE`
 - `NEO4J_*`, `POSTGRES_VECTOR_SIZE`
 
 `RETRIEVER_BACKEND`, provider và API key chỉ tồn tại ở backend; frontend không
@@ -116,6 +117,9 @@ nội dung. Corpus dùng task type `RETRIEVAL_DOCUMENT`, câu hỏi dùng
 `RETRIEVAL_QUERY`; mỗi request đặt `outputDimensionality=1024` và backend chuẩn
 hoá lại vector giảm chiều trước khi lưu hoặc tìm kiếm. Khi đổi model embedding,
 vector size hoặc `GEMINI_DATA_POLICY`, toàn bộ chỉ mục vector phải được tạo lại.
+Với project có quota thấp, `EMBEDDING_VERTEX_LOCATIONS` phân phối cùng model qua
+nhiều region; `EMBEDDING_VERTEX_REQUESTS_PER_MINUTE` giới hạn riêng từng region
+để tránh HTTP 429.
 Semantic cache dùng task type đối xứng `SEMANTIC_SIMILARITY` và chỉ so khớp các
 row được tạo bằng đúng model/revision embedding hiện tại.
 
@@ -160,15 +164,18 @@ limit PostgreSQL. API chính:
 
 ## Docker
 
-Thư mục `docker/` chỉ có hai Dockerfile ứng dụng: `backend.Dockerfile` và
-`frontend.Dockerfile`. API, Celery worker/beat, migration và reindex dùng chung
-image `vlegal-backend`; Compose hoặc Cloud Run ghi đè command theo từng vai trò.
+`docker/app.Dockerfile` tạo một image `vlegal-app` chứa React SPA và FastAPI.
+Cloud Run web service, Celery worker/beat, migration và reindex dùng chung đúng
+image của một commit; Cloud Run ghi đè command theo từng vai trò. Web service
+phục vụ frontend và `/api` trực tiếp, không cần Nginx hoặc reverse proxy riêng.
 PostgreSQL/pgvector là dịch vụ được quản lý bên ngoài và được kết nối qua
 `DATABASE_URL` trong file env; Compose không khởi động database. Neo4j lưu graph.
 Migration phải thành công trước khi API và worker khởi động.
 
-`api` và `worker` phục vụ mọi request từ PostgreSQL/pgvector và Neo4j nên chỉ
-mount `env.json`; embedding được gọi qua Vertex AI. Corpus `.docx` và chỉ mục SQLite cục bộ
+Compose tự đọc `.env` và nạp file này vào tất cả process backend. `.env` không
+được copy vào image. `env.json` cũng không nằm trong image mà được mount read-only
+qua Compose secret tại `/run/secrets/gcp_credentials`; cả text generation và
+embedding Vertex AI dùng credential này. Corpus `.docx` và chỉ mục SQLite cục bộ
 chỉ được mount vào `reindex` — image duy nhất dựng chỉ mục — đúng như cấu hình
 Cloud Run, nơi chỉ job reindex mount corpus bucket.
 
@@ -176,24 +183,30 @@ Chạy local toàn bộ stack (đặt `env.json` ở thư mục gốc trước k
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose --env-file .env up --build
 ```
+
+`NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` và `NEO4J_DATABASE` phải trỏ tới
+Neo4j được quản lý bên ngoài (ví dụ Neo4j Aura).
 
 Tạo lại toàn bộ embedding từ corpus hiện có và đồng bộ Neo4j/pgvector:
 
 ```bash
-docker compose run --rm migrate
-docker compose --profile jobs run --rm reindex
+docker compose --env-file .env run --rm migrate
+docker compose --env-file .env --profile jobs run --rm reindex
 ```
+
+Neo4j được quản lý bên ngoài (ví dụ Neo4j Aura); image production không đóng
+gói hoặc khởi động Neo4j/Nginx.
 
 Service account phải có `roles/aiplatform.user` và project phải bật
 `aiplatform.googleapis.com`. Reindex sẽ gửi corpus tới Vertex AI để tạo lại toàn
 bộ vector.
 
 Xem [hướng dẫn Cloud Run](deploy-gcp-cloud-run.md) để build và triển khai lên GCP.
-API/frontend là hai service riêng dùng URL `run.app`; worker/beat là Worker Pool,
-migration/reindex là Job. PostgreSQL chuyển sang
-Cloud SQL và Neo4j chạy trên GCE/GKE hoặc Neo4j Aura.
+Frontend/API dùng chung một service `vlegal-unified` với URL `run.app`; worker/beat là
+Worker Pool, migration/reindex là Job. PostgreSQL chạy trên Cloud SQL và Neo4j
+chạy trên Neo4j Aura.
 
 Để tự động test, build và deploy mỗi khi push vào `master`, xem
 [hướng dẫn CI/CD GitHub Actions](cicd-gcp.md). Workflow dùng Workload Identity
