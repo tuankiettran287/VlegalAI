@@ -159,7 +159,8 @@ class GeminiError(RuntimeError):
 LEGAL_EXCLUDED_TERMS_RE = re.compile(
     r"(?i)\b(?:tiền lương|mức lương|lương làm thêm|lương làm|lương tối thiểu|lương tháng|"
     r"lương hưu|lương khoán|chế độ lương|bảng lương|tăng lương|trả lương|hồ sơ|đào tạo|"
-    r"lưu ý|lưu trữ|lưu hành|lưu thông|sao lưu|đoàn kiểm tra|đoàn luật sư|tập đoàn|tối cao|trạng thái)\b"
+    r"lưu ý|lưu trữ|lưu hành|lưu thông|sao lưu|đoàn kiểm tra|đoàn luật sư|tập đoàn|"
+    r"tối cao|trạng thái|vũ lực)\b"
 )
 
 

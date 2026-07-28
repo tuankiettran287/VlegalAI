@@ -252,10 +252,54 @@ def _filter_rows_for_query_intent(
 
     query_ascii = _ascii(query)
     if "cuong buc lao dong" in query_ascii or "cuong buc" in query_ascii:
-        return [
+        relevant = [
             row for row in rows
             if "cuong buc" in _row_evidence(row)
         ]
+        definition_query = (
+            "la gi" in query_ascii
+            or len(_significant_terms(query)) <= 4
+        )
+        if not definition_query:
+            return relevant
+
+        definitions = [
+            row
+            for row in relevant
+            if "cuong buc lao dong la viec" in _row_evidence(row)
+        ]
+        prohibitions = [
+            row
+            for row in relevant
+            if (
+                "nghiem cam" in _row_evidence(row)
+                or "dieu 8" in _ascii(str(row.get("citation") or ""))
+            )
+        ]
+        selected: list[dict[str, Any]] = []
+        if definitions:
+            selected.append(
+                min(
+                    definitions,
+                    key=lambda row: (
+                        "45/2019/qh14"
+                        not in _ascii(str(row.get("citation") or "")),
+                        len(str(row.get("text") or "")),
+                    ),
+                )
+            )
+        if prohibitions:
+            prohibition = min(
+                prohibitions,
+                key=lambda row: (
+                    "khoan 2"
+                    not in _ascii(str(row.get("citation") or "")),
+                    len(str(row.get("text") or "")),
+                ),
+            )
+            if prohibition not in selected:
+                selected.append(prohibition)
+        return selected or relevant
 
     if not _is_public_sector_base_wage_query(query):
         return rows
@@ -734,7 +778,7 @@ class RetrievalService:
             if not _rows_have_query_evidence(query, rows):
                 return []
             answer_limit = {
-                "single_hop": 6,
+                "single_hop": 4,
                 "multi_hop": 12,
                 "multi_abstract": 24,
             }[route]

@@ -215,6 +215,73 @@ def test_short_forced_labor_query_retrieves_expanded_legal_definition() -> None:
     assert "Cưỡng bức lao động" in rows[0]["text"]
 
 
+def test_forced_labor_definition_keeps_only_definition_and_prohibition() -> None:
+    class _Store:
+        def retrieve(self, _: str, __: int) -> list[dict]:
+            return [
+                _source(
+                    "S1",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > "
+                        "Điều 8. Các hành vi bị nghiêm cấm"
+                    ),
+                    text=(
+                        "Điều 8. Các hành vi bị nghiêm cấm. "
+                        "Ngược đãi người lao động, cưỡng bức lao động."
+                    ),
+                ),
+                _source(
+                    "S2",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > "
+                        "Điều 8. Các hành vi bị nghiêm cấm > Khoản 2"
+                    ),
+                    text="Ngược đãi người lao động, cưỡng bức lao động.",
+                ),
+                _source(
+                    "S3",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > "
+                        "Điều 3. Giải thích từ ngữ > Khoản 7"
+                    ),
+                    text=(
+                        "Cưỡng bức lao động là việc dùng vũ lực, đe dọa "
+                        "dùng vũ lực hoặc thủ đoạn khác để ép buộc làm việc."
+                    ),
+                ),
+                _source(
+                    "S4",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > "
+                        "Điều 165. Người giúp việc gia đình > Khoản 1"
+                    ),
+                    text="Cấm cưỡng bức lao động đối với người giúp việc.",
+                ),
+                _source(
+                    "S5",
+                    citation=(
+                        "Luật Người Lao Động Việt Nam Đi Làm Việc Ở "
+                        "Nước Ngoài (69/2020/QH14) > Điều 3 > Khoản 5"
+                    ),
+                    text=(
+                        "Cưỡng bức lao động là việc dùng vũ lực để "
+                        "ép buộc người lao động làm việc trái ý muốn."
+                    ),
+                ),
+            ]
+
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    service._store = _Store()
+
+    rows = asyncio.run(service.retrieve("Cưỡng bức lao động là gì?"))
+
+    assert len(rows) == 2
+    assert "Điều 3" in rows[0]["citation"]
+    assert "45/2019/QH14" in rows[0]["citation"]
+    assert "Khoản 2" in rows[1]["citation"]
+    assert all("69/2020/QH14" not in row["citation"] for row in rows)
+
+
 def test_retrieval_route_distinguishes_single_hop_and_graph_questions() -> None:
     assert (
         classify_retrieval_route(

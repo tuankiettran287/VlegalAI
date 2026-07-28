@@ -140,6 +140,19 @@ def test_redaction_preserves_amounts_but_removes_personal_fields_and_signed_urls
     assert "secret-value" not in redacted
 
 
+def test_redaction_preserves_legal_term_vu_luc() -> None:
+    original = (
+        "Cưỡng bức lao động là việc dùng vũ lực, "
+        "đe dọa dùng vũ lực để ép buộc người lao động."
+    )
+
+    redacted, count = redact_sensitive_text(original)
+
+    assert count == 0
+    assert redacted == original
+    assert "[REDACTED_PERSON_NAME]" not in redacted
+
+
 def test_redaction_covers_common_vietnamese_contract_pii() -> None:
     original = (
         "BÊN A: Nguyễn Văn An, sinh ngày 01/01/1990\n"
