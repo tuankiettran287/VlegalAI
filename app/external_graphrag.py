@@ -1637,16 +1637,12 @@ class Neo4jPostgresGraphRAGStore:
         self.rag = PostgresGraphRAGStore(self.config)
         self.postgres = self.rag.connection
         self.driver = neo4j_driver(self.config)
-        try:
-            self.driver.verify_connectivity()
-        except Exception as exc:
-            # Aura/network outages must not make the PostgreSQL index
-            # unavailable. The driver remains open and retries on later calls.
-            logger.warning(
-                "Neo4j connectivity check failed; hybrid retrieval will "
-                "temporarily fall back to PostgreSQL error_type=%s",
-                type(exc).__name__,
-            )
+        # Do not verify Neo4j while constructing the hybrid store. Most legal
+        # questions are single-hop and deliberately use PostgreSQL only.
+        # Eager verification made those requests wait for the Aura connection
+        # timeout even though graph expansion was never requested. Neo4j is
+        # contacted lazily by graph-specific operations, which already fall
+        # back to PostgreSQL when unavailable.
 
     def close(self) -> None:
         self.rag.close()

@@ -192,6 +192,25 @@ def test_neo4j_hybrid_can_skip_graph_expansion_for_single_hop_chat() -> None:
     assert recorded_limits == [3]
 
 
+def test_neo4j_hybrid_defers_connectivity_check_until_graph_use(
+    monkeypatch,
+) -> None:
+    class _LazyDriver:
+        def verify_connectivity(self) -> None:
+            raise AssertionError("Hybrid store must not connect eagerly")
+
+    driver = _LazyDriver()
+    rag = SimpleNamespace(connection=object())
+    monkeypatch.setattr(graphrag_module, "PostgresGraphRAGStore", lambda _: rag)
+    monkeypatch.setattr(graphrag_module, "neo4j_driver", lambda _: driver)
+
+    store = Neo4jPostgresGraphRAGStore(SimpleNamespace(ready=True))
+
+    assert store.rag is rag
+    assert store.postgres is rag.connection
+    assert store.driver is driver
+
+
 class _RecordingCursor:
     def __init__(
         self,
