@@ -87,7 +87,11 @@ jobs:
       - name: Validate Docker Compose manifests
         env:
           DATABASE_URL: postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal
+          NEO4J_URI: neo4j+s://ci.databases.neo4j.io
+          NEO4J_USER: ci
           NEO4J_PASSWORD: ci-only-password
+          NEO4J_DATABASE: ci
+          GEMINI_PROJECT_ID: ci-project
           GCP_PROJECT_ID: ci-project
           IMAGE_TAG: ci
         run: |
