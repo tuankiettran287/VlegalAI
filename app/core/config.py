@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     gemini_use_adc: bool = False
     gemini_project_id: str = ""
     gemini_location: str = "global"
-    gemini_model: str = "gemini-3.5-flash"
+    gemini_model: str = "gemini-2.5-flash"
     gemini_timeout_seconds: int = Field(default=120, ge=5, le=600)
     gemini_max_retries: int = Field(default=3, ge=1, le=3)
     # Keep the broad vendor timeout for long workflows, but interactive chat

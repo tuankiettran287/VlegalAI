@@ -8,10 +8,12 @@ from app.api import (
     _legal_sources,
 )
 from app.services.ai import LEGAL_SYSTEM_PROMPT
+from app.services import retrieval as retrieval_module
 from app.services.retrieval import (
     RetrievalService,
     append_detailed_citations,
     build_answer_plan,
+    classify_retrieval_route,
     format_source_locator,
     format_source_opening,
     plan_retrieval_queries,
@@ -55,6 +57,73 @@ def test_compound_question_is_split_and_keeps_focus_actor() -> None:
     assert actor_plan["actors"] == ["bạn tôi", "tôi"]
     assert actor_plan["focus_actor"] == "tôi"
     assert len(actor_plan["must_answer"]) == 2
+
+
+def test_retrieval_route_distinguishes_direct_and_graph_questions() -> None:
+    assert (
+        classify_retrieval_route(
+            "Mức lương tối thiểu vùng hiện nay là bao nhiêu?"
+        )
+        == "single_hop"
+    )
+    assert (
+        classify_retrieval_route(
+            "Nếu công ty chậm trả lương thì người lao động có quyền gì?"
+        )
+        == "multi_hop"
+    )
+    assert (
+        classify_retrieval_route(
+            "Phân tích toàn bộ quyền và nghĩa vụ của các bên trong hợp đồng lao động"
+        )
+        == "multi_abstract"
+    )
+
+
+def test_single_hop_never_initializes_graph_store(monkeypatch) -> None:
+    class _Store:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def retrieve(self, query: str, _: int) -> list[dict]:
+            self.queries.append(query)
+            return [_source()]
+
+    postgres = _Store()
+    graph = _Store()
+    graph_initializations = 0
+
+    def graph_factory(_: object) -> _Store:
+        nonlocal graph_initializations
+        graph_initializations += 1
+        return graph
+
+    monkeypatch.setattr(retrieval_module, "_external_config", lambda _: object())
+    monkeypatch.setattr(
+        retrieval_module,
+        "PostgresGraphRAGStore",
+        lambda _: postgres,
+    )
+    monkeypatch.setattr(
+        retrieval_module,
+        "Neo4jPostgresGraphRAGStore",
+        graph_factory,
+    )
+    service = RetrievalService(
+        SimpleNamespace(
+            retriever_backend="hybrid_rag",
+            retrieval_top_k=10,
+        )
+    )
+
+    rows = asyncio.run(
+        service.retrieve("Mức lương tối thiểu vùng hiện nay là bao nhiêu?")
+    )
+
+    assert rows
+    assert postgres.queries
+    assert graph.queries == []
+    assert graph_initializations == 0
 
 
 def test_retrieval_runs_each_compound_facet_and_merges_results() -> None:

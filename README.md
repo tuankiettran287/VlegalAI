@@ -84,9 +84,9 @@ và Gemini dùng service identity qua ADC. Các biến bắt buộc cho producti
 `RETRIEVER_BACKEND`, provider và API key chỉ tồn tại ở backend; frontend không
 có màn hình cấu hình kỹ thuật hoặc bộ chọn luật.
 
-Gemini 3.5 Flash được gọi qua Vertex AI. Backend đọc Google service-account
+Gemini 2.5 Flash được gọi qua Vertex AI. Backend đọc Google service-account
 credential từ file `env.json` (hoặc `GEMINI_CREDENTIALS_PATH`), lấy OAuth access
-token và gửi prompt tới model `gemini-3.5-flash`; credential không được trả về
+token và gửi prompt tới model `gemini-2.5-flash`; credential không được trả về
 frontend hay ghi vào log. Service account cần quyền gọi Vertex AI trong project
 và Vertex AI API phải được bật. Google Search grounding dùng cùng credential,
 không cần thêm Custom Search API key/CX; project cần bật Google Search

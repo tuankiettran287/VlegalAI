@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import unicodedata
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi.concurrency import run_in_threadpool
 
@@ -22,6 +23,8 @@ from app.services.embeddings import (
     embedding_config_from_settings,
     parse_vertex_locations,
 )
+
+logger = logging.getLogger(__name__)
 
 
 _WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", re.UNICODE)
@@ -51,6 +54,33 @@ _AGGREGATIVE_MARKERS = (
     "cac che do",
     "cac hanh vi",
     "ho so rui ro",
+)
+_MULTI_ABSTRACT_MARKERS = (
+    *_AGGREGATIVE_MARKERS,
+    "phan tich",
+    "danh gia",
+    "he thong hoa",
+    "tong quan",
+    "quyen va nghia vu",
+    "dieu kien va thu tuc",
+    "ho so va thu tuc",
+    "rui ro va giai phap",
+    "uu diem va nhuoc diem",
+    "nhieu van ban",
+    "nhieu linh vuc",
+)
+_MULTI_HOP_PATTERNS = (
+    re.compile(r"\bneu\b.+\bthi\b", re.IGNORECASE),
+    re.compile(r"\b(?:sau khi|truoc khi|ke tu khi|tiep theo)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:dan den|keo theo|lam phat sinh|anh huong den|"
+        r"moi quan he giua|phu thuoc vao)\b",
+        re.IGNORECASE,
+    ),
+)
+_LEGAL_REFERENCE_RE = re.compile(
+    r"\b(?:dieu|khoan|diem)\s+\d+[a-z]?\b",
+    re.IGNORECASE,
 )
 _QUERY_STOP_WORDS = {
     "ai",
@@ -184,6 +214,33 @@ def _question_facets(query: str) -> list[str]:
     ]
 
 
+RetrievalRoute = Literal["single_hop", "multi_hop", "multi_abstract"]
+
+
+def classify_retrieval_route(query: str) -> RetrievalRoute:
+    """Classify the original question without counting search expansions."""
+
+    normalized = " ".join(str(query or "").split())
+    if not normalized:
+        return "single_hop"
+
+    query_ascii = _ascii(normalized)
+    if any(marker in query_ascii for marker in _MULTI_ABSTRACT_MARKERS):
+        return "multi_abstract"
+
+    facets = _question_facets(normalized)
+    legal_references = {
+        match.casefold() for match in _LEGAL_REFERENCE_RE.findall(query_ascii)
+    }
+    if (
+        len(facets) >= 2
+        or len(legal_references) >= 2
+        or any(pattern.search(query_ascii) for pattern in _MULTI_HOP_PATTERNS)
+    ):
+        return "multi_hop"
+    return "single_hop"
+
+
 def plan_retrieval_queries(query: str) -> list[str]:
     """Create deterministic facet queries for compound legal questions.
 
@@ -196,26 +253,26 @@ def plan_retrieval_queries(query: str) -> list[str]:
     if not normalized:
         return []
 
-    facets = _question_facets(normalized)
-    if len(facets) < 2:
-        return [normalized]
-
-    first_ascii = _ascii(facets[0])
-    first_terms = [
-        topic
-        for topic in sorted(_SHARED_TOPIC_TERMS, key=len, reverse=True)
-        if _ascii(topic) in first_ascii
-    ][:2]
-    shared_prefix = " ".join(first_terms)
     planned = [normalized]
-    for index, facet in enumerate(facets):
-        expanded = facet
-        if index and shared_prefix:
-            facet_terms = set(_significant_terms(facet))
-            if not facet_terms.intersection(_ascii(term) for term in first_terms):
-                expanded = f"{shared_prefix} {facet}"
-        if expanded.casefold() != normalized.casefold():
-            planned.append(expanded)
+    facets = _question_facets(normalized)
+    if len(facets) >= 2:
+        first_ascii = _ascii(facets[0])
+        first_terms = [
+            topic
+            for topic in sorted(_SHARED_TOPIC_TERMS, key=len, reverse=True)
+            if _ascii(topic) in first_ascii
+        ][:2]
+        shared_prefix = " ".join(first_terms)
+        for index, facet in enumerate(facets):
+            expanded = facet
+            if index and shared_prefix:
+                facet_terms = set(_significant_terms(facet))
+                if not facet_terms.intersection(
+                    _ascii(term) for term in first_terms
+                ):
+                    expanded = f"{shared_prefix} {facet}"
+            if expanded.casefold() != normalized.casefold():
+                planned.append(expanded)
     query_ascii = _ascii(normalized)
     for markers, expansion in _LEGAL_QUERY_EXPANSIONS:
         if any(marker in query_ascii for marker in markers):
@@ -263,13 +320,7 @@ def build_answer_plan(query: str) -> dict[str, Any]:
             focus = label
             break
     return {
-        "mode": (
-            "multi_abstract"
-            if _is_aggregative_query(query)
-            else "multi_hop"
-            if len(planned) > 1
-            else "single_hop"
-        ),
+        "mode": classify_retrieval_route(query),
         "must_answer": facets,
         "actors": actors,
         "focus_actor": focus or (actors[-1] if actors else ""),
@@ -454,38 +505,74 @@ class RetrievalService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._store: Any = None
+        self._graph_store: Any = None
         self._lock = asyncio.Lock()
 
-    async def _get_store(self) -> Any:
-        if self._store is not None:
-            return self._store
+    async def _get_store(
+        self,
+        route: RetrievalRoute = "single_hop",
+    ) -> Any:
+        backend = getattr(self.settings, "retriever_backend", "rag")
+        use_graph = (
+            route in {"multi_hop", "multi_abstract"}
+            and backend in {"hybrid_rag", "graphrag"}
+        )
+        attribute = "_graph_store" if use_graph else "_store"
+        existing = getattr(self, attribute)
+        if existing is not None:
+            return existing
         async with self._lock:
-            if self._store is not None:
-                return self._store
+            existing = getattr(self, attribute)
+            if existing is not None:
+                return existing
             config = _external_config(self.settings)
-            backend = self.settings.retriever_backend
             try:
-                if backend == "hybrid_rag":
-                    self._store = await run_in_threadpool(Neo4jPostgresGraphRAGStore, config)
-                elif backend == "rag":
-                    self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
-                elif backend == "graphrag":
-                    self._store = await run_in_threadpool(Neo4jGraphRAGStore, config)
+                if use_graph and backend == "hybrid_rag":
+                    store = await run_in_threadpool(
+                        Neo4jPostgresGraphRAGStore,
+                        config,
+                    )
+                elif use_graph and backend == "graphrag":
+                    store = await run_in_threadpool(
+                        Neo4jGraphRAGStore,
+                        config,
+                    )
                 else:
-                    self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
+                    store = await run_in_threadpool(
+                        PostgresGraphRAGStore,
+                        config,
+                    )
             except Exception as exc:
-                import logging
-                logging.getLogger(__name__).warning("Retriever %s failed to initialize: %s. Falling back to PostgresGraphRAGStore.", backend, exc)
+                logger.warning(
+                    "Retriever %s route=%s failed to initialize: %s. "
+                    "Falling back to PostgresGraphRAGStore.",
+                    backend,
+                    route,
+                    exc,
+                )
                 try:
-                    self._store = await run_in_threadpool(PostgresGraphRAGStore, config)
+                    store = await run_in_threadpool(
+                        PostgresGraphRAGStore,
+                        config,
+                    )
                 except Exception as fallback_exc:
-                    logging.getLogger(__name__).error("PostgresGraphRAGStore fallback failed: %s", fallback_exc)
+                    logger.error(
+                        "PostgresGraphRAGStore fallback failed: %s",
+                        fallback_exc,
+                    )
                     raise
-        return self._store
+            setattr(self, attribute, store)
+        return store
 
     async def retrieve(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
         try:
-            store = await self._get_store()
+            route = classify_retrieval_route(query)
+            store = await self._get_store(route)
+            logger.info(
+                "Retrieval route=%s backend=%s",
+                route,
+                getattr(self.settings, "retriever_backend", "rag"),
+            )
             base_top_k = top_k or self.settings.retrieval_top_k
             planned_queries = plan_retrieval_queries(query)
             result_limit = adaptive_retrieval_top_k(query, base_top_k)
@@ -494,28 +581,12 @@ class RetrievalService:
                 min(18, max(10, (result_limit + len(planned_queries) - 1) // len(planned_queries))),
             )
             result_sets = []
-            # Interactive chat must never wait on the optional Aura graph.
-            # PostgreSQL already supplies dense-vector + indexed lexical
-            # retrieval for the complete corpus. Neo4j remains available to
-            # offline and explicit graph operations, but a graph auth/network
-            # failure must not add its 40-50 second connection timeout to a
-            # user request (including planner false positives).
-            skip_graph_expansion = isinstance(
-                store,
-                Neo4jPostgresGraphRAGStore,
-            )
             for planned_query in planned_queries:
-                retrieve_kwargs = (
-                    {"expand_graph": False}
-                    if skip_graph_expansion
-                    else {}
-                )
                 result_sets.append(
                     await run_in_threadpool(
                         store.retrieve,
                         planned_query,
                         per_query_limit,
-                        **retrieve_kwargs,
                     )
                 )
             rows = _merge_retrieval_rows(
@@ -530,20 +601,33 @@ class RetrievalService:
                 source["source_id"] = f"S{index}"
             return serialized
         except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning("Retrieve operation failed: %s", exc)
+            logger.warning("Retrieve operation failed: %s", exc)
             return []
 
     async def stats(self) -> dict[str, Any]:
-        store = await self._get_store()
+        backend = getattr(self.settings, "retriever_backend", "rag")
+        route: RetrievalRoute = (
+            "multi_hop"
+            if backend in {"hybrid_rag", "graphrag"}
+            else "single_hop"
+        )
+        store = await self._get_store(route)
         return await run_in_threadpool(store.stats)
 
     async def close(self) -> None:
-        if self._store is not None and hasattr(self._store, "close"):
-            await run_in_threadpool(self._store.close)
+        closed: set[int] = set()
+        for store in (self._store, self._graph_store):
+            if (
+                store is not None
+                and id(store) not in closed
+                and hasattr(store, "close")
+            ):
+                await run_in_threadpool(store.close)
+                closed.add(id(store))
 
     def invalidate(self) -> None:
         self._store = None
+        self._graph_store = None
 
 
 def serialize_source(source: dict[str, Any]) -> dict[str, Any]:
