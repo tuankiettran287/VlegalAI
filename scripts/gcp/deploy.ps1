@@ -15,6 +15,10 @@ param(
     [string]$Neo4jUser = "neo4j",
     [string]$Neo4jDatabase = "neo4j",
     [string]$FrontendUrl = "",
+    [ValidateRange(0, 100)]
+    [int]$WorkerInstances = 0,
+    [ValidateRange(0, 100)]
+    [int]$BeatInstances = 0,
     [ValidateSet("all", "migrate", "reindex", "api", "frontend", "worker", "beat")]
     [string]$Component = "all",
     [switch]$ExecuteMigrate,
@@ -109,6 +113,15 @@ function Get-ServiceUrl {
         throw "Không lấy được URL của Cloud Run service $Name."
     }
     return $url
+}
+
+function Get-PublicServiceUrl {
+    param([Parameter(Mandatory)][string]$Name)
+    $projectNumber = (& gcloud run services describe $Name --project=$ProjectId --region=$Region --format="value(metadata.namespace)").Trim()
+    if ($LASTEXITCODE -ne 0 -or $projectNumber -notmatch "^\d+$") {
+        throw "Không lấy được project number từ Cloud Run service $Name."
+    }
+    return "https://$Name-$projectNumber.$Region.run.app"
 }
 
 function Deploy-Migrate {
@@ -275,7 +288,7 @@ function Deploy-Worker {
 
     Invoke-Gcloud @(
         "run", "worker-pools", "deploy", $workerPool,
-        "--project=$ProjectId", "--region=$Region", "--instances=1",
+        "--project=$ProjectId", "--region=$Region", "--instances=$WorkerInstances",
         "--image=$backendImage", "--service-account=$RunServiceAccount",
         "--command=celery",
         "--args=-A,app.worker.celery_app,worker,--loglevel=INFO,--concurrency=1",
@@ -289,7 +302,7 @@ function Deploy-Worker {
 function Deploy-Beat {
     Invoke-Gcloud @(
         "run", "worker-pools", "deploy", $beatPool,
-        "--project=$ProjectId", "--region=$Region", "--instances=1",
+        "--project=$ProjectId", "--region=$Region", "--instances=$BeatInstances",
         "--image=$backendImage", "--service-account=$RunServiceAccount",
         "--command=celery",
         "--args=-A,app.scheduler.celery_app,beat,--loglevel=INFO",
@@ -306,14 +319,23 @@ switch ($Component) {
     "reindex" { Deploy-Reindex }
     "api" {
         Deploy-Api
-        $externalUrl = if ($FrontendUrl) { $FrontendUrl } else { Get-ServiceUrl $apiService }
+        $externalUrl = if ($FrontendUrl) {
+            $FrontendUrl.TrimEnd("/")
+        } else {
+            Get-PublicServiceUrl $frontendService
+        }
         Set-ApiExternalUrl $externalUrl
         Write-Host "API URL: $(Get-ServiceUrl $apiService)"
     }
     "frontend" {
         $url = Deploy-Frontend
-        Set-ApiExternalUrl $url
-        Write-Host "Frontend URL: $url"
+        $externalUrl = if ($FrontendUrl) {
+            $FrontendUrl.TrimEnd("/")
+        } else {
+            Get-PublicServiceUrl $frontendService
+        }
+        Set-ApiExternalUrl $externalUrl
+        Write-Host "Frontend URL: $externalUrl"
     }
     "worker" { Deploy-Worker }
     "beat" { Deploy-Beat }
@@ -322,11 +344,16 @@ switch ($Component) {
         Deploy-Reindex
         Deploy-Api
         $url = Deploy-Frontend
-        Set-ApiExternalUrl $url
+        $externalUrl = if ($FrontendUrl) {
+            $FrontendUrl.TrimEnd("/")
+        } else {
+            Get-PublicServiceUrl $frontendService
+        }
+        Set-ApiExternalUrl $externalUrl
         Deploy-Worker
         Deploy-Beat
-        Write-Host "Frontend URL: $url"
+        Write-Host "Frontend URL: $externalUrl"
         Write-Host "API URL: $(Get-ServiceUrl $apiService)"
-        Write-Host "OAuth redirect URI: $url/api/auth/google/callback"
+        Write-Host "OAuth redirect URI: $externalUrl/api/auth/google/callback"
     }
 }

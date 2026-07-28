@@ -80,6 +80,9 @@ jobs:
       GCP_CORPUS_BUCKET: ${{ vars.GCP_CORPUS_BUCKET }}
       GCP_NETWORK: ${{ vars.GCP_NETWORK || 'default' }}
       GCP_SUBNET: ${{ vars.GCP_SUBNET || 'default' }}
+      GCP_PUBLIC_FRONTEND_URL: ${{ vars.GCP_PUBLIC_FRONTEND_URL }}
+      GCP_WORKER_INSTANCES: ${{ vars.GCP_WORKER_INSTANCES || '0' }}
+      GCP_BEAT_INSTANCES: ${{ vars.GCP_BEAT_INSTANCES || '0' }}
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       NEO4J_URI: ${{ secrets.NEO4J_URI }}
@@ -172,6 +175,9 @@ jobs:
             Network = $env:GCP_NETWORK
             Subnet = $env:GCP_SUBNET
             Neo4jUri = $env:NEO4J_URI
+            FrontendUrl = $env:GCP_PUBLIC_FRONTEND_URL
+            WorkerInstances = [int]$env:GCP_WORKER_INSTANCES
+            BeatInstances = [int]$env:GCP_BEAT_INSTANCES
             Component = "all"
             ExecuteMigrate = $true
           }
