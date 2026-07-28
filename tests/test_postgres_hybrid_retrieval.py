@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +21,7 @@ from app.external_graphrag import (
     reciprocal_rank_fusion,
     validate_postgres_embeddings,
 )
-from app.services.retrieval import serialize_source
+from app.services.retrieval import RetrievalService, serialize_source
 
 
 def _row(chunk_id: str, text: str = "nghia vu thue") -> dict:
@@ -190,6 +191,42 @@ def test_neo4j_hybrid_can_skip_graph_expansion_for_single_hop_chat() -> None:
     assert [row["chunk_id"] for row in rows] == ["seed"]
     assert rows[0]["source_id"] == "S1"
     assert recorded_limits == [3]
+
+
+def test_interactive_hybrid_retrieval_never_waits_for_graph_expansion() -> None:
+    store = object.__new__(Neo4jPostgresGraphRAGStore)
+    calls: list[dict[str, object]] = []
+
+    def retrieve(
+        query: str,
+        limit: int,
+        *,
+        expand_graph: bool = True,
+    ) -> list[dict]:
+        calls.append(
+            {
+                "query": query,
+                "limit": limit,
+                "expand_graph": expand_graph,
+            }
+        )
+        return [
+            {
+                **_row("seed", "nghia vu thue va muc phat"),
+                "score": 1.0,
+                "reasons": ["postgres_bm25"],
+            }
+        ]
+
+    store.retrieve = retrieve
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    service._store = store
+
+    rows = asyncio.run(service.retrieve("nghia vu thue va muc phat"))
+
+    assert rows
+    assert calls
+    assert all(call["expand_graph"] is False for call in calls)
 
 
 def test_neo4j_hybrid_defers_connectivity_check_until_graph_use(

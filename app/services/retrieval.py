@@ -494,9 +494,15 @@ class RetrievalService:
                 min(18, max(10, (result_limit + len(planned_queries) - 1) // len(planned_queries))),
             )
             result_sets = []
-            skip_graph_expansion = (
-                isinstance(store, Neo4jPostgresGraphRAGStore)
-                and build_answer_plan(query).get("mode") == "single_hop"
+            # Interactive chat must never wait on the optional Aura graph.
+            # PostgreSQL already supplies dense-vector + indexed lexical
+            # retrieval for the complete corpus. Neo4j remains available to
+            # offline and explicit graph operations, but a graph auth/network
+            # failure must not add its 40-50 second connection timeout to a
+            # user request (including planner false positives).
+            skip_graph_expansion = isinstance(
+                store,
+                Neo4jPostgresGraphRAGStore,
             )
             for planned_query in planned_queries:
                 retrieve_kwargs = (
