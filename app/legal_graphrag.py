@@ -1867,7 +1867,7 @@ class LegalGraphBuilder:
                 int(
                     os.getenv(
                         "LEGAL_EMBEDDING_CHECKPOINT_BATCH_SIZE",
-                        "20",
+                        "640",
                     )
                 ),
             )
