@@ -311,6 +311,7 @@ class ExternalGraphRAGConfig:
     embedding_data_policy: str = "redact"
     embedding_vertex_locations: tuple[str, ...] = ()
     embedding_vertex_requests_per_minute: float = 0.0
+    embedding_vertex_max_queue_wait_seconds: float = 0.0
     hybrid_vector_weight: float = 0.55
     hybrid_bm25_weight: float = 0.45
     hybrid_rrf_k: int = 60
@@ -370,6 +371,9 @@ class ExternalGraphRAGConfig:
             embedding_vertex_requests_per_minute=float(
                 os.getenv("EMBEDDING_VERTEX_REQUESTS_PER_MINUTE", "0")
             ),
+            embedding_vertex_max_queue_wait_seconds=float(
+                os.getenv("EMBEDDING_VERTEX_MAX_QUEUE_WAIT_SECONDS", "0")
+            ),
             hybrid_vector_weight=float(os.getenv("HYBRID_VECTOR_WEIGHT", "0.55")),
             hybrid_bm25_weight=float(os.getenv("HYBRID_BM25_WEIGHT", "0.45")),
             hybrid_rrf_k=int(os.getenv("HYBRID_RRF_K", "60")),
@@ -398,6 +402,9 @@ class ExternalGraphRAGConfig:
             vertex_locations=self.embedding_vertex_locations,
             vertex_requests_per_minute=(
                 self.embedding_vertex_requests_per_minute
+            ),
+            vertex_max_queue_wait_seconds=(
+                self.embedding_vertex_max_queue_wait_seconds
             ),
         )
 
@@ -1742,19 +1749,19 @@ class Neo4jPostgresGraphRAGStore:
         query = normalize_space(query)
         if not query:
             return []
-        candidate_limit = (
-            max(32, top_k * 5)
-            if expand_graph
-            else max(24, top_k * 3)
-        )
-        candidates = self._postgres_candidates(query, candidate_limit)
-        if not candidates:
-            return []
         if not expand_graph:
-            selected = [dict(row) for row in candidates[:top_k]]
+            # The PostgreSQL store already performs vector + BM25 fusion and
+            # applies top_k. Asking it for a larger intermediate top_k caused
+            # it to scan up to 8x that enlarged value before immediately
+            # discarding the surplus here.
+            selected = self.rag.retrieve(query, top_k)
             for index, row in enumerate(selected, start=1):
                 row["source_id"] = f"S{index}"
             return selected
+        candidate_limit = max(32, top_k * 5)
+        candidates = self._postgres_candidates(query, candidate_limit)
+        if not candidates:
+            return []
 
         scores: dict[str, float] = {}
         rows_by_chunk: dict[str, dict[str, Any]] = {}

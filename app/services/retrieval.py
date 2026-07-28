@@ -437,6 +437,9 @@ def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
         embedding_vertex_requests_per_minute=(
             settings.embedding_vertex_requests_per_minute
         ),
+        embedding_vertex_max_queue_wait_seconds=(
+            settings.embedding_vertex_max_queue_wait_seconds
+        ),
         hybrid_vector_weight=settings.hybrid_vector_weight,
         hybrid_bm25_weight=settings.hybrid_bm25_weight,
         hybrid_rrf_k=settings.hybrid_rrf_k,

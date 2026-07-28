@@ -242,6 +242,31 @@ def test_vertex_location_pool_rate_limits_each_region(
     assert sleeps == [30.0]
 
 
+def test_vertex_location_pool_can_fail_fast_for_interactive_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.embeddings.time.monotonic",
+        lambda: 100.0,
+    )
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(500))
+    )
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            vertex_requests_per_minute=4.5,
+            vertex_max_queue_wait_seconds=2,
+        ),
+        client=client,
+    )
+    try:
+        assert service._reserve_vertex_location() == "asia-southeast1"
+        with pytest.raises(EmbeddingModelError, match="rate queue is busy"):
+            service._reserve_vertex_location()
+    finally:
+        client.close()
+
+
 def test_parse_vertex_locations_deduplicates_and_preserves_order() -> None:
     assert parse_vertex_locations(
         "asia-southeast1|us-central1,asia-southeast1; europe-west1"

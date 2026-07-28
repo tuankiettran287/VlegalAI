@@ -374,6 +374,9 @@ class LegalIndexer:
             embedding_vertex_requests_per_minute=(
                 self.settings.embedding_vertex_requests_per_minute
             ),
+            embedding_vertex_max_queue_wait_seconds=(
+                self.settings.embedding_vertex_max_queue_wait_seconds
+            ),
         )
 
     async def index_candidate(self, db: AsyncSession, candidate: LegalCandidate) -> LegalDocument:

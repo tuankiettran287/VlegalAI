@@ -120,6 +120,14 @@ class Settings(BaseSettings):
         ge=0,
         le=10_000,
     )
+    # Interactive API deployments can fail over to PostgreSQL lexical search
+    # instead of waiting behind the low Vertex embedding RPM queue. Reindex
+    # jobs leave this at zero so they continue waiting for their quota slot.
+    embedding_vertex_max_queue_wait_seconds: float = Field(
+        default=0,
+        ge=0,
+        le=600,
+    )
 
     tavily_api_key: str = ""
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"

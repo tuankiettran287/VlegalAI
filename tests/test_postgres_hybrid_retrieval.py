@@ -176,11 +176,11 @@ def test_neo4j_hybrid_can_skip_graph_expansion_for_single_hop_chat() -> None:
     }
     recorded_limits: list[int] = []
 
-    def candidates(_: str, limit: int) -> list[dict]:
+    def retrieve(_: str, limit: int) -> list[dict]:
         recorded_limits.append(limit)
         return [seed]
 
-    store._postgres_candidates = candidates
+    store.rag = SimpleNamespace(retrieve=retrieve)
     store._expand_node_scores = lambda _: (_ for _ in ()).throw(
         AssertionError("Graph expansion must not run")
     )
@@ -189,7 +189,7 @@ def test_neo4j_hybrid_can_skip_graph_expansion_for_single_hop_chat() -> None:
 
     assert [row["chunk_id"] for row in rows] == ["seed"]
     assert rows[0]["source_id"] == "S1"
-    assert recorded_limits == [24]
+    assert recorded_limits == [3]
 
 
 class _RecordingCursor:

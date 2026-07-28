@@ -92,6 +92,7 @@ class EmbeddingConfig:
     data_policy: str = "redact"
     vertex_locations: tuple[str, ...] = ()
     vertex_requests_per_minute: float = 0.0
+    vertex_max_queue_wait_seconds: float = 0.0
 
     @classmethod
     def from_env(cls) -> "EmbeddingConfig":
@@ -128,6 +129,9 @@ class EmbeddingConfig:
             ),
             vertex_requests_per_minute=float(
                 os.getenv("EMBEDDING_VERTEX_REQUESTS_PER_MINUTE", "0")
+            ),
+            vertex_max_queue_wait_seconds=float(
+                os.getenv("EMBEDDING_VERTEX_MAX_QUEUE_WAIT_SECONDS", "0")
             ),
         )
 
@@ -190,6 +194,7 @@ class EmbeddingConfig:
             )
             and self.timeout_seconds > 0
             and self.max_retries >= 1
+            and self.vertex_max_queue_wait_seconds >= 0
             and self.data_policy in {"allow", "redact", "deny"}
             and credentials_configured
         )
@@ -219,6 +224,9 @@ def embedding_config_from_settings(settings: Any) -> EmbeddingConfig:
         ),
         vertex_requests_per_minute=(
             settings.embedding_vertex_requests_per_minute
+        ),
+        vertex_max_queue_wait_seconds=(
+            settings.embedding_vertex_max_queue_wait_seconds
         ),
     )
 
@@ -405,6 +413,14 @@ class VertexAIEmbeddingService:
 
                 next_ready = min(self._location_next_ready.values())
                 delay = max(next_ready - now, 0.001)
+                max_queue_wait = (
+                    self.config.vertex_max_queue_wait_seconds
+                )
+                if max_queue_wait > 0 and delay > max_queue_wait:
+                    raise EmbeddingModelError(
+                        "Vertex AI embedding rate queue is busy; "
+                        "falling back to lexical retrieval."
+                    )
             time.sleep(delay)
 
     def _gemini_api_url(self, action: str) -> str:
