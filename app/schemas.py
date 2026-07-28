@@ -142,11 +142,13 @@ class DraftContractRequest(BaseModel):
     prompt: str = Field(min_length=8, max_length=30000)
     template_id: str | None = None
     template_name: str | None = Field(default=None, max_length=160)
+    source_text: str | None = Field(default=None, min_length=20, max_length=120000)
 
 
 class ReviewContractRequest(BaseModel):
     title: str | None = Field(default=None, max_length=160)
     text: str = Field(min_length=20, max_length=120000)
+    user_role: str | None = Field(default=None, max_length=240)
 
 
 class CompareContractRequest(BaseModel):

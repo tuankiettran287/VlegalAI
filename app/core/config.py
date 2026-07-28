@@ -8,7 +8,6 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -117,6 +116,19 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"
     tavily_timeout_seconds: int = 30
+    daily_article_enabled: bool = True
+    daily_article_topics: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "quyền và nghĩa vụ trong quan hệ lao động",
+            "giao kết và thực hiện hợp đồng dân sự",
+            "hợp đồng thương mại và quản trị rủi ro",
+            "bảo hiểm xã hội và quyền lợi người lao động",
+            "nhà ở, đất đai và giao dịch tài sản",
+            "thuế và nghĩa vụ tài chính của cá nhân, doanh nghiệp",
+            "bảo vệ người tiêu dùng trong giao dịch số",
+            "thành lập và quản trị doanh nghiệp",
+        ]
+    )
     official_legal_domains: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "vanban.chinhphu.vn",
@@ -150,6 +162,7 @@ class Settings(BaseSettings):
         "official_legal_domains",
         "oidc_admin_groups",
         "oidc_reviewer_groups",
+        "daily_article_topics",
         mode="before",
     )
     @classmethod

@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.celery import postgres_celery_urls
-
 
 database_url = os.getenv(
     "DATABASE_URL",
@@ -28,6 +28,10 @@ celery_app.conf.update(
         "verify-legal-corpus-every-night": {
             "task": "vlegal.verify_legal_corpus",
             "schedule": 24 * 60 * 60,
+        },
+        "publish-daily-legal-article": {
+            "task": "vlegal.publish_daily_legal_article",
+            "schedule": crontab(hour=7, minute=0),
         }
     },
 )

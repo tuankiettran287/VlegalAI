@@ -37,11 +37,12 @@ function apiUrl(path: string) {
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
+    const bodyIsFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
     response = await fetch(apiUrl(url), {
       credentials: "include",
       ...init,
       headers: {
-        "Content-Type": "application/json",
+        ...(bodyIsFormData ? {} : { "Content-Type": "application/json" }),
         ...(init?.headers || {}),
       },
     });
@@ -220,20 +221,57 @@ export type DraftResponse = {
   verification: VerificationReport;
 };
 
-export function draftContract(payload: { prompt: string; template_id?: string; template_name?: string }) {
+export function draftContract(payload: {
+  prompt: string;
+  template_id?: string;
+  template_name?: string;
+  source_text?: string;
+}) {
   return post<DraftResponse>("/api/contracts/draft", payload);
+}
+
+export type ExtractedContractDocument = {
+  filename: string;
+  text: string;
+  original_chars: number;
+  truncated: boolean;
+  page_count: number | null;
+};
+
+export function extractContractDocument(file: File) {
+  const body = new FormData();
+  body.append("document", file);
+  return requestJson<ExtractedContractDocument>("/api/contracts/extract", {
+    method: "POST",
+    body,
+  });
 }
 
 export type ReviewResponse = {
   artifact_id: string;
   summary: string;
+  contract_type: string;
+  party_perspective: string;
+  key_terms: Array<{
+    label: string;
+    value: string;
+    assessment: string;
+  }>;
+  clause_reviews: Array<{
+    clause: string;
+    assessment: "favorable" | "neutral" | "unfavorable" | "missing";
+    issue: string;
+    suggested_revision: string;
+    citations: string[];
+  }>;
+  missing_clauses: string[];
   risks: Risk[];
   recommendations: string[];
   sources: Source[];
   verification: VerificationReport;
 };
 
-export function reviewContract(payload: { title?: string; text: string }) {
+export function reviewContract(payload: { title?: string; text: string; user_role?: string }) {
   return post<ReviewResponse>("/api/contracts/review", payload);
 }
 
@@ -242,12 +280,22 @@ export type CompareResponse = {
   summary: string;
   similarity: number;
   differences: Array<{
-    type: string;
+    type: "added" | "deleted" | "modified";
+    category: "money" | "term" | "responsibility" | "penalty" | "termination" | "other";
+    severity: "low" | "medium" | "high";
+    clause: string;
     before: string;
     after: string;
     legal_impact: string;
     citations: string[];
   }>;
+  important_changes: string[];
+  change_counts: {
+    added: number;
+    deleted: number;
+    modified: number;
+  };
+  analysis_truncated: boolean;
   risks: Risk[];
   recommendation: string;
   sources: Source[];

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import difflib
 import hashlib
 import logging
 import re
@@ -12,14 +11,25 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.exceptions import InvalidTag
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select, text as sql_text
+from sqlalchemy import delete, func, select
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.auth import current_user, optional_user, require_roles, router as auth_router
+from app.auth import current_user, optional_user, require_roles
+from app.auth import router as auth_router
 from app.core.config import Settings, get_settings
 from app.core.observability import log_progress
 from app.core.security import decrypt_text, encrypt_text
@@ -67,6 +77,16 @@ from app.services.ai import (
 )
 from app.services.articles import ArticleResearchService
 from app.services.chat_effort import ChatEffort, chat_effort_profile
+from app.services.contract_analysis import (
+    build_contract_diff,
+    contract_retrieval_query,
+    looks_like_contract,
+)
+from app.services.contract_documents import (
+    MAX_DOCUMENT_BYTES,
+    ContractDocumentError,
+    extract_contract_document,
+)
 from app.services.conversation_memory import ConversationMemoryService
 from app.services.embeddings import (
     VertexAIEmbeddingService,
@@ -93,7 +113,6 @@ from app.services.semantic_cache import (
     legal_fingerprint,
 )
 
-
 router = APIRouter()
 router.include_router(auth_router)
 logger = logging.getLogger(__name__)
@@ -115,14 +134,98 @@ CONTRACT_TEMPLATES = [
 ]
 
 
+@router.post("/contracts/extract")
+async def extract_contract_file(
+    document: UploadFile = File(...),
+    _: User = Depends(current_user),
+) -> dict[str, Any]:
+    data = await document.read(MAX_DOCUMENT_BYTES + 1)
+    try:
+        extracted = await run_in_threadpool(
+            extract_contract_document,
+            data,
+            document.filename or "hop-dong",
+            document.content_type,
+        )
+    except ContractDocumentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await document.close()
+    return {
+        "filename": extracted.filename,
+        "text": extracted.text,
+        "original_chars": extracted.original_chars,
+        "truncated": extracted.truncated,
+        "page_count": extracted.page_count,
+    }
+
+
 REVIEW_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["summary", "risks", "recommendations"],
+    "required": [
+        "summary",
+        "contract_type",
+        "party_perspective",
+        "key_terms",
+        "clause_reviews",
+        "missing_clauses",
+        "risks",
+        "recommendations",
+    ],
     "properties": {
         "summary": {
             "type": "string",
             "description": "Tóm tắt có [S1], [S2] ngay sau từng nhận định pháp lý.",
+        },
+        "contract_type": {"type": "string"},
+        "party_perspective": {"type": "string"},
+        "key_terms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["label", "value", "assessment"],
+                "properties": {
+                    "label": {"type": "string"},
+                    "value": {"type": "string"},
+                    "assessment": {"type": "string"},
+                },
+            },
+        },
+        "clause_reviews": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "clause",
+                    "assessment",
+                    "issue",
+                    "suggested_revision",
+                    "citations",
+                ],
+                "properties": {
+                    "clause": {"type": "string"},
+                    "assessment": {
+                        "type": "string",
+                        "enum": ["favorable", "neutral", "unfavorable", "missing"],
+                    },
+                    "issue": {"type": "string"},
+                    "suggested_revision": {"type": "string"},
+                    "citations": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "pattern": r"^(?:S\d+|\[S\d+\])$",
+                        },
+                    },
+                },
+            },
+        },
+        "missing_clauses": {
+            "type": "array",
+            "items": {"type": "string"},
         },
         "risks": {
             "type": "array",
@@ -137,7 +240,6 @@ REVIEW_SCHEMA = {
                     "recommendation": {"type": "string"},
                     "citations": {
                         "type": "array",
-                        "minItems": 1,
                         "items": {
                             "type": "string",
                             "pattern": r"^(?:S\d+|\[S\d+\])$",
@@ -160,7 +262,13 @@ REVIEW_SCHEMA = {
 COMPARE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["summary", "differences", "risks", "recommendation"],
+    "required": [
+        "summary",
+        "important_changes",
+        "differences",
+        "risks",
+        "recommendation",
+    ],
     "properties": {
         "summary": {
             "type": "string",
@@ -171,15 +279,42 @@ COMPARE_SCHEMA = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["type", "before", "after", "legal_impact", "citations"],
+                "required": [
+                    "type",
+                    "category",
+                    "severity",
+                    "clause",
+                    "before",
+                    "after",
+                    "legal_impact",
+                    "citations",
+                ],
                 "properties": {
-                    "type": {"type": "string"},
+                    "type": {
+                        "type": "string",
+                        "enum": ["added", "deleted", "modified"],
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "money",
+                            "term",
+                            "responsibility",
+                            "penalty",
+                            "termination",
+                            "other",
+                        ],
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                    },
+                    "clause": {"type": "string"},
                     "before": {"type": "string"},
                     "after": {"type": "string"},
                     "legal_impact": {"type": "string"},
                     "citations": {
                         "type": "array",
-                        "minItems": 1,
                         "items": {
                             "type": "string",
                             "pattern": r"^(?:S\d+|\[S\d+\])$",
@@ -187,6 +322,10 @@ COMPARE_SCHEMA = {
                     },
                 },
             },
+        },
+        "important_changes": {
+            "type": "array",
+            "items": {"type": "string"},
         },
         "risks": {"type": "array", "items": REVIEW_SCHEMA["properties"]["risks"]["items"]},
         "recommendation": {
@@ -1827,27 +1966,63 @@ async def draft_contract(
     freshness: LegalFreshnessService = Depends(freshness_service),
     ai: GeminiService = Depends(ai_service),
 ) -> dict[str, Any]:
+    operation_started = time.perf_counter()
+    log_progress(logger, "contract_draft", "started", operation_started)
     user_id = user.id
     await db.rollback()
     template = payload.template_name or next(
         (item["name"] for item in CONTRACT_TEMPLATES if item["id"] == payload.template_id), "Hợp đồng"
     )
-    query = f"Căn cứ pháp luật và điều kiện bắt buộc để soạn {template}: {payload.prompt[:3000]}"
-    sources, verification = await _legal_sources(query, retrieval, freshness)
+    requirements = payload.prompt.strip()
+    source_text = (payload.source_text or "").strip()
+    # Backwards compatibility for the old one-field UI: a pasted contract is
+    # treated as a source document instead of being sent to retrieval as a huge
+    # multi-hop question.
+    if not source_text and looks_like_contract(requirements):
+        source_text = requirements
+        requirements = "Rà soát, chuẩn hóa và hoàn thiện bản hợp đồng được cung cấp."
+
+    query = contract_retrieval_query(
+        f"Căn cứ và điều kiện bắt buộc để soạn {template}",
+        source_text or requirements,
+    )
+    sources, verification = await _legal_sources(
+        query,
+        retrieval,
+        freshness,
+        effort="instant",
+    )
+    log_progress(
+        logger,
+        "contract_draft",
+        "sources_ready",
+        operation_started,
+        source_count=len(sources),
+    )
+    task = (
+        "Hãy chỉnh lý và trả lại TOÀN BỘ hợp đồng hoàn chỉnh dựa trên bản hiện có. "
+        "Giữ nội dung hợp lý, sửa điểm mâu thuẫn hoặc thiếu và dùng [ngoặc vuông] cho dữ liệu chưa có."
+        if source_text
+        else "Hãy soạn TOÀN BỘ hợp đồng hoàn chỉnh theo yêu cầu."
+    )
     draft = await ai.complete(
         CONTRACT_SYSTEM_PROMPT,
         f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\nNGUỒN:\n{build_context(sources)}\n\n"
-        "Hãy soạn hợp đồng theo dữ liệu đầu vào dưới đây.\n"
-        f"{untrusted_data_block('CONTRACT_REQUEST', {'template': template, 'requirements': payload.prompt})}\n"
-        "Bao gồm căn cứ, định nghĩa, quyền/nghĩa vụ, thanh toán, vi phạm, "
-        "chấm dứt, tranh chấp và phần ký.",
-        max_tokens=5000,
+        f"{task}\n"
+        f"{untrusted_data_block('CONTRACT_REQUEST', {'template': template, 'requirements': requirements})}\n"
+        f"{untrusted_data_block('SOURCE_CONTRACT', source_text) if source_text else ''}\n"
+        "Bao gồm căn cứ và lưu ý pháp lý, định nghĩa, quyền/nghĩa vụ, thanh toán, "
+        "vi phạm, bồi thường, chấm dứt, tranh chấp và phần ký. Chỉ gắn [Sx] vào "
+        "nhận định pháp lý; điều khoản thương mại do người dùng cung cấp không cần trích dẫn.",
+        max_tokens=8192,
         temperature=0.12,
+        thinking_budget=1024,
     )
     validate_citations(
         draft,
         [source["source_id"] for source in sources],
-        require_claim_coverage=True,
+        require=False,
+        require_claim_coverage=False,
     )
     checklist = [
         "Điền và đối chiếu thông tin pháp lý của các bên.",
@@ -1858,7 +2033,20 @@ async def draft_contract(
     ]
     artifact = await _save_artifact(
         db, user_id, settings, kind="CONTRACT_DRAFT", title=template, content=draft,
-        metadata={"sources": sources, "verification": verification, "checklist": checklist},
+        metadata={
+            "sources": sources,
+            "verification": verification,
+            "checklist": checklist,
+            "mode": "revise" if source_text else "new",
+        },
+    )
+    log_progress(
+        logger,
+        "contract_draft",
+        "completed",
+        operation_started,
+        source_count=len(sources),
+        mode="revise" if source_text else "new",
     )
     return {
         "artifact_id": str(artifact.id), "title": template, "draft": draft, "checklist": checklist,
@@ -1876,25 +2064,57 @@ async def review_contract(
     freshness: LegalFreshnessService = Depends(freshness_service),
     ai: GeminiService = Depends(ai_service),
 ) -> dict[str, Any]:
+    operation_started = time.perf_counter()
+    log_progress(logger, "contract_review", "started", operation_started)
     user_id = user.id
     await db.rollback()
-    query = f"Rà soát hợp đồng và rủi ro pháp lý: {payload.title or ''} {payload.text[:5000]}"
-    sources, verification = await _legal_sources(query, retrieval, freshness)
+    query = contract_retrieval_query(
+        "Rà soát điều khoản và rủi ro hợp đồng",
+        payload.text,
+    )
+    sources, verification = await _legal_sources(
+        query,
+        retrieval,
+        freshness,
+        effort="instant",
+    )
+    log_progress(
+        logger,
+        "contract_review",
+        "sources_ready",
+        operation_started,
+        source_count=len(sources),
+    )
     result = await ai.complete_json(
         CONTRACT_SYSTEM_PROMPT,
         f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
         f"NGUỒN:\n{build_context(sources)}\n\n"
-        f"HỢP ĐỒNG:\n{untrusted_data_block('CONTRACT_TEXT', payload.text)}",
+        "Hãy review toàn bộ hợp đồng, không chỉ tóm tắt. Xác định loại hợp đồng, "
+        "các điều khoản chính, điểm bất lợi theo góc nhìn của người dùng, điều khoản "
+        "còn thiếu, mức độ rủi ro và câu chữ đề xuất sửa. Phân biệt rõ nhận xét về "
+        "nội dung hợp đồng với kết luận dựa trên pháp luật.\n"
+        f"{untrusted_data_block('USER_PERSPECTIVE', payload.user_role or 'Chưa xác định; đánh giá cân bằng cho cả hai bên')}\n"
+        f"{untrusted_data_block('CONTRACT_TITLE', payload.title or '')}\n"
+        f"{untrusted_data_block('CONTRACT_TEXT', payload.text)}",
         schema=REVIEW_SCHEMA,
-        max_tokens=4200,
+        max_tokens=8192,
+        thinking_budget=2048,
     )
     allowed_ids = [source["source_id"] for source in sources]
-    validate_citations(result, allowed_ids)
+    validate_citations(result, allowed_ids, require=False)
     _validate_narrative_claims(result["summary"], allowed_ids)
     _validate_narrative_claims(result["recommendations"], allowed_ids)
     artifact = await _save_artifact(
         db, user_id, settings, kind="CONTRACT_REVIEW", title=payload.title or "Kết quả review hợp đồng",
         content=result["summary"], metadata={**result, "sources": sources, "verification": verification},
+    )
+    log_progress(
+        logger,
+        "contract_review",
+        "completed",
+        operation_started,
+        risk_count=len(result["risks"]),
+        clause_count=len(result["clause_reviews"]),
     )
     return {**result, "artifact_id": str(artifact.id), "sources": sources, "verification": verification, "model": settings.gemini_model}
 
@@ -1909,26 +2129,106 @@ async def compare_contracts(
     freshness: LegalFreshnessService = Depends(freshness_service),
     ai: GeminiService = Depends(ai_service),
 ) -> dict[str, Any]:
+    operation_started = time.perf_counter()
+    log_progress(logger, "contract_compare", "started", operation_started)
     user_id = user.id
     await db.rollback()
-    query = f"Rủi ro pháp lý khi sửa đổi hợp đồng: {payload.original_text[:2500]} {payload.revised_text[:2500]}"
-    sources, verification = await _legal_sources(query, retrieval, freshness)
+    diff_context = await run_in_threadpool(
+        build_contract_diff,
+        payload.original_text,
+        payload.revised_text,
+    )
+    if not diff_context["changes"] and not diff_context["omitted_change_groups"]:
+        verification = VerificationReport(
+            checked=False,
+            all_current=False,
+            checked_at=datetime.now(UTC),
+            note="Hai phiên bản giống nhau; không phát sinh thay đổi pháp lý cần kiểm tra.",
+        ).model_dump(mode="json")
+        result = {
+            "summary": "Hai phiên bản hợp đồng không có khác biệt về nội dung.",
+            "important_changes": [],
+            "differences": [],
+            "risks": [],
+            "recommendation": "Không cần xử lý thay đổi. Hãy kiểm tra lại định dạng và phụ lục nếu có.",
+            "similarity": 100,
+            "change_counts": diff_context["counts"],
+            "analysis_truncated": False,
+        }
+        artifact = await _save_artifact(
+            db,
+            user_id,
+            settings,
+            kind="CONTRACT_COMPARE",
+            title="So sánh hợp đồng",
+            content=result["summary"],
+            metadata={**result, "sources": [], "verification": verification},
+        )
+        log_progress(
+            logger,
+            "contract_compare",
+            "completed",
+            operation_started,
+            outcome="identical",
+        )
+        return {
+            **result,
+            "artifact_id": str(artifact.id),
+            "sources": [],
+            "verification": verification,
+            "model": settings.gemini_model,
+        }
+
+    query = contract_retrieval_query(
+        "Đánh giá tác động pháp lý của thay đổi hợp đồng",
+        payload.original_text,
+        payload.revised_text,
+    )
+    sources, verification = await _legal_sources(
+        query,
+        retrieval,
+        freshness,
+        effort="instant",
+    )
+    log_progress(
+        logger,
+        "contract_compare",
+        "sources_ready",
+        operation_started,
+        source_count=len(sources),
+        structural_change_count=len(diff_context["changes"]),
+    )
     result = await ai.complete_json(
         CONTRACT_SYSTEM_PROMPT,
         f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\nNGUỒN:\n{build_context(sources)}\n\n"
-        f"BẢN GỐC:\n{untrusted_data_block('ORIGINAL_CONTRACT', payload.original_text)}\n\n"
-        f"BẢN SỬA:\n{untrusted_data_block('REVISED_CONTRACT', payload.revised_text)}",
+        "Đối chiếu các nhóm thay đổi đã được máy xác định. Liệt kê nội dung được thêm, "
+        "xóa hoặc sửa; ghép với điều khoản tương ứng; ưu tiên thay đổi về tiền, thời hạn, "
+        "trách nhiệm, phạt, bồi thường và chấm dứt. Tóm tắt các thay đổi quan trọng và "
+        "tác động đối với người ký. Không tự tạo khác biệt ngoài dữ liệu STRUCTURAL_DIFF.\n"
+        f"{untrusted_data_block('DOCUMENT_TITLES', {'original': payload.original_title, 'revised': payload.revised_title})}\n"
+        f"{untrusted_data_block('STRUCTURAL_DIFF', diff_context)}",
         schema=COMPARE_SCHEMA,
-        max_tokens=4800,
+        max_tokens=8192,
+        thinking_budget=2048,
     )
     allowed_ids = [source["source_id"] for source in sources]
-    validate_citations(result, allowed_ids)
+    validate_citations(result, allowed_ids, require=False)
     _validate_narrative_claims(result["summary"], allowed_ids)
     _validate_narrative_claims(result["recommendation"], allowed_ids)
-    result["similarity"] = round(difflib.SequenceMatcher(None, payload.original_text, payload.revised_text).ratio() * 100)
+    result["similarity"] = diff_context["similarity"]
+    result["change_counts"] = diff_context["counts"]
+    result["analysis_truncated"] = diff_context["truncated_for_analysis"]
     artifact = await _save_artifact(
         db, user_id, settings, kind="CONTRACT_COMPARE", title="So sánh hợp đồng",
         content=result["summary"], metadata={**result, "sources": sources, "verification": verification},
+    )
+    log_progress(
+        logger,
+        "contract_compare",
+        "completed",
+        operation_started,
+        difference_count=len(result["differences"]),
+        analysis_truncated=result["analysis_truncated"],
     )
     return {**result, "artifact_id": str(artifact.id), "sources": sources, "verification": verification, "model": settings.gemini_model}
 

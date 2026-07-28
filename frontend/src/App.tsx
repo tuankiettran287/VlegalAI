@@ -3,6 +3,7 @@ import {
   ReactNode,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -54,6 +55,7 @@ import {
   compareContracts,
   conversationApi,
   draftContract,
+  extractContractDocument,
   getTemplates,
   prepareSignature,
   reviewContract,
@@ -312,11 +314,6 @@ function usePath() {
   return [path, navigate] as const;
 }
 
-async function readTextFile(file: File) {
-  const text = await file.text();
-  return text.slice(0, 120000);
-}
-
 function ErrorNotice({ error, onClose }: { error: string; onClose?: () => void }) {
   return (
     <div className="error-notice" role="alert">
@@ -453,26 +450,68 @@ function PageHeader({ title, subtitle, action }: { title: string; subtitle: stri
   );
 }
 
-function DocumentInput({ title, value, onChange }: { title: string; value: string; onChange: (value: string) => void }) {
+function DocumentInput({
+  title,
+  value,
+  onChange,
+  onError,
+}: {
+  title: string;
+  value: string;
+  onChange: (value: string) => void;
+  onError?: (message: string) => void;
+}) {
+  const inputId = useId();
+  const [uploading, setUploading] = useState(false);
+  const [fileName, setFileName] = useState("");
+
   return (
-    <label className="document-input">
-      <span>{title}</span>
-      <textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={`Dán nội dung ${title.toLowerCase()}...`} />
+    <div className="document-input">
+      <label htmlFor={`${inputId}-text`}>{title}</label>
+      <textarea
+        id={`${inputId}-text`}
+        value={value}
+        maxLength={120000}
+        onChange={(event) => {
+          onChange(event.target.value);
+          if (fileName) setFileName("");
+        }}
+        placeholder={`Dán nội dung ${title.toLowerCase()} hoặc tải file lên...`}
+      />
       <div className="document-input-footer">
         <label className="ghost-button file-button">
-          <Upload size={16} /> Tải .txt/.md
+          {uploading ? <RefreshCw className="spin" size={16} /> : <Upload size={16} />}
+          {uploading ? "Đang đọc file…" : "Tải PDF/DOCX/TXT"}
           <input
             type="file"
-            accept=".txt,.md"
+            accept=".pdf,.docx,.txt,.md"
+            disabled={uploading}
             onChange={async (event) => {
               const file = event.target.files?.[0];
-              if (file) onChange(await readTextFile(file));
+              if (!file) return;
+              setUploading(true);
+              onError?.("");
+              try {
+                const extracted = await extractContractDocument(file);
+                onChange(extracted.text);
+                setFileName(
+                  `${extracted.filename}${extracted.truncated ? " · đã lấy 120.000 ký tự đầu" : ""}`,
+                );
+              } catch (reason) {
+                onError?.((reason as Error).message);
+              } finally {
+                setUploading(false);
+                event.target.value = "";
+              }
             }}
           />
         </label>
-        <span>{value.length.toLocaleString("vi-VN")} ký tự</span>
+        <span title={fileName || undefined}>
+          {fileName ? `${fileName} · ` : ""}
+          {value.length.toLocaleString("vi-VN")} ký tự
+        </span>
       </div>
-    </label>
+    </div>
   );
 }
 
@@ -910,7 +949,9 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
 function ContractPage() {
   const [templates, setTemplates] = useState<Template[]>(templateFallback);
   const [selected, setSelected] = useState<Template>(templateFallback[0]);
+  const [mode, setMode] = useState<"new" | "revise">("new");
   const [prompt, setPrompt] = useState("");
+  const [sourceText, setSourceText] = useState("");
   const [result, setResult] = useState<DraftResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -926,11 +967,18 @@ function ContractPage() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!prompt.trim()) return;
+    const effectivePrompt = prompt.trim() || "Rà soát, chuẩn hóa và hoàn thiện hợp đồng được cung cấp.";
+    if (mode === "new" && effectivePrompt.length < 8) return;
+    if (mode === "revise" && sourceText.trim().length < 20) return;
     setLoading(true);
     setError("");
     try {
-      setResult(await draftContract({ prompt, template_id: selected.id, template_name: selected.name }));
+      setResult(await draftContract({
+        prompt: effectivePrompt,
+        template_id: selected.id,
+        template_name: selected.name,
+        source_text: mode === "revise" ? sourceText : undefined,
+      }));
     } catch (reason) {
       setError((reason as Error).message);
     } finally {
@@ -944,6 +992,22 @@ function ContractPage() {
       {error && <ErrorNotice error={error} onClose={() => setError("")} />}
       <div className="workspace-grid">
         <form className="workspace-card tool-form" onSubmit={submit}>
+          <div className="contract-mode-toggle" role="group" aria-label="Cách tạo hợp đồng">
+            <button
+              type="button"
+              className={mode === "new" ? "active" : ""}
+              onClick={() => setMode("new")}
+            >
+              <FilePenLine size={16} /> Soạn hợp đồng mới
+            </button>
+            <button
+              type="button"
+              className={mode === "revise" ? "active" : ""}
+              onClick={() => setMode("revise")}
+            >
+              <Upload size={16} /> Hoàn thiện bản có sẵn
+            </button>
+          </div>
           <div className="section-title"><span>1</span><div><h2>Chọn loại hợp đồng</h2><p>Có thể đổi loại sau khi đã nhập yêu cầu.</p></div></div>
           <div className="template-grid-inline">
             {templates.map((item) => (
@@ -953,12 +1017,53 @@ function ContractPage() {
               </button>
             ))}
           </div>
-          <div className="section-title"><span>2</span><div><h2>Mô tả yêu cầu</h2><p>Nêu các bên, mục đích, giá trị, thời hạn và điều kiện đặc biệt.</p></div></div>
-          <textarea className="large-textarea" value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={30000} placeholder="Ví dụ: Soạn hợp đồng dịch vụ phát triển phần mềm giữa công ty A và công ty B, nghiệm thu theo 3 giai đoạn…" />
+          <div className="section-title">
+            <span>2</span>
+            <div>
+              <h2>{mode === "new" ? "Mô tả yêu cầu" : "Cung cấp hợp đồng hiện có"}</h2>
+              <p>
+                {mode === "new"
+                  ? "Nêu các bên, mục đích, giá trị, thời hạn và điều kiện đặc biệt."
+                  : "Tải PDF/DOCX/TXT hoặc dán toàn bộ nội dung cần chỉnh lý."}
+              </p>
+            </div>
+          </div>
+          {mode === "revise" && (
+            <DocumentInput
+              title="Hợp đồng cần hoàn thiện"
+              value={sourceText}
+              onChange={setSourceText}
+              onError={setError}
+            />
+          )}
+          <label className="field">
+            <span>{mode === "new" ? "Yêu cầu soạn thảo" : "Yêu cầu chỉnh sửa (không bắt buộc)"}</span>
+            <textarea
+              className="large-textarea"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              maxLength={30000}
+              placeholder={
+                mode === "new"
+                  ? "Nêu thông tin giao dịch, quyền và nghĩa vụ mong muốn, mốc thanh toán, thời hạn và điều kiện đặc biệt…"
+                  : "Nêu các nội dung cần giữ lại, bổ sung hoặc ưu tiên bảo vệ…"
+              }
+            />
+          </label>
           <div className="form-footer">
             <span className="policy-line"><ShieldCheck size={14} /> Tự kiểm tra luật hiện hành</span>
-            <button className="primary-button" type="submit" disabled={loading || prompt.trim().length < 8}>
-              {loading ? <><RefreshCw className="spin" size={16} /> Đang soạn…</> : <><Sparkles size={16} /> Tạo bản nháp</>}
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={
+                loading
+                || (mode === "new" && prompt.trim().length < 8)
+                || (mode === "revise" && sourceText.trim().length < 20)
+              }
+            >
+              {loading
+                ? <><RefreshCw className="spin" size={16} /> Đang xử lý…</>
+                : <><Sparkles size={16} /> {mode === "new" ? "Tạo bản nháp" : "Hoàn thiện hợp đồng"}</>}
             </button>
           </div>
         </form>
@@ -990,6 +1095,7 @@ function RiskList({ risks }: { risks?: Risk[] }) {
 
 function ReviewPage() {
   const [title, setTitle] = useState("");
+  const [userRole, setUserRole] = useState("");
   const [text, setText] = useState("");
   const [result, setResult] = useState<ReviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1001,17 +1107,83 @@ function ReviewPage() {
       <div className="workspace-grid">
         <form className="workspace-card tool-form" onSubmit={async (event) => {
           event.preventDefault(); setLoading(true); setError("");
-          try { setResult(await reviewContract({ title: title || undefined, text })); }
+          try {
+            setResult(await reviewContract({
+              title: title || undefined,
+              text,
+              user_role: userRole || undefined,
+            }));
+          }
           catch (reason) { setError((reason as Error).message); }
           finally { setLoading(false); }
         }}>
           <label className="field"><span>Tên tài liệu</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Hợp đồng dịch vụ 2026" /></label>
-          <DocumentInput title="Nội dung hợp đồng" value={text} onChange={setText} />
+          <label className="field">
+            <span>Bạn là bên nào trong hợp đồng?</span>
+            <input
+              value={userRole}
+              onChange={(event) => setUserRole(event.target.value)}
+              maxLength={240}
+              placeholder="Ví dụ: bên thuê dịch vụ, người lao động, bên mua…"
+            />
+          </label>
+          <DocumentInput title="Nội dung hợp đồng" value={text} onChange={setText} onError={setError} />
           <button className="primary-button align-right" type="submit" disabled={loading || text.trim().length < 20}>
             {loading ? "Đang phân tích…" : "Phân tích hợp đồng"}
           </button>
         </form>
         <ResultPanel title="Kết quả review" text={result?.summary || "Kết quả tổng quan, danh sách rủi ro và khuyến nghị sẽ hiển thị tại đây."} sources={result?.sources} verification={result?.verification}>
+          {result && (
+            <>
+              <div className="review-context">
+                <span><small>Loại hợp đồng</small>{result.contract_type}</span>
+                <span><small>Góc nhìn đánh giá</small>{result.party_perspective}</span>
+              </div>
+              {result.key_terms.length > 0 && (
+                <section className="contract-analysis-section">
+                  <h3>Thông tin và điều khoản chính</h3>
+                  <div className="key-term-grid">
+                    {result.key_terms.map((item, index) => (
+                      <article key={`${item.label}-${index}`}>
+                        <small>{item.label}</small>
+                        <strong>{item.value}</strong>
+                        <p>{item.assessment}</p>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
+              {result.clause_reviews.length > 0 && (
+                <section className="contract-analysis-section">
+                  <h3>Rà soát theo điều khoản</h3>
+                  <div className="clause-review-list">
+                    {result.clause_reviews.map((item, index) => (
+                      <article className={item.assessment} key={`${item.clause}-${index}`}>
+                        <div>
+                          <span>{
+                            item.assessment === "unfavorable" ? "Bất lợi"
+                              : item.assessment === "missing" ? "Còn thiếu"
+                                : item.assessment === "favorable" ? "Có lợi"
+                                  : "Trung tính"
+                          }</span>
+                          <h4>{item.clause}</h4>
+                        </div>
+                        <p>{item.issue}</p>
+                        <strong>Đề xuất: {item.suggested_revision}</strong>
+                        {item.citations.length > 0 && <small>Nguồn: {item.citations.join(", ")}</small>}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
+              {result.missing_clauses.length > 0 && (
+                <div className="recommendations">
+                  <h3>Điều khoản còn thiếu</h3>
+                  {result.missing_clauses.map((item) => <p key={item}><Plus size={15} />{item}</p>)}
+                </div>
+              )}
+            </>
+          )}
           <RiskList risks={result?.risks} />
           {result?.recommendations?.length ? <div className="recommendations"><h3>Khuyến nghị</h3>{result.recommendations.map((item) => <p key={item}><Check size={15} />{item}</p>)}</div> : null}
         </ResultPanel>
@@ -1021,6 +1193,8 @@ function ReviewPage() {
 }
 
 function ComparePage() {
+  const [originalTitle, setOriginalTitle] = useState("");
+  const [revisedTitle, setRevisedTitle] = useState("");
   const [original, setOriginal] = useState("");
   const [revised, setRevised] = useState("");
   const [result, setResult] = useState<CompareResponse | null>(null);
@@ -1032,19 +1206,75 @@ function ComparePage() {
       {error && <ErrorNotice error={error} onClose={() => setError("")} />}
       <form className="compare-grid" onSubmit={async (event) => {
         event.preventDefault(); setLoading(true); setError("");
-        try { setResult(await compareContracts({ original_text: original, revised_text: revised })); }
+        try {
+          setResult(await compareContracts({
+            original_title: originalTitle || undefined,
+            revised_title: revisedTitle || undefined,
+            original_text: original,
+            revised_text: revised,
+          }));
+        }
         catch (reason) { setError((reason as Error).message); }
         finally { setLoading(false); }
       }}>
-        <DocumentInput title="Bản gốc" value={original} onChange={setOriginal} />
-        <DocumentInput title="Bản sửa đổi" value={revised} onChange={setRevised} />
+        <div className="compare-document-column">
+          <label className="field">
+            <span>Tên bản gốc</span>
+            <input value={originalTitle} onChange={(event) => setOriginalTitle(event.target.value)} placeholder="Phiên bản đã ký hoặc bản trước thương lượng" />
+          </label>
+          <DocumentInput title="Bản gốc" value={original} onChange={setOriginal} onError={setError} />
+        </div>
+        <div className="compare-document-column">
+          <label className="field">
+            <span>Tên bản sửa đổi</span>
+            <input value={revisedTitle} onChange={(event) => setRevisedTitle(event.target.value)} placeholder="Phiên bản đối tác gửi lại" />
+          </label>
+          <DocumentInput title="Bản sửa đổi" value={revised} onChange={setRevised} onError={setError} />
+        </div>
         <button className="primary-button compare-submit" type="submit" disabled={loading || original.length < 20 || revised.length < 20}>
           <FileDiff size={16} /> {loading ? "Đang so sánh…" : "So sánh hai phiên bản"}
         </button>
       </form>
       {result && <ResultPanel title={`Mức tương đồng ${result.similarity}%`} text={result.summary} sources={result.sources} verification={result.verification}>
-        <div className="diff-list">{result.differences.map((item, index) => <article key={`${item.type}-${index}`}><span>{item.type}</span><div><small>Trước</small><p>{item.before}</p></div><div><small>Sau</small><p>{item.after}</p></div><strong>{item.legal_impact}</strong><small>Nguồn: {item.citations.join(", ")}</small></article>)}</div>
+        <div className="compare-stat-grid">
+          <span className="added"><strong>{result.change_counts.added}</strong>Thêm</span>
+          <span className="deleted"><strong>{result.change_counts.deleted}</strong>Xóa</span>
+          <span className="modified"><strong>{result.change_counts.modified}</strong>Chỉnh sửa</span>
+        </div>
+        {result.analysis_truncated && (
+          <p className="search-warning">Tài liệu có quá nhiều nhóm thay đổi; phần tác động pháp lý và số lượng hiển thị tập trung vào các thay đổi đầu tiên đã đọc.</p>
+        )}
+        {result.important_changes.length > 0 && (
+          <div className="recommendations">
+            <h3>Thay đổi quan trọng</h3>
+            {result.important_changes.map((item) => <p key={item}><CheckCircle2 size={15} />{item}</p>)}
+          </div>
+        )}
+        <div className="diff-list">{result.differences.map((item, index) => (
+          <article className={`diff-${item.type} severity-${item.severity}`} key={`${item.type}-${item.clause}-${index}`}>
+            <header>
+              <span>{
+                item.type === "added" ? "Được thêm"
+                  : item.type === "deleted" ? "Bị xóa"
+                    : "Đã chỉnh sửa"
+              }</span>
+              <small>{item.clause} · {
+                item.category === "money" ? "Số tiền"
+                  : item.category === "term" ? "Thời hạn"
+                    : item.category === "responsibility" ? "Trách nhiệm"
+                      : item.category === "penalty" ? "Phạt vi phạm"
+                        : item.category === "termination" ? "Chấm dứt"
+                          : "Nội dung khác"
+              }</small>
+            </header>
+            <div><small>Trước</small><p>{item.before || "Không có"}</p></div>
+            <div><small>Sau</small><p>{item.after || "Không có"}</p></div>
+            <strong>{item.legal_impact}</strong>
+            {item.citations.length > 0 && <small>Nguồn: {item.citations.join(", ")}</small>}
+          </article>
+        ))}</div>
         <RiskList risks={result.risks} />
+        <div className="recommendations"><h3>Khuyến nghị xử lý</h3><p><Check size={15} />{result.recommendation}</p></div>
       </ResultPanel>}
     </section>
   );
@@ -1083,6 +1313,7 @@ function SignaturePage() {
 function ArticlesPage() {
   const [query, setQuery] = useState("");
   const [articles, setArticles] = useState<Article[]>([]);
+  const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
   const [webSummary, setWebSummary] = useState("");
   const [webSources, setWebSources] = useState<WebSource[]>([]);
   const [webProviders, setWebProviders] = useState<string[]>([]);
@@ -1096,11 +1327,11 @@ function ArticlesPage() {
   }, [load]);
   return (
     <section className="tool-page articles-page">
-      <PageHeader title="Bài viết & nghiên cứu" subtitle="Đọc nội dung đã biên tập hoặc tìm hiểu chủ đề pháp lý từ các nguồn công khai có dẫn chứng rõ ràng." />
+      <PageHeader title="Bài viết & nghiên cứu" subtitle="Theo dõi bài viết pháp lý được cập nhật mỗi ngày hoặc chủ động nghiên cứu một chủ đề từ các nguồn công khai có dẫn chứng rõ ràng." />
       {error && <ErrorNotice error={error} onClose={() => setError("")} />}
       <form className="web-search-card" onSubmit={async (event) => {
         event.preventDefault(); if (!query.trim()) return; setLoading(true); setError("");
-        try { const data = await articleApi.webSearch(query); setWebSummary(data.summary); setWebSources(data.sources); setWebProviders(data.providers_used); setWebWarnings(data.search_warnings); setGoogleSearchEntryPoint(data.google_search_entry_point || ""); load(query); }
+        try { const data = await articleApi.webSearch(query); setWebSummary(data.summary); setWebSources(data.sources); setWebProviders(data.providers_used); setWebWarnings(data.search_warnings); setGoogleSearchEntryPoint(data.google_search_entry_point || ""); load(); }
         catch (reason) { setError((reason as Error).message); }
         finally { setLoading(false); }
       }}>
@@ -1108,7 +1339,50 @@ function ArticlesPage() {
         <button className="primary-button" type="submit" disabled={loading || query.length < 2}>{loading ? "Đang tìm…" : "Tìm trên web"}</button>
       </form>
       {webSummary && <section className="research-result"><div className="research-heading"><span className="eyebrow">Tổng hợp từ internet</span><div className="provider-pills">{webProviders.map((provider) => <span key={provider}>{provider === "google" ? "Google Search" : "Tavily"}</span>)}</div></div>{webWarnings.length > 0 && <p className="search-warning">{webWarnings.join(" · ")}</p>}<div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(webSummary) }} />{googleSearchEntryPoint && <iframe className="google-search-entry" title="Thông tin đối chiếu từ Google Search" sandbox="allow-popups" referrerPolicy="no-referrer" srcDoc={googleSearchEntryPoint} />}<div className="web-source-grid">{webSources.map((source) => <a key={source.id} href={source.url} target="_blank" rel="noreferrer"><span>{source.id}</span><strong>{source.title}<small>{(source.providers || []).map((provider) => provider === "google" ? "Google" : "Tavily").join(" + ")}</small></strong><ExternalLink size={14} /></a>)}</div></section>}
-      <div className="article-list">{articles.map((article) => <article className="article-card" key={article.id}><div className="article-icon"><BookOpen size={23} /><span>{article.category}</span></div><div><small>{formatDate(article.published_at || article.created_at)} · {article.views} lượt xem</small><h2>{article.title}</h2><p>{article.excerpt}</p>{article.source_url && <a href={article.source_url} target="_blank" rel="noreferrer">Nguồn tham khảo <ExternalLink size={13} /></a>}</div></article>)}{!articles.length && <div className="empty-state"><BookOpen size={28} /><h3>Chưa có bài viết</h3><p>Hãy tìm một chủ đề trên web để bắt đầu nghiên cứu.</p></div>}</div>
+      {selectedArticle && (
+        <ResultPanel
+          title={selectedArticle.title}
+          text={selectedArticle.content}
+        >
+          <div className="article-detail-meta">
+            <span>{selectedArticle.category}</span>
+            <small>{formatDate(selectedArticle.published_at || selectedArticle.created_at)} · {selectedArticle.views} lượt xem</small>
+            <button type="button" className="ghost-button" onClick={() => setSelectedArticle(null)}><X size={14} /> Đóng bài viết</button>
+          </div>
+          {selectedArticle.web_sources?.length ? (
+            <div className="web-source-grid">
+              {selectedArticle.web_sources.map((source) => (
+                <a key={source.id} href={source.url} target="_blank" rel="noreferrer">
+                  <span>{source.id}</span>
+                  <strong>{source.title}</strong>
+                  <ExternalLink size={14} />
+                </a>
+              ))}
+            </div>
+          ) : null}
+        </ResultPanel>
+      )}
+      <div className="article-list">{articles.map((article) => (
+        <article className="article-card" key={article.id}>
+          <div className="article-icon"><BookOpen size={23} /><span>{article.category}</span></div>
+          <div>
+            <small>{formatDate(article.published_at || article.created_at)} · {article.views} lượt xem</small>
+            <h2>{article.title}</h2>
+            <p>{article.excerpt}</p>
+            <button
+              type="button"
+              className="article-read-button"
+              onClick={async () => {
+                setError("");
+                try { setSelectedArticle(await articleApi.get(article.slug)); }
+                catch (reason) { setError((reason as Error).message); }
+              }}
+            >
+              Đọc bài viết <ExternalLink size={13} />
+            </button>
+          </div>
+        </article>
+      ))}{!articles.length && <div className="empty-state"><BookOpen size={28} /><h3>Chưa có bài viết</h3><p>Bài viết pháp lý đầu tiên sẽ xuất hiện sau lịch cập nhật hằng ngày.</p></div>}</div>
     </section>
   );
 }
