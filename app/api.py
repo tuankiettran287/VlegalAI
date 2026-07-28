@@ -772,6 +772,69 @@ def _validate_professional_legal_opening(value: str) -> None:
         )
 
 
+_ANSWER_CONCEPT_GENERIC_TERMS = {
+    "cach",
+    "che",
+    "do",
+    "dung",
+    "huong",
+    "lao",
+    "luong",
+    "muc",
+    "nghia",
+    "nguoi",
+    "phap",
+    "quyen",
+    "tien",
+    "tinh",
+    "thu",
+    "tuc",
+    "viec",
+}
+
+
+def _validate_answer_plan_coverage(
+    value: str,
+    answer_plan: dict[str, Any] | None,
+) -> None:
+    """Reject a cited answer that discusses adjacent law but misses the issue."""
+
+    if not answer_plan:
+        return
+    raw_concepts = answer_plan.get("required_concepts")
+    if not isinstance(raw_concepts, list):
+        return
+
+    normalized_answer = _normalized_legal_reference(value)
+    missing: list[str] = []
+    for raw_concept in raw_concepts:
+        if not isinstance(raw_concept, dict):
+            continue
+        label = str(raw_concept.get("label") or "").strip()
+        normalized_label = _normalized_legal_reference(label)
+        if not normalized_label or normalized_label in normalized_answer:
+            continue
+        terms = {
+            token
+            for token in re.findall(r"[0-9a-z]+", normalized_label)
+            if len(token) >= 2
+            and token not in _ANSWER_CONCEPT_GENERIC_TERMS
+        }
+        if not terms:
+            continue
+        matched = sum(
+            re.search(rf"\b{re.escape(term)}\b", normalized_answer) is not None
+            for term in terms
+        )
+        if matched < min(2, len(terms)):
+            missing.append(label)
+    if missing:
+        raise GeminiError(
+            "Câu trả lời chưa giải quyết đúng khái niệm bắt buộc: "
+            + ", ".join(missing)
+        )
+
+
 async def _complete_with_citation_repair(
     ai: GeminiService,
     system: str,
@@ -779,6 +842,7 @@ async def _complete_with_citation_repair(
     *,
     allowed_ids: list[str],
     sources: list[dict[str, Any]] | None = None,
+    answer_plan: dict[str, Any] | None = None,
     max_tokens: int,
     temperature: float = 0.1,
 ) -> str:
@@ -812,6 +876,7 @@ async def _complete_with_citation_repair(
         if sources is not None:
             _validate_grounded_legal_references(answer, sources)
             _validate_professional_legal_opening(answer)
+        _validate_answer_plan_coverage(answer, answer_plan)
         log_progress(
             logger,
             "answer_generation",
@@ -839,6 +904,10 @@ async def _complete_with_citation_repair(
             "nêu căn cứ và kết luận trực tiếp; không thêm lời chào hoặc tiêu đề. "
             "Chỉ viết ngày có hiệu lực khi trường effective_date có trong nguồn. "
             "Không suy diễn từ kiến thức nền.\n"
+            "Phải giải quyết trực tiếp và đầy đủ mọi required_concepts trong "
+            "ANSWER_PLAN; không thay bằng khái niệm rộng hoặc gần nghĩa. Khi "
+            "nguồn có con số, tỷ lệ, điều kiện hay công thức trực tiếp, phải "
+            "nêu và giải thích cách áp dụng.\n"
             f"{untrusted_data_block('DRAFT_WITH_INVALID_CITATIONS', answer)}"
         )
         repair_schema = {
@@ -919,6 +988,7 @@ async def _complete_with_citation_repair(
             if sources is not None:
                 _validate_grounded_legal_references(repaired, sources)
                 _validate_professional_legal_opening(repaired)
+            _validate_answer_plan_coverage(repaired, answer_plan)
             log_progress(
                 logger,
                 "answer_generation",
@@ -1232,6 +1302,7 @@ async def chat(
         settings=settings,
     )
     retrieval_query = query_rewrite.retrieval_query
+    answer_plan = build_answer_plan(retrieval_query)
     log_progress(
         logger,
         "chat",
@@ -1289,6 +1360,7 @@ async def chat(
                 [source.get("source_id", "") for source in cached.sources],
                 require_claim_coverage=True,
             )
+            _validate_answer_plan_coverage(cached.answer, answer_plan)
             current_sources, current_verification = await _legal_sources(
                 retrieval_query,
                 retrieval,
@@ -1381,7 +1453,7 @@ async def chat(
                     f"{_summary_prompt(summary_context)}\n\n"
                     f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
                     "KẾ HOẠCH PHỦ CÂU HỎI:\n"
-                    f"{untrusted_data_block('ANSWER_PLAN', build_answer_plan(retrieval_query))}\n\n"
+                    f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
                     f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
                     f"NGUỒN:\n{build_context(sources)}\n\n"
                     f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
@@ -1393,6 +1465,7 @@ async def chat(
                     "không được sao chép các kết luận không còn phù hợp.",
                     allowed_ids=[source["source_id"] for source in sources],
                     sources=sources,
+                    answer_plan=answer_plan,
                     max_tokens=2200,
                 )
             except GeminiError as exc:

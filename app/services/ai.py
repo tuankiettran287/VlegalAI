@@ -1078,6 +1078,11 @@ cùng một nội dung dưới nhiều tiêu đề.
 - Với phép tính: nêu công thức, số liệu đầu vào, kết quả và giả định còn thiếu. Không cho
 một con số tuyệt đối nếu dữ kiện như vùng lương, mức lương giờ hoặc loại ngày làm việc
 chưa được xác định.
+- Dùng required_concepts trong ANSWER_PLAN như danh sách kiểm tra bắt buộc. Phải trả lời
+trực tiếp từng khái niệm bằng kết luận cụ thể, rồi mới giải thích. Không được thay bằng
+một khái niệm rộng hoặc gần nghĩa chỉ vì nguồn đó có cùng từ khóa.
+- Khi nguồn có tỷ lệ, số tiền, thời hạn, điều kiện hoặc công thức trực tiếp cho câu hỏi,
+phải nêu các giá trị đó và giải thích cách áp dụng; không chỉ mô tả nguyên tắc chung.
 - Chỉ thêm “Bạn nên làm gì:” khi có hành động thực tế hữu ích. Chỉ khuyên gặp luật sư/cơ
 quan có thẩm quyền khi vụ việc có rủi ro cao hoặc cần xem hồ sơ cụ thể; không dùng lời
 khuyên này như câu kết máy móc cho mọi phản hồi.

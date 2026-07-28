@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from fastapi.concurrency import run_in_threadpool
 
+from app import legal_ontology as ontology
 from app.core.config import Settings
 from app.external_graphrag import (
     ExternalGraphRAGConfig,
@@ -194,6 +195,47 @@ _CURRENCY_AMOUNT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_QUERY_CONCEPT_GROUPS = (
+    ontology.WAGE_COMPONENTS,
+    ontology.BONUS_TYPES,
+    ontology.PAY_FORMS,
+    ontology.PAY_PERIODS,
+    ontology.WAGE_BASES,
+    ontology.WAGE_FORMULAS,
+    ontology.CONTRACT_TYPES,
+    ontology.EVENTS,
+    ontology.BENEFITS,
+    ontology.OBLIGATIONS,
+    ontology.PROCEDURES,
+    ontology.DOSSIERS,
+    ontology.CONDITIONS,
+    ontology.AGENCIES,
+    ontology.TIME_TRIGGERS,
+    ontology.LEGAL_STATES,
+    ontology.VIOLATIONS,
+    ontology.EXTRA_SANCTIONS,
+    ontology.REMEDIES,
+)
+_CONCEPT_GENERIC_TERMS = {
+    *_QUERY_STOP_WORDS,
+    "cach",
+    "che",
+    "do",
+    "dung",
+    "huong",
+    "lao",
+    "luong",
+    "muc",
+    "nghia",
+    "phap",
+    "quyen",
+    "tien",
+    "tinh",
+    "thu",
+    "tuc",
+    "viec",
+}
+
 
 def _ascii(value: str) -> str:
     normalized = unicodedata.normalize("NFD", value)
@@ -210,6 +252,110 @@ def _significant_terms(value: str) -> list[str]:
             token
             for token in _WORD_RE.findall(_ascii(value))
             if len(token) >= 3 and token not in _QUERY_STOP_WORDS
+        )
+    )
+
+
+def _ontology_query_concepts() -> tuple[ontology.Concept, ...]:
+    concepts: dict[str, ontology.Concept] = {}
+    for group in _QUERY_CONCEPT_GROUPS:
+        for raw_item in group:
+            concept = (
+                raw_item[0]
+                if isinstance(raw_item, tuple)
+                and raw_item
+                and isinstance(raw_item[0], ontology.Concept)
+                else raw_item
+            )
+            if isinstance(concept, ontology.Concept):
+                concepts.setdefault(concept.key, concept)
+    return tuple(concepts.values())
+
+
+_QUERY_CONCEPTS = _ontology_query_concepts()
+
+
+def _matched_query_concepts(query: str) -> list[ontology.Concept]:
+    """Map colloquial questions to the repository's canonical legal concepts."""
+
+    query_ascii = _ascii(query)
+    scored: list[tuple[int, int, ontology.Concept]] = []
+    for concept in _QUERY_CONCEPTS:
+        matched_patterns = [
+            pattern
+            for pattern in concept.patterns
+            if pattern and pattern in query_ascii
+        ]
+        if not matched_patterns:
+            continue
+        longest = max(matched_patterns, key=len)
+        scored.append(
+            (
+                len(_significant_terms(longest)),
+                len(_ascii(concept.label)),
+                concept,
+            )
+        )
+
+    selected: list[ontology.Concept] = []
+    selected_signatures: list[set[str]] = []
+    for _, _, concept in sorted(
+        scored,
+        key=lambda item: (-item[0], -item[1], item[2].key),
+    ):
+        signature = set(_significant_terms(concept.label))
+        if any(
+            signature
+            and existing
+            and (signature <= existing or existing <= signature)
+            for existing in selected_signatures
+        ):
+            continue
+        selected.append(concept)
+        selected_signatures.append(signature)
+        if len(selected) >= 3:
+            break
+    return selected
+
+
+def _concept_discriminative_terms(concept: ontology.Concept) -> set[str]:
+    return {
+        term
+        for term in _significant_terms(concept.label)
+        if term not in _CONCEPT_GENERIC_TERMS
+    }
+
+
+def _concept_has_evidence(concept: ontology.Concept, evidence: str) -> bool:
+    evidence_ascii = _ascii(evidence)
+    label_ascii = _ascii(concept.label)
+    if label_ascii and label_ascii in evidence_ascii:
+        return True
+    if any(
+        pattern in evidence_ascii
+        for pattern in concept.patterns
+        if len(_significant_terms(pattern)) >= 2
+    ):
+        return True
+    terms = _concept_discriminative_terms(concept)
+    if not terms:
+        return False
+    matched = sum(term in evidence_ascii for term in terms)
+    return matched >= min(2, len(terms))
+
+
+def _concept_retrieval_query(concept: ontology.Concept) -> str:
+    details = [concept.description]
+    concept_terms = set(_significant_terms(concept.label))
+    for formula in ontology.WAGE_FORMULAS:
+        formula_terms = set(_significant_terms(formula.label))
+        if len(concept_terms.intersection(formula_terms)) >= 3:
+            details.append(formula.description)
+    return " ".join(
+        dict.fromkeys(
+            part.strip()
+            for part in [concept.label, *details]
+            if part and part.strip()
         )
     )
 
@@ -251,6 +397,19 @@ def _filter_rows_for_query_intent(
     """
 
     query_ascii = _ascii(query)
+    matched_concepts = _matched_query_concepts(query)
+    if matched_concepts:
+        concept_rows = [
+            row
+            for row in rows
+            if any(
+                _concept_has_evidence(concept, _row_evidence(row))
+                for concept in matched_concepts
+            )
+        ]
+        if concept_rows:
+            rows = concept_rows
+
     if "cuong buc lao dong" in query_ascii or "cuong buc" in query_ascii:
         relevant = [
             row for row in rows
@@ -399,6 +558,7 @@ def plan_retrieval_queries(query: str) -> list[str]:
 
     planned = [normalized]
     facets = _question_facets(normalized)
+    matched_concepts = _matched_query_concepts(normalized)
     if len(facets) >= 2:
         first_ascii = _ascii(facets[0])
         first_terms = [
@@ -424,7 +584,7 @@ def plan_retrieval_queries(query: str) -> list[str]:
                 "mức lương cơ sở cán bộ công chức viên chức "
                 "hệ số lương số tiền đồng tháng"
             )
-        elif "luong co ban" in query_ascii:
+        elif "luong co ban" in query_ascii and not matched_concepts:
             planned.append(
                 "tiền lương mức lương theo công việc "
                 "mức lương tối thiểu Điều 90 Điều 91"
@@ -432,6 +592,10 @@ def plan_retrieval_queries(query: str) -> list[str]:
     for markers, expansion in _LEGAL_QUERY_EXPANSIONS:
         if any(marker in query_ascii for marker in markers):
             planned.append(expansion)
+    planned.extend(
+        _concept_retrieval_query(concept)
+        for concept in matched_concepts
+    )
     return list(dict.fromkeys(planned))[:5]
 
 
@@ -480,6 +644,15 @@ def build_answer_plan(query: str) -> dict[str, Any]:
         "actors": actors,
         "focus_actor": focus or (actors[-1] if actors else ""),
     }
+    matched_concepts = _matched_query_concepts(query)
+    if matched_concepts:
+        plan["required_concepts"] = [
+            {
+                "label": concept.label,
+                "guidance": _concept_retrieval_query(concept),
+            }
+            for concept in matched_concepts
+        ]
     if _is_public_sector_base_wage_query(query):
         plan.update(
             {
@@ -509,6 +682,12 @@ def _rows_have_query_evidence(query: str, rows: list[dict[str, Any]]) -> bool:
             for row in rows[:24]
         )
     )
+    matched_concepts = _matched_query_concepts(query)
+    if matched_concepts and not all(
+        _concept_has_evidence(concept, evidence)
+        for concept in matched_concepts
+    ):
+        return False
     criminal_fact_anchors = (
         "giet nguoi",
         "giet",
@@ -778,7 +957,7 @@ class RetrievalService:
             if not _rows_have_query_evidence(query, rows):
                 return []
             answer_limit = {
-                "single_hop": 4,
+                "single_hop": 6,
                 "multi_hop": 12,
                 "multi_abstract": 24,
             }[route]

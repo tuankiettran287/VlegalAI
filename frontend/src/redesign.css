@@ -920,6 +920,16 @@ summary:focus-visible {
   line-height: 1.78;
 }
 
+.message.assistant .md-list-item {
+  margin-block: 2px;
+  padding-left: 10px;
+}
+
+.message.assistant .md-paragraph-gap {
+  display: block;
+  height: 8px;
+}
+
 .assistant-answer {
   position: relative;
 }

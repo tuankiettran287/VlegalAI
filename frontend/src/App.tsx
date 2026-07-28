@@ -103,13 +103,15 @@ function escapeHtml(value: string) {
 }
 
 function markdown(value: string) {
-  return escapeHtml(value || "")
+  return escapeHtml((value || "").replace(/\r\n?/g, "\n").trim())
     .replace(/^### (.*)$/gm, "<h3>$1</h3>")
     .replace(/^## (.*)$/gm, "<h2>$1</h2>")
     .replace(/^# (.*)$/gm, "<h1>$1</h1>")
     .replace(/^[-•] (.*)$/gm, "<div class='md-list-item'>• $1</div>")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/<\/div>\n+(?=<div class='md-list-item'>)/g, "</div>")
+    .replace(/\n{2,}/g, "<span class='md-paragraph-gap'></span>")
     .replace(/\n/g, "<br />");
 }
 

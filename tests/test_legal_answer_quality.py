@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.api import (
     _complete_with_citation_repair,
     _legal_sources,
+    _validate_answer_plan_coverage,
 )
-from app.services.ai import LEGAL_SYSTEM_PROMPT
+from app.services.ai import GeminiError, LEGAL_SYSTEM_PROMPT
 from app.services import retrieval as retrieval_module
 from app.services.retrieval import (
     RetrievalService,
@@ -82,6 +85,123 @@ def test_public_sector_base_salary_is_not_expanded_to_minimum_wage() -> None:
         for item in plan_retrieval_queries(
             "Mức lương cơ sở hiện nay là bao nhiêu?"
         )[1:]
+    )
+
+
+def test_ontology_expands_specific_concepts_instead_of_broad_wage_terms() -> None:
+    query = (
+        "tăng ca ban đêm thì lương nhận được "
+        "gấp bao nhiêu lần lương cơ bản"
+    )
+
+    planned = plan_retrieval_queries(query)
+    answer_plan = build_answer_plan(query)
+
+    assert any(
+        "Tiền lương làm thêm giờ" in item
+        and "150%" in item
+        and "300%" in item
+        for item in planned[1:]
+    )
+    assert any(
+        "Tiền lương làm việc vào ban đêm" in item
+        and "30%" in item
+        and "20%" in item
+        for item in planned[1:]
+    )
+    assert all("mức lương tối thiểu Điều 90 Điều 91" not in item for item in planned)
+    assert {
+        concept["label"]
+        for concept in answer_plan["required_concepts"]
+    } == {
+        "Tiền lương làm thêm giờ",
+        "Tiền lương làm việc vào ban đêm",
+    }
+
+
+def test_concept_filter_rejects_adjacent_sources_and_keeps_direct_rules() -> None:
+    query = (
+        "tăng ca ban đêm thì lương nhận được "
+        "gấp bao nhiêu lần lương cơ bản"
+    )
+
+    class _Store:
+        def retrieve(self, _: str, __: int) -> list[dict]:
+            return [
+                _source(
+                    "S1",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > "
+                        "Điều 91. Mức lương tối thiểu"
+                    ),
+                    text="Mức lương tối thiểu được xác lập theo vùng.",
+                ),
+                _source(
+                    "S2",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > "
+                        "Điều 98. Tiền lương làm thêm giờ > Khoản 1"
+                    ),
+                    text=(
+                        "Tiền lương làm thêm giờ ít nhất bằng 150% vào ngày "
+                        "thường, 200% ngày nghỉ và 300% ngày lễ, tết."
+                    ),
+                ),
+                _source(
+                    "S3",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > "
+                        "Điều 98. Tiền lương làm thêm giờ > Khoản 2"
+                    ),
+                    text=(
+                        "Người lao động làm việc vào ban đêm được trả thêm "
+                        "ít nhất bằng 30%."
+                    ),
+                ),
+                _source(
+                    "S4",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > "
+                        "Điều 98. Tiền lương làm thêm giờ > Khoản 3"
+                    ),
+                    text=(
+                        "Người lao động làm thêm giờ vào ban đêm còn được "
+                        "trả thêm 20% tiền lương."
+                    ),
+                ),
+            ]
+
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    service._store = _Store()
+
+    rows = asyncio.run(service.retrieve(query))
+
+    assert len(rows) == 3
+    assert all("Điều 98" in row["citation"] for row in rows)
+    assert all("Điều 91" not in row["citation"] for row in rows)
+
+
+def test_answer_plan_rejects_cited_but_off_topic_answer() -> None:
+    answer_plan = build_answer_plan(
+        "tăng ca ban đêm thì lương nhận được "
+        "gấp bao nhiêu lần lương cơ bản"
+    )
+
+    with pytest.raises(GeminiError, match="chưa giải quyết đúng khái niệm"):
+        _validate_answer_plan_coverage(
+            (
+                "Theo Điều 91 Bộ luật Lao động, mức lương tối thiểu "
+                "được xác lập theo vùng [S1]."
+            ),
+            answer_plan,
+        )
+
+    _validate_answer_plan_coverage(
+        (
+            "Theo Điều 98 Bộ luật Lao động, tiền lương làm thêm giờ "
+            "vào ban đêm phải gồm các khoản trả thêm tương ứng [S1]."
+        ),
+        answer_plan,
     )
 
 
