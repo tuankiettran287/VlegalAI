@@ -227,17 +227,45 @@ function VerificationBadge({ report }: { report?: VerificationReport | null }) {
   );
 }
 
-function SourcePanel({ sources }: { sources?: Source[] | null }) {
+function citedSourceIds(answer: string) {
+  return new Set(
+    Array.from(answer.matchAll(/\[([A-Z]\d+)\]/gi), (match) => match[1].toUpperCase()),
+  );
+}
+
+function SourcePanel({
+  sources,
+  answer,
+}: {
+  sources?: Source[] | null;
+  answer?: string;
+}) {
   if (!Array.isArray(sources) || !sources.length) return null;
+  const citedIds = citedSourceIds(answer || "");
+  const citedSources = citedIds.size
+    ? sources.filter((source) => citedIds.has(source.source_id.toUpperCase()))
+    : [];
+  const showingCitations = citedSources.length > 0;
+  const displayedSources = showingCitations ? citedSources : sources;
+
   return (
     <details className="source-panel">
       <summary>
         <FileText size={16} />
-        <span>{sources.length} căn cứ được sử dụng</span>
+        <span className="source-summary-copy">
+          <strong>
+            {showingCitations
+              ? `${displayedSources.length} căn cứ được trích dẫn`
+              : `${sources.length} kết quả truy hồi tham khảo`}
+          </strong>
+          {showingCitations && displayedSources.length !== sources.length && (
+            <small>từ {sources.length} kết quả truy hồi</small>
+          )}
+        </span>
         <ChevronDown size={16} />
       </summary>
       <div className="source-list">
-        {sources.map((source) => (
+        {displayedSources.map((source) => (
           <article className="source-item" key={`${source.source_id}-${source.citation}`}>
             <div className="source-title">
               <span className="source-id">{source.source_id}</span>
@@ -683,7 +711,7 @@ function ChatPage({
                     <div dangerouslySetInnerHTML={{ __html: markdown(message.content) }} />
                     {message.pending && <div className="loading-line" />}
                     <VerificationBadge report={message.verification} />
-                    <SourcePanel sources={message.sources} />
+                    <SourcePanel sources={message.sources} answer={message.content} />
                   </div>
                 </article>
               ))}
