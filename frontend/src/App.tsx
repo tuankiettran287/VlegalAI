@@ -116,54 +116,36 @@ const chatEffortOptions: Array<{
   },
 ];
 
-function normalizeQuestion(value: string) {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/đ/g, "d")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function recommendChatEffort(question: string): ChatEffort {
-  const normalized = normalizeQuestion(question);
+  const normalized = question.replace(/\s+/g, " ").trim();
   if (!normalized) return "medium";
-  const scenarioSignals = [
-    "tinh huong",
-    "truong hop",
-    "gia su",
-    "tranh chap",
-    "khoi kien",
-    "boi thuong",
-    "xu ly nhu the nao",
-    "toi nen lam gi",
-    "cau hoi 1",
-    "cau hoi 2",
-  ];
+
+  const wordCount = normalized.match(/[\p{L}\p{N}]+/gu)?.length || 0;
   const sentenceCount = normalized.split(/[.!?;]+/).filter(Boolean).length;
+  const questionCount = normalized.match(/\?/g)?.length || 0;
+  const paragraphCount = question
+    .split(/\n+/)
+    .filter((part) => part.trim()).length;
+  const listedItemCount = question.match(
+    /(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+/gm,
+  )?.length || 0;
+
   if (
-    normalized.length >= 220
+    normalized.length >= 240
+    || wordCount >= 45
     || sentenceCount >= 4
-    || scenarioSignals.some((signal) => normalized.includes(signal))
+    || questionCount >= 2
+    || paragraphCount >= 3
+    || listedItemCount >= 2
   ) {
     return "high";
   }
-  const quickSignals = [
-    "la gi",
-    "bao nhieu",
-    "khi nao",
-    "o dau",
-    "co duoc khong",
-    "muc luong",
-    "thoi han",
-  ];
   if (
-    normalized.length <= 48
-    || (
-      normalized.length <= 100
-      && quickSignals.some((signal) => normalized.includes(signal))
-    )
+    normalized.length <= 80
+    && wordCount <= 14
+    && sentenceCount <= 1
+    && questionCount <= 1
+    && paragraphCount <= 1
   ) {
     return "instant";
   }

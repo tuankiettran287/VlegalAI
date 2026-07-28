@@ -558,31 +558,30 @@ def classify_retrieval_route(query: str) -> RetrievalRoute:
     legal_references = {
         match.casefold() for match in _LEGAL_REFERENCE_RE.findall(query_ascii)
     }
-    scenario_issue_markers = {
-        marker
-        for marker in (
-            "co duoc",
-            "phai",
-            "xu ly",
-            "boi thuong",
-            "quyen",
-            "nghia vu",
-            "trach nhiem",
-            "khoi kien",
+    sentence_count = len(
+        [
+            sentence
+            for sentence in re.split(r"(?<=[.!?;])\s+", normalized)
+            if sentence.strip()
+        ]
+    )
+    question_count = normalized.count("?")
+    listed_issue_count = len(
+        re.findall(
+            r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+",
+            str(query or ""),
+            flags=re.MULTILINE,
         )
-        if re.search(rf"\b{re.escape(marker)}\b", query_ascii)
-    }
-    scenario_is_multi_issue = (
-        any(
-            marker in query_ascii
-            for marker in ("tinh huong", "truong hop", "gia su")
-        )
-        and len(scenario_issue_markers) >= 2
+    )
+    structurally_multi_issue = (
+        question_count >= 2
+        or listed_issue_count >= 2
+        or (len(normalized) >= 240 and sentence_count >= 3)
     )
     if (
         len(facets) >= 2
         or len(legal_references) >= 2
-        or scenario_is_multi_issue
+        or structurally_multi_issue
         or any(pattern.search(query_ascii) for pattern in _MULTI_HOP_PATTERNS)
     ):
         return "multi_hop"

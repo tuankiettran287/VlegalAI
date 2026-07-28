@@ -118,7 +118,7 @@ def test_instant_forces_one_direct_retrieval_query() -> None:
     assert store.calls[0][1] == 5
 
 
-def test_high_keeps_complex_question_on_graph_route() -> None:
+def test_high_keeps_structurally_complex_question_on_graph_route() -> None:
     class _Store:
         def retrieve(self, _: str, __: int) -> list[dict[str, object]]:
             return []
@@ -139,8 +139,10 @@ def test_high_keeps_complex_question_on_graph_route() -> None:
     asyncio.run(
         service.retrieve_for_effort(
             (
-                "Trong tình huống người lao động từ chối công việc nguy hiểm, "
-                "doanh nghiệp phải xử lý thế nào và có phải bồi thường không?"
+                "Một giao dịch phát sinh nhiều sự kiện ở các thời điểm khác nhau. "
+                "Mỗi bên đã thực hiện một phần nghĩa vụ nhưng hồ sơ còn mâu thuẫn. "
+                "Quyền của bên thứ nhất được xác định thế nào? "
+                "Nghĩa vụ của bên thứ hai được xác định thế nào?"
             ),
             "high",
         )
