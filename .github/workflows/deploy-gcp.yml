@@ -93,8 +93,11 @@ jobs:
           NEO4J_DATABASE: ci
           GEMINI_PROJECT_ID: ci-project
           GCP_PROJECT_ID: ci-project
+          GCP_CREDENTIALS_FILE: ${{ runner.temp }}/ci-gcp-credentials.json
           IMAGE_TAG: ci
         run: |
+          : > .env
+          printf '{}\n' > "${GCP_CREDENTIALS_FILE}"
           docker compose --file docker-compose.yml config --quiet
           docker compose --file compose.gcp.yml config --quiet
 
