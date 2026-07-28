@@ -1177,7 +1177,13 @@ async def chat(
     memory: ConversationMemoryService = Depends(conversation_memory_service),
     answer_cache: SemanticAnswerCacheService = Depends(semantic_answer_cache_service),
 ) -> ChatResponse:
-    if not user.preferred_name:
+    # A rollback expires ORM instances even when the session factory uses
+    # expire_on_commit=False. Snapshot every user field needed after the
+    # read transaction is released so later access cannot trigger implicit
+    # async database IO (and therefore MissingGreenlet).
+    authenticated_user_id = user.id
+    preferred_name = user.preferred_name
+    if not preferred_name:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Vui lòng chọn tên gọi trước khi bắt đầu trò chuyện",
@@ -1186,7 +1192,6 @@ async def chat(
     operation_started = time.perf_counter()
     conversation: Conversation | None = None
     conversation_id: uuid.UUID | None = None
-    authenticated_user_id = user.id
     is_new_conversation = payload.conversation_id is None
     log_progress(
         logger,
@@ -1433,7 +1438,7 @@ async def chat(
                     logger.exception("Cannot store semantic answer cache entry")
 
     if is_new_conversation:
-        answer = f"Chào {user.preferred_name},\n\n{answer}"
+        answer = f"Chào {preferred_name},\n\n{answer}"
 
     message_id = uuid.uuid4()
     persistence_started = time.perf_counter()

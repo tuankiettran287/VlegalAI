@@ -647,6 +647,7 @@ def test_chat_returns_and_persists_data_unavailable_without_calling_ai() -> None
         def __init__(self) -> None:
             self.added: list[object] = []
             self.commits = 0
+            self.rolled_back = False
 
         def add(self, value: object) -> None:
             self.added.append(value)
@@ -673,11 +674,24 @@ def test_chat_returns_and_persists_data_unavailable_without_calling_ai() -> None
             self.commits += 1
 
         async def rollback(self) -> None:
-            return None
+            self.rolled_back = True
 
         async def refresh(self, value: object) -> None:
             if isinstance(value, ChatMessage) and value.id is None:
                 value.id = uuid.uuid4()
+
+    class _RollbackExpiringUser:
+        def __init__(self, db: _Db) -> None:
+            self.id = uuid.uuid4()
+            self.db = db
+
+        @property
+        def preferred_name(self) -> str:
+            if self.db.rolled_back:
+                raise AssertionError(
+                    "Chat accessed an expired ORM user after transaction rollback"
+                )
+            return "Minh"
 
     class _Cache:
         def eligible(self, *_: object, **__: object) -> bool:
@@ -691,7 +705,7 @@ def test_chat_returns_and_persists_data_unavailable_without_calling_ai() -> None
         return await chat(
             ChatRequest(message="Nghĩa vụ pháp lý của doanh nghiệp là gì?"),
             db=db,
-            user=SimpleNamespace(id=uuid.uuid4(), preferred_name="Minh"),
+            user=_RollbackExpiringUser(db),
             settings=Settings(_env_file=None, session_secret="guardrail-test"),
             retrieval=_EmptyRetrieval(),
             freshness=_FreshnessMustNotRun(),
