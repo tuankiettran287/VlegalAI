@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.5-flash"
     gemini_timeout_seconds: int = Field(default=120, ge=5, le=600)
     gemini_max_retries: int = Field(default=3, ge=1, le=3)
+    # Keep the broad vendor timeout for long workflows, but interactive chat
+    # must switch to retrieved-evidence fallback before a retry cycle can make
+    # the browser wait for minutes.
+    legal_chat_generation_timeout_seconds: int = Field(
+        default=18,
+        ge=5,
+        le=60,
+    )
     gemini_max_concurrent_generations: int = Field(default=8, ge=1, le=64)
     gemini_google_search_max_output_tokens: int = Field(
         default=16_384,

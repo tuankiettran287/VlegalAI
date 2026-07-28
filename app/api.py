@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import difflib
 import hashlib
 import logging
@@ -1406,8 +1407,9 @@ async def chat(
         )
         generation_started = time.monotonic()
         try:
-            answer = await _complete_with_citation_repair(
-                ai,
+            answer = await asyncio.wait_for(
+                _complete_with_citation_repair(
+                    ai,
                 LEGAL_SYSTEM_PROMPT,
                 "BỘ NHỚ TÓM TẮT:\n"
                 f"{_summary_prompt(summary_context)}\n\n"
@@ -1430,8 +1432,10 @@ async def chat(
                     if answer_plan.get("mode") == "single_hop"
                     else None
                 ),
+                ),
+                timeout=settings.legal_chat_generation_timeout_seconds,
             )
-        except GeminiError as exc:
+        except (GeminiError, TimeoutError) as exc:
             logger.error(
                 "Legal answer generation failed; returning grounded fallback "
                 "error_type=%s reason=%s",

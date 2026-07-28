@@ -196,6 +196,7 @@ function Deploy-Api {
         "GEMINI_PROJECT_ID=$ProjectId",
         "GEMINI_LOCATION=global",
         "GEMINI_MODEL=gemini-3.5-flash",
+        "LEGAL_CHAT_GENERATION_TIMEOUT_SECONDS=18",
         "GEMINI_MAX_CONCURRENT_GENERATIONS=8",
         "EMBEDDING_PROVIDER=vertex",
         "EMBEDDING_MODEL=gemini-embedding-001",

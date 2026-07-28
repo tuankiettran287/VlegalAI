@@ -392,6 +392,79 @@ def test_grounded_fallback_is_cited_and_passes_claim_validation() -> None:
     ) == {"S1"}
 
 
+def test_chat_generation_deadline_returns_grounded_fallback() -> None:
+    source = {
+        "source_id": "S1",
+        "score": 1,
+        "chunk_type": "article",
+        "citation": "Bộ luật Lao động (45/2019/QH14) > Điều 98",
+        "title": "Điều 98 Bộ luật Lao động",
+        "text": "Người lao động làm thêm giờ được trả ít nhất 150%.",
+        "reasons": [],
+        "doc_id": "labor-code",
+        "source_url": "https://vanban.chinhphu.vn/example",
+    }
+
+    class _Retrieval:
+        async def retrieve(self, _: str) -> list[dict]:
+            return [dict(source)]
+
+    class _Freshness:
+        settings = SimpleNamespace(
+            max_laws_verified_per_request=16,
+            require_freshness_check=False,
+        )
+
+    class _SlowAI:
+        async def complete(self, *_: object, **__: object) -> str:
+            await asyncio.sleep(1)
+            raise AssertionError("The generation deadline must cancel this call")
+
+    class _Cache:
+        @staticmethod
+        def eligible(*_: object, **__: object) -> bool:
+            return False
+
+    class _Limiter:
+        async def check(self, _: str) -> None:
+            return None
+
+    settings = Settings(
+        _env_file=None,
+        session_secret="generation-deadline-test-key-at-least-32-bytes",
+        require_freshness_check=False,
+    )
+    settings.legal_chat_generation_timeout_seconds = 0.01
+    request = SimpleNamespace(
+        cookies={},
+        headers={},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    result = asyncio.run(
+        chat(
+            ChatRequest(message="Cách tính lương làm thêm giờ?"),
+            request,
+            Response(),
+            BackgroundTasks(),
+            SimpleNamespace(),
+            None,
+            settings,
+            _Retrieval(),
+            _Freshness(),
+            _SlowAI(),
+            _Limiter(),
+            SimpleNamespace(),
+            _Cache(),
+        )
+    )
+
+    assert result.temporary
+    assert result.answer.startswith("Theo ")
+    assert "[S1]" in result.answer
+    assert result.sources[0].source_id == "S1"
+
+
 def test_single_hop_answer_policy_is_shorter_than_complex_modes() -> None:
     single_tokens, single_sources, instruction = _legal_answer_generation_policy(
         {"mode": "single_hop"}
