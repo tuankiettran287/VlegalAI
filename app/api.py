@@ -82,7 +82,6 @@ from app.services.guest_limit import GuestRateLimitExceeded, GuestRateLimitUnava
 from app.services.query_rewrite import rewrite_query_if_needed
 from app.services.retrieval import (
     RetrievalService,
-    append_detailed_citations,
     build_answer_plan,
     build_context,
     select_context_sources,
@@ -1456,7 +1455,6 @@ async def chat(
                     outcome="ai_unavailable",
                 )
             else:
-                answer = append_detailed_citations(answer, sources)
                 log_progress(
                     logger,
                     "chat",

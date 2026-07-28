@@ -28,7 +28,7 @@ from app.services.embeddings import (
 )
 
 
-LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v4-professional-chatbot"
+LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v5-explanatory-chatbot"
 _PRIVATE_CONTEXT_RE = re.compile(
     r"\b("
     r"tôi|mình|chúng tôi|của tôi|của mình|công ty tôi|gia đình tôi|"

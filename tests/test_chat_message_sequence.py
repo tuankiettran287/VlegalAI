@@ -177,3 +177,4 @@ def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() ->
     assert [message.message_sequence for message in messages] == [5, 6]
     assert result.conversation_id == conversation_id
     assert memory.refreshed == [conversation_id]
+    assert "Căn cứ được trích dẫn:" not in result.answer

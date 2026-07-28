@@ -13,7 +13,9 @@ from app.services.retrieval import (
     RetrievalService,
     append_detailed_citations,
     build_answer_plan,
+    build_context,
     classify_retrieval_route,
+    format_source_inline_locator,
     format_source_locator,
     format_source_opening,
     plan_retrieval_queries,
@@ -57,6 +59,102 @@ def test_compound_question_is_split_and_keeps_focus_actor() -> None:
     assert actor_plan["actors"] == ["bạn tôi", "tôi"]
     assert actor_plan["focus_actor"] == "tôi"
     assert len(actor_plan["must_answer"]) == 2
+
+
+def test_public_sector_base_salary_is_not_expanded_to_minimum_wage() -> None:
+    query = (
+        "Mức lương cơ bản hiện tại của cán bộ nhà nước "
+        "là bao nhiêu?"
+    )
+
+    planned = plan_retrieval_queries(query)
+    answer_plan = build_answer_plan(query)
+
+    assert any("mức lương cơ sở" in item for item in planned[1:])
+    assert all("mức lương tối thiểu" not in item for item in planned[1:])
+    assert answer_plan["target_concept"] == (
+        "mức lương cơ sở của cán bộ, công chức, viên chức"
+    )
+    assert answer_plan["requires_exact_value"] is True
+    assert "mức lương tối thiểu vùng" in answer_plan["do_not_confuse_with"]
+    assert any(
+        "mức lương cơ sở" in item
+        for item in plan_retrieval_queries(
+            "Mức lương cơ sở hiện nay là bao nhiêu?"
+        )[1:]
+    )
+
+
+def test_public_sector_salary_rejects_adjacent_minimum_wage_sources() -> None:
+    class _Store:
+        def retrieve(self, _: str, __: int) -> list[dict]:
+            return [
+                _source(
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > Chương VI > "
+                        "Điều 91. Mức lương tối thiểu"
+                    ),
+                    text=(
+                        "Mức lương tối thiểu được xác lập theo vùng, "
+                        "ấn định theo tháng, giờ."
+                    ),
+                ),
+                _source(
+                    "S2",
+                    citation=(
+                        "Luật Cán Bộ, Công Chức (80/2025/QH15) > "
+                        "Điều 41. Chính sách đối với công chức"
+                    ),
+                    text=(
+                        "Nhà nước thực hiện chính sách tiền lương "
+                        "đối với cán bộ, công chức."
+                    ),
+                ),
+            ]
+
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    service._store = _Store()
+
+    rows = asyncio.run(
+        service.retrieve(
+            "Mức lương cơ bản hiện tại của cán bộ nhà nước là bao nhiêu?"
+        )
+    )
+
+    assert rows == []
+
+
+def test_public_sector_salary_requires_and_accepts_exact_base_amount() -> None:
+    query = "Lương cơ sở của công chức hiện nay là bao nhiêu?"
+
+    class _Store:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def retrieve(self, _: str, __: int) -> list[dict]:
+            return [
+                _source(
+                    citation=(
+                        "Nghị định thử nghiệm (73/2024/NĐ-CP) > "
+                        "Điều 3. Mức lương cơ sở"
+                    ),
+                    text=self.text,
+                )
+            ]
+
+    incomplete = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    incomplete._store = _Store(
+        "Mức lương cơ sở được dùng để tính tiền lương trong bảng lương."
+    )
+    complete = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    complete._store = _Store(
+        "Mức lương cơ sở là 2,34 triệu đồng/tháng."
+    )
+
+    assert asyncio.run(incomplete.retrieve(query)) == []
+    rows = asyncio.run(complete.retrieve(query))
+    assert len(rows) == 1
+    assert "2,34 triệu đồng/tháng" in rows[0]["text"]
 
 
 def test_short_forced_labor_query_expands_to_definition_and_prohibition() -> None:
@@ -347,6 +445,25 @@ def test_citation_catalog_uses_article_clause_point_document_and_issuer() -> Non
     assert f"- Theo {locator} [S1]." in answer
 
 
+def test_answer_context_uses_concise_inline_citation() -> None:
+    source = {
+        **_source(),
+        "law_status": "IN_FORCE",
+        "law_checked_at": "2026-07-28T08:30:00+07:00",
+    }
+
+    locator = format_source_inline_locator(source)
+    context = build_context([source])
+
+    assert locator == (
+        "Điều 98, khoản 1, điểm c, Bộ Luật Lao Động số "
+        "45/2019/QH14"
+    )
+    assert f"Theo {locator} [S1]" in context
+    assert "do Quốc hội ban hành" not in context
+    assert "đang được xác nhận còn hiệu lực" not in context
+
+
 def test_source_opening_distinguishes_effective_and_verification_dates() -> None:
     source = _source()
 
@@ -385,10 +502,8 @@ def test_legal_prompt_requires_direct_professional_chatbot_opening() -> None:
 
     assert 'ký tự đầu tiên của câu trả lời phải là “Theo”' in normalized_prompt
     assert "có hiệu lực từ ngày" in normalized_prompt
-    assert (
-        "đang được xác nhận còn hiệu lực tại ngày"
-        in normalized_prompt
-    )
+    assert "không được thay “mức lương cơ sở/lương cơ bản" in normalized_prompt
+    assert "Chỉ viện dẫn một hoặc hai nguồn trực tiếp nhất" in normalized_prompt
     assert "focus_actor" in normalized_prompt
     assert "2–4 đoạn ngắn" in normalized_prompt
 

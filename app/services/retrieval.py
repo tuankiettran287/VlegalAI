@@ -164,10 +164,6 @@ _LEGAL_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
         ),
     ),
     (
-        ("luong co ban",),
-        "tiền lương mức lương theo công việc mức lương tối thiểu Điều 90 Điều 91",
-    ),
-    (
         ("lam le", "ngay le", "le tet"),
         "tiền lương làm thêm giờ ngày nghỉ lễ tết 300% Điều 98",
     ),
@@ -175,6 +171,27 @@ _LEGAL_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
         ("bao che",),
         "che giấu tội phạm không tố giác tội phạm trách nhiệm hình sự",
     ),
+)
+
+_PUBLIC_SECTOR_WAGE_ACTORS = (
+    "can bo",
+    "cong chuc",
+    "vien chuc",
+    "nha nuoc",
+    "khu vuc cong",
+)
+_BASE_WAGE_TERMS = ("luong co ban", "luong co so")
+_EXACT_VALUE_MARKERS = (
+    "bao nhieu",
+    "hien nay",
+    "hien tai",
+    "muc nao",
+    "la may",
+)
+_CURRENCY_AMOUNT_RE = re.compile(
+    r"(?<!\d)\d[\d.,\s]{1,}\s*(?:trieu\s+)?"
+    r"(?:dong|vnd)(?:\s*/?\s*thang)?\b",
+    re.IGNORECASE,
 )
 
 
@@ -195,6 +212,70 @@ def _significant_terms(value: str) -> list[str]:
             if len(token) >= 3 and token not in _QUERY_STOP_WORDS
         )
     )
+
+
+def _is_public_sector_base_wage_query(query: str) -> bool:
+    query_ascii = _ascii(query)
+    if "luong co so" in query_ascii:
+        return True
+    return (
+        "luong co ban" in query_ascii
+        and any(actor in query_ascii for actor in _PUBLIC_SECTOR_WAGE_ACTORS)
+    )
+
+
+def _requires_exact_public_sector_wage(query: str) -> bool:
+    query_ascii = _ascii(query)
+    return (
+        _is_public_sector_base_wage_query(query)
+        and any(marker in query_ascii for marker in _EXACT_VALUE_MARKERS)
+    )
+
+
+def _row_evidence(row: dict[str, Any]) -> str:
+    return _ascii(
+        f"{row.get('title', '')} {row.get('citation', '')} "
+        f"{row.get('text', '')}"
+    )
+
+
+def _filter_rows_for_query_intent(
+    query: str,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep adjacent wage concepts from answering a public-sector wage query.
+
+    In Vietnamese conversation, “lương cơ bản của cán bộ nhà nước” normally
+    points to the public-sector “mức lương cơ sở”. It must not silently fall
+    through to private-sector minimum-wage provisions.
+    """
+
+    if not _is_public_sector_base_wage_query(query):
+        return rows
+
+    primary = [
+        row for row in rows
+        if "luong co so" in _row_evidence(row)
+    ]
+    if not primary:
+        return []
+    if _requires_exact_public_sector_wage(query) and not any(
+        _CURRENCY_AMOUNT_RE.search(_row_evidence(row))
+        for row in primary
+    ):
+        return []
+
+    related = [
+        row
+        for row in rows
+        if row not in primary
+        and any(actor in _row_evidence(row) for actor in _PUBLIC_SECTOR_WAGE_ACTORS)
+        and any(
+            term in _row_evidence(row)
+            for term in ("he so luong", "bang luong", "che do tien luong")
+        )
+    ]
+    return [*primary, *related]
 
 
 def _accented_significant_terms(value: str) -> list[str]:
@@ -286,6 +367,17 @@ def plan_retrieval_queries(query: str) -> list[str]:
             if expanded.casefold() != normalized.casefold():
                 planned.append(expanded)
     query_ascii = _ascii(normalized)
+    if any(term in query_ascii for term in _BASE_WAGE_TERMS):
+        if _is_public_sector_base_wage_query(normalized):
+            planned.append(
+                "mức lương cơ sở cán bộ công chức viên chức "
+                "hệ số lương số tiền đồng tháng"
+            )
+        elif "luong co ban" in query_ascii:
+            planned.append(
+                "tiền lương mức lương theo công việc "
+                "mức lương tối thiểu Điều 90 Điều 91"
+            )
     for markers, expansion in _LEGAL_QUERY_EXPANSIONS:
         if any(marker in query_ascii for marker in markers):
             planned.append(expansion)
@@ -331,12 +423,26 @@ def build_answer_plan(query: str) -> dict[str, Any]:
         ):
             focus = label
             break
-    return {
+    plan: dict[str, Any] = {
         "mode": classify_retrieval_route(query),
         "must_answer": facets,
         "actors": actors,
         "focus_actor": focus or (actors[-1] if actors else ""),
     }
+    if _is_public_sector_base_wage_query(query):
+        plan.update(
+            {
+                "target_concept": (
+                    "mức lương cơ sở của cán bộ, công chức, viên chức"
+                ),
+                "requires_exact_value": _requires_exact_public_sector_wage(query),
+                "do_not_confuse_with": [
+                    "mức lương tối thiểu vùng",
+                    "mức lương theo công việc hoặc chức danh",
+                ],
+            }
+        )
+    return plan
 
 
 def _rows_have_query_evidence(query: str, rows: list[dict[str, Any]]) -> bool:
@@ -617,9 +723,18 @@ class RetrievalService:
                 result_limit,
                 planned_queries,
             )
+            rows = _filter_rows_for_query_intent(query, rows)
             if not _rows_have_query_evidence(query, rows):
                 return []
-            serialized = [serialize_source(row) for row in rows]
+            answer_limit = {
+                "single_hop": 6,
+                "multi_hop": 12,
+                "multi_abstract": 24,
+            }[route]
+            serialized = [
+                serialize_source(row)
+                for row in rows[:answer_limit]
+            ]
             for index, source in enumerate(serialized, start=1):
                 source["source_id"] = f"S{index}"
             return serialized
@@ -811,6 +926,21 @@ def format_source_opening(source: dict[str, Any]) -> str:
     return opening
 
 
+def format_source_inline_locator(source: dict[str, Any]) -> str:
+    """Return a concise locator for the answer body.
+
+    Issuer and freshness metadata remain available in the structured source
+    panel; repeating them in every answer opening obscures the conclusion.
+    """
+
+    return re.sub(
+        r",\s*do\s+.+?\s+ban hành$",
+        "",
+        format_source_locator(source),
+        flags=re.IGNORECASE,
+    )
+
+
 def append_detailed_citations(
     answer: str,
     sources: list[dict[str, Any]],
@@ -844,7 +974,7 @@ def build_context(sources: list[dict[str, Any]], max_chars: int = 48000) -> str:
             "source_id": str(source["source_id"]),
             "citation": str(source["citation"]),
             "citation_format": (
-                f"{format_source_opening(source)} "
+                f"Theo {format_source_inline_locator(source)} "
                 f"[{str(source['source_id'])}]"
             ),
             "effective_date": (
