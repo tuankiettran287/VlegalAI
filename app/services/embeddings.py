@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import math
 import os
 import random
@@ -34,6 +36,7 @@ GEMINI_API_SERVICE = "generativelanguage.googleapis.com"
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 VERTEX_LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 EMBEDDING_PROVIDERS = {"vertex", "gemini-api"}
+LOGGER = logging.getLogger(__name__)
 
 
 class EmbeddingModelError(RuntimeError):
@@ -140,10 +143,11 @@ class EmbeddingConfig:
             )
             and 128 <= self.dimensions <= 3072
             and self.max_concurrency >= 1
-            and 1 <= self.batch_size <= 100
+            and 1 <= self.batch_size <= 250
             and self.max_items_per_minute >= 0
             and (
-                self.max_items_per_minute == 0
+                provider == "vertex"
+                or self.max_items_per_minute == 0
                 or self.batch_size <= self.max_items_per_minute
             )
             and self.timeout_seconds > 0
@@ -364,15 +368,47 @@ class VertexAIEmbeddingService:
             )
         return [value / magnitude for value in vector]
 
-    def _parse_vertex_vector(self, response: httpx.Response) -> list[float]:
+    def _parse_vertex_vectors(
+        self,
+        response: httpx.Response,
+        *,
+        expected_count: int,
+        texts: list[str],
+    ) -> list[list[float]]:
         try:
             payload = response.json()
-            values = payload["predictions"][0]["embeddings"]["values"]
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            predictions = payload["predictions"]
+            if len(predictions) != expected_count:
+                raise ValueError("embedding count mismatch")
+            values_list = [
+                prediction["embeddings"]["values"]
+                for prediction in predictions
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
             raise EmbeddingModelError(
                 "Vertex AI embedding response has an invalid structure."
             ) from exc
-        return self._normalize_vector(values, provider_label="Vertex AI")
+        for index, (prediction, text) in enumerate(
+            zip(predictions, texts, strict=True)
+        ):
+            statistics = prediction.get("embeddings", {}).get(
+                "statistics",
+                {},
+            )
+            if not isinstance(statistics, dict):
+                continue
+            if statistics.get("truncated") is True:
+                LOGGER.warning(
+                    "Vertex AI truncated embedding input "
+                    "index=%d token_count=%s content_sha256=%s",
+                    index,
+                    statistics.get("token_count", "unknown"),
+                    hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                )
+        return [
+            self._normalize_vector(values, provider_label="Vertex AI")
+            for values in values_list
+        ]
 
     def _parse_gemini_vectors(
         self,
@@ -430,15 +466,23 @@ class VertexAIEmbeddingService:
                 pass
         return min(2**attempt, 60) + random.uniform(0, 0.25)
 
-    def _request_vertex_one(self, text: str, task_type: str) -> list[float]:
+    def _request_vertex_batch(
+        self,
+        texts: list[str],
+        task_type: str,
+    ) -> list[list[float]]:
+        if not texts:
+            return []
         last_error: EmbeddingModelError | None = None
         force_refresh = False
+        prepared_texts = [self._prepare_text(text) for text in texts]
         payload = {
             "instances": [
                 {
-                    "content": self._prepare_text(text),
+                    "content": text,
                     "task_type": task_type,
                 }
+                for text in prepared_texts
             ],
             "parameters": {
                 "autoTruncate": self.config.auto_truncate,
@@ -447,6 +491,8 @@ class VertexAIEmbeddingService:
         }
         for attempt in range(self.config.max_retries):
             response: httpx.Response | None = None
+            # Vertex enforces this quota per HTTP prediction request, not per
+            # instance inside the request.
             self._throttle_items(1)
             token = self._access_token(force_refresh=force_refresh)
             force_refresh = False
@@ -467,11 +513,29 @@ class VertexAIEmbeddingService:
                     raise last_error from exc
             else:
                 if response.status_code == 200:
-                    return self._parse_vertex_vector(response)
+                    return self._parse_vertex_vectors(
+                        response,
+                        expected_count=len(texts),
+                        texts=prepared_texts,
+                    )
                 last_error = EmbeddingModelError(
                     f"Vertex AI embedding returned HTTP {response.status_code}: "
                     f"{self._response_detail(response)}"
                 )
+                if response.status_code == 400 and len(texts) > 1:
+                    # Vertex also enforces a request-wide token ceiling.
+                    # Split oversized batches while preserving input order.
+                    midpoint = len(texts) // 2
+                    return (
+                        self._request_vertex_batch(
+                            texts[:midpoint],
+                            task_type,
+                        )
+                        + self._request_vertex_batch(
+                            texts[midpoint:],
+                            task_type,
+                        )
+                    )
                 if (
                     response.status_code == 401
                     and attempt + 1 < self.config.max_retries
@@ -487,6 +551,9 @@ class VertexAIEmbeddingService:
         raise last_error or EmbeddingModelError(
             "Vertex AI embedding request failed."
         )
+
+    def _request_vertex_one(self, text: str, task_type: str) -> list[float]:
+        return self._request_vertex_batch([text], task_type)[0]
 
     def _gemini_embed_request(self, text: str, task_type: str) -> dict[str, Any]:
         model = f"models/{self.config.model.strip()}"
@@ -602,45 +669,35 @@ class VertexAIEmbeddingService:
         del show_progress
         if not texts:
             return []
-        if self._provider == "gemini-api":
-            batches = [
-                texts[offset : offset + self.config.batch_size]
-                for offset in range(0, len(texts), self.config.batch_size)
-            ]
-            if len(batches) == 1 or self.config.max_concurrency == 1:
-                return [
-                    vector
-                    for batch in batches
-                    for vector in self._request_gemini_batch(batch, task_type)
-                ]
-            with ThreadPoolExecutor(
-                max_workers=min(self.config.max_concurrency, len(batches))
-            ) as executor:
-                batch_vectors = list(
-                    executor.map(
-                        lambda batch: self._request_gemini_batch(
-                            batch,
-                            task_type,
-                        ),
-                        batches,
-                    )
-                )
+        batches = [
+            texts[offset : offset + self.config.batch_size]
+            for offset in range(0, len(texts), self.config.batch_size)
+        ]
+        request_batch = (
+            self._request_gemini_batch
+            if self._provider == "gemini-api"
+            else self._request_vertex_batch
+        )
+        if len(batches) == 1 or self.config.max_concurrency == 1:
             return [
                 vector
-                for vectors in batch_vectors
-                for vector in vectors
+                for batch in batches
+                for vector in request_batch(batch, task_type)
             ]
-        if len(texts) == 1 or self.config.max_concurrency == 1:
-            return [self._request_one(text, task_type) for text in texts]
         with ThreadPoolExecutor(
-            max_workers=min(self.config.max_concurrency, len(texts))
+            max_workers=min(self.config.max_concurrency, len(batches))
         ) as executor:
-            return list(
+            batch_vectors = list(
                 executor.map(
-                    lambda text: self._request_one(text, task_type),
-                    texts,
+                    lambda batch: request_batch(batch, task_type),
+                    batches,
                 )
             )
+        return [
+            vector
+            for vectors in batch_vectors
+            for vector in vectors
+        ]
 
     def embed_documents(
         self,

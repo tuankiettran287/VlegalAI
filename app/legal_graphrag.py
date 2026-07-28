@@ -148,6 +148,23 @@ def token_count(text: str) -> int:
     return len(VN_WORD_RE.findall(text))
 
 
+def embedding_text_windows(text: str) -> list[str]:
+    """Bound structural chunks so Vertex never silently drops their tail."""
+
+    if token_count(text) <= CHUNK_WINDOW_WORDS + 80:
+        return [text]
+
+    raw_words = text.split()
+    step = max(80, CHUNK_WINDOW_WORDS - CHUNK_OVERLAP_WORDS)
+    windows: list[str] = []
+    for start in range(0, len(raw_words), step):
+        window = raw_words[start : start + CHUNK_WINDOW_WORDS]
+        if len(window) < 80:
+            break
+        windows.append(" ".join(window))
+    return windows or [text]
+
+
 #: Letterhead lines that precede the real title of a Vietnamese legal document.
 MASTHEAD_RE = re.compile(
     r"^(quoc hoi|chinh phu|uy ban thuong vu quoc hoi|bo (?!luat\b)[a-z]|cong hoa xa hoi|doc lap|"
@@ -1789,6 +1806,25 @@ class LegalGraphBuilder:
             "vector": b"",
         }
 
+    def _add_windowed_chunks(
+        self,
+        doc_id: str,
+        node_id: str,
+        primary_type: str,
+        text: str,
+        ordinal: int,
+    ) -> int:
+        for index, window in enumerate(embedding_text_windows(text)):
+            self._add_chunk(
+                doc_id,
+                node_id,
+                primary_type if index == 0 else "sliding",
+                window,
+                ordinal,
+            )
+            ordinal += 1
+        return ordinal
+
     def _embed_chunks(self) -> None:
         rows = list(self.chunks.values())
         texts = [f"{row['title']}\n{row['path_label']}\n{row['text']}" for row in rows]
@@ -1906,30 +1942,45 @@ class LegalGraphBuilder:
                 self._add_chunk(doc_id, node_id, "structure", text, ordinal)
                 ordinal += 1
             elif node_type == "VănBản":
-                self._add_chunk(doc_id, node_id, "document_intro", text, ordinal)
-                ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "document_intro",
+                    text,
+                    ordinal,
+                )
             elif node_type == "Điều":
-                self._add_chunk(doc_id, node_id, "article", text, ordinal)
-                ordinal += 1
-                words = VN_WORD_RE.findall(text)
-                if len(words) > CHUNK_WINDOW_WORDS + 80:
-                    raw_words = text.split()
-                    step = max(80, CHUNK_WINDOW_WORDS - CHUNK_OVERLAP_WORDS)
-                    for start in range(0, len(raw_words), step):
-                        window = raw_words[start : start + CHUNK_WINDOW_WORDS]
-                        if len(window) < 80:
-                            break
-                        self._add_chunk(doc_id, node_id, "sliding", " ".join(window), ordinal)
-                        ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "article",
+                    text,
+                    ordinal,
+                )
             elif node_type == "Khoản":
-                self._add_chunk(doc_id, node_id, "clause", text, ordinal)
-                ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "clause",
+                    text,
+                    ordinal,
+                )
             elif node_type == "Điểm":
-                self._add_chunk(doc_id, node_id, "point", text, ordinal)
-                ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "point",
+                    text,
+                    ordinal,
+                )
             elif node_type == "PhụLục_Bảng":
-                self._add_chunk(doc_id, node_id, "table", text, ordinal)
-                ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "table",
+                    text,
+                    ordinal,
+                )
             else:
                 self._add_chunk(
                     doc_id, node_id, "semantic", self._semantic_chunk_text(node_id, node, outgoing), ordinal

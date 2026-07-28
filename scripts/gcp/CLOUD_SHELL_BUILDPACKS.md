@@ -83,8 +83,10 @@ bind Secret Manager. Bản source mới cũng được deploy không traffic, ki
 
 Production dùng Vertex AI/ADC cho cả Gemini generation và embedding.
 `EMBEDDING_PROVIDER=vertex` giữ nguyên model `gemini-embedding-001` và vector
-1024 chiều. API và reindex được giới hạn ở bốn embedding request/phút để nằm
-dưới quota Vertex hiện tại của project.
+1024 chiều. Mỗi request embedding chứa tối đa 20 đoạn luật; API và reindex được
+giới hạn ở bốn request/phút để nằm dưới quota Vertex hiện tại của project. Với
+quota 5 RPM, cấu hình này xử lý khoảng 80 đoạn/phút và chừa một request/phút
+cho lưu lượng truy vấn trực tiếp.
 
 ## Chạy reindex sau khi deploy API
 

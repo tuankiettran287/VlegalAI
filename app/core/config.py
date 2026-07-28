@@ -91,14 +91,13 @@ class Settings(BaseSettings):
     gemini_thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     gemini_data_policy: Literal["redact", "deny", "allow"] = "redact"
 
-    # Semantic embeddings can use Vertex AI or the Gemini Developer API. The
-    # provider is independent from GEMINI_USE_ADC so generation can remain on
-    # Vertex while bulk embedding uses the API-key-backed batch endpoint.
+    # Semantic embeddings can use Vertex AI or the Gemini Developer API.
+    # Both providers support document batching; production uses Vertex ADC.
     embedding_provider: Literal["vertex", "gemini-api"] = "vertex"
     embedding_model: str = "gemini-embedding-001"
     embedding_location: str = "asia-southeast1"
     embedding_max_concurrency: int = Field(default=8, ge=1, le=64)
-    embedding_batch_size: int = Field(default=20, ge=1, le=100)
+    embedding_batch_size: int = Field(default=20, ge=1, le=250)
     embedding_max_items_per_minute: int = Field(
         default=0,
         ge=0,

@@ -82,6 +82,178 @@ def test_uses_vertex_document_and_query_task_types_and_normalizes_output() -> No
         )
 
 
+def test_vertex_batches_documents_and_preserves_order() -> None:
+    requests: list[httpx.Request] = []
+    vectors = {
+        "one": [1.0, 0.0, 0.0],
+        "two": [0.0, 2.0, 0.0],
+        "three": [0.0, 0.0, 3.0],
+        "four": [1.0, 1.0, 0.0],
+        "five": [1.0, 0.0, 1.0],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        instances = json.loads(request.content)["instances"]
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {
+                        "embeddings": {
+                            "values": vectors[instance["content"]]
+                        }
+                    }
+                    for instance in instances
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            model="gemini-embedding-001",
+            project_id="legal-project",
+            location="asia-southeast1",
+            dimensions=3,
+            max_concurrency=1,
+            batch_size=2,
+            max_retries=1,
+            data_policy="allow",
+        ),
+        client=client,
+    )
+    service._credentials = SimpleNamespace(valid=True, token="access-token")
+    service._project_id = "legal-project"
+    try:
+        result = service.embed_documents(
+            ["one", "two", "three", "four", "five"]
+        )
+    finally:
+        client.close()
+
+    assert result[0] == [1.0, 0.0, 0.0]
+    assert result[1] == [0.0, 1.0, 0.0]
+    assert result[2] == [0.0, 0.0, 1.0]
+    assert result[3] == pytest.approx(
+        [1 / math.sqrt(2), 1 / math.sqrt(2), 0.0]
+    )
+    assert result[4] == pytest.approx(
+        [1 / math.sqrt(2), 0.0, 1 / math.sqrt(2)]
+    )
+    bodies = [json.loads(request.content) for request in requests]
+    assert [len(body["instances"]) for body in bodies] == [2, 2, 1]
+    assert [
+        instance["content"]
+        for body in bodies
+        for instance in body["instances"]
+    ] == ["one", "two", "three", "four", "five"]
+
+
+def test_vertex_batch_counts_one_rate_limit_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        instances = json.loads(request.content)["instances"]
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": [1.0, 0.0, 0.0]}}
+                    for _ in instances
+                ]
+            },
+        )
+
+    service, client = _service(handler)
+    item_counts: list[int] = []
+    monkeypatch.setattr(service, "_throttle_items", item_counts.append)
+    try:
+        service.embed_documents(["one", "two"])
+    finally:
+        client.close()
+
+    assert item_counts == [1]
+
+
+def test_vertex_batch_splits_after_request_size_rejection() -> None:
+    instance_counts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        instances = json.loads(request.content)["instances"]
+        instance_counts.append(len(instances))
+        if len(instances) > 1:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "request exceeds token limit"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": [1.0, 0.0, 0.0]}}
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            model="gemini-embedding-001",
+            project_id="legal-project",
+            location="asia-southeast1",
+            dimensions=3,
+            max_concurrency=1,
+            batch_size=2,
+            max_retries=1,
+            data_policy="allow",
+        ),
+        client=client,
+    )
+    service._credentials = SimpleNamespace(valid=True, token="access-token")
+    service._project_id = "legal-project"
+    try:
+        result = service.embed_documents(["one", "two"])
+    finally:
+        client.close()
+
+    assert result == [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    assert instance_counts == [2, 1, 1]
+
+
+def test_vertex_logs_truncated_inputs_with_content_hash(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {
+                        "embeddings": {
+                            "values": [1.0, 0.0, 0.0],
+                            "statistics": {
+                                "token_count": 2048,
+                                "truncated": True,
+                            },
+                        }
+                    }
+                ]
+            },
+        )
+
+    service, client = _service(handler)
+    try:
+        with caplog.at_level("WARNING"):
+            service.embed_documents(["oversized legal text"])
+    finally:
+        client.close()
+
+    assert "Vertex AI truncated embedding input" in caplog.text
+    assert "token_count=2048" in caplog.text
+    assert "content_sha256=" in caplog.text
+
+
 def test_rejects_vertex_dimension_mismatch() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -128,6 +300,13 @@ def test_embedding_config_identity_tracks_vertex_provider() -> None:
     assert config.identity == "gemini-embedding-001@vertex-ai-v1:redact"
     assert 128 <= config.dimensions <= 3072
     assert math.isfinite(config.timeout_seconds)
+
+    rate_limited = EmbeddingConfig(
+        use_adc=True,
+        batch_size=20,
+        max_items_per_minute=4,
+    )
+    assert rate_limited.ready
 
 
 def test_gemini_api_batches_documents_and_preserves_order() -> None:
