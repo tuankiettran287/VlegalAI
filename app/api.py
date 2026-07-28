@@ -96,6 +96,11 @@ router = APIRouter()
 router.include_router(auth_router)
 logger = logging.getLogger(__name__)
 
+_UNCLOSED_CITATION_RE = re.compile(
+    r"(?<!\w)\[\s*([A-Z])\s*(\d+)\s*(?!\])(?=[.,;:!?)]|$)",
+    re.IGNORECASE,
+)
+
 
 CONTRACT_TEMPLATES = [
     {"id": "employment", "name": "Hợp đồng lao động", "category": "Lao động"},
@@ -734,6 +739,34 @@ def _grounded_source_fallback(
     return "\n".join(statements)
 
 
+def _normalize_allowed_citation_syntax(
+    value: str,
+    allowed_ids: list[str],
+) -> str:
+    """Close harmless citation brackets without changing source identity.
+
+    Gemini occasionally emits ``[S1.`` instead of ``[S1].``. Sending the
+    entire legal prompt through a second generation just to restore that
+    bracket adds tens of seconds. Only identifiers already present in the
+    server-side allowlist are normalized; unknown or ambiguous identifiers
+    still fail validation and use the guarded repair path.
+    """
+
+    allowed = {
+        str(source_id).strip().upper()
+        for source_id in allowed_ids
+        if str(source_id).strip()
+    }
+
+    def close_bracket(match: re.Match[str]) -> str:
+        source_id = f"{match.group(1)}{match.group(2)}".upper()
+        if source_id not in allowed:
+            return match.group(0)
+        return f"[{source_id}]"
+
+    return _UNCLOSED_CITATION_RE.sub(close_bracket, str(value or ""))
+
+
 async def _complete_with_citation_repair(
     ai: GeminiService,
     system: str,
@@ -750,6 +783,15 @@ async def _complete_with_citation_repair(
         max_tokens=max_tokens,
         temperature=temperature,
     )
+    normalized_answer = _normalize_allowed_citation_syntax(
+        answer,
+        allowed_ids,
+    )
+    if normalized_answer != answer:
+        logger.info(
+            "Normalized harmless citation punctuation without model repair"
+        )
+        answer = normalized_answer
     try:
         validate_citations(
             answer,
@@ -868,6 +910,19 @@ async def _complete_with_citation_repair(
         raise GeminiError(
             "Không thể xác minh căn cứ của câu trả lời."
         ) from exc
+
+
+def _cache_verification_is_reusable(
+    verification: dict[str, Any],
+) -> bool:
+    """Allow a fingerprint-validated cache when freshness is explicitly off."""
+
+    if verification.get("checked") and verification.get("all_current"):
+        return True
+    return (
+        str(verification.get("reason") or "").strip().lower()
+        == "freshness_check_disabled"
+    )
 
 
 async def _load_postgres_chat_history(
@@ -1183,8 +1238,7 @@ async def chat(
                 == cached.law_fingerprint
             )
             if (
-                current_verification.get("checked")
-                and current_verification.get("all_current")
+                _cache_verification_is_reusable(current_verification)
                 and fingerprint_matches
             ):
                 validate_citations(
@@ -1271,7 +1325,7 @@ async def chat(
             _validate_grounded_legal_references(answer, sources)
             _validate_professional_legal_opening(answer)
         answer = append_detailed_citations(answer, sources)
-        if cache_lookup and verification.get("checked") and verification.get("all_current"):
+        if cache_lookup and _cache_verification_is_reusable(verification):
             try:
                 await answer_cache.store(
                     cache_lookup,

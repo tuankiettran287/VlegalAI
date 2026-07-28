@@ -28,7 +28,7 @@ from app.services.embeddings import (
 )
 
 
-LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v4-professional-chatbot"
+LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v5-fast-citation-normalization"
 _PRIVATE_CONTEXT_RE = re.compile(
     r"\b("
     r"tôi|mình|chúng tôi|của tôi|của mình|công ty tôi|gia đình tôi|"
@@ -45,13 +45,8 @@ _PUBLIC_LEGAL_RE = re.compile(
     r"\b("
     r"pháp luật|quy định|bộ luật|luật|nghị định|thông tư|điều kiện|"
     r"thủ tục|hồ sơ|thời hạn|mức phạt|xử phạt|cơ quan|nghĩa vụ|"
-    r"quyền|được phép|hiệu lực"
+    r"quyền|được phép|hiệu lực|hợp đồng|chấm dứt|lao động"
     r")\b",
-    re.IGNORECASE,
-)
-_ORGANIZATION_CONTEXT_RE = re.compile(
-    r"\b(?:công ty|doanh nghiệp|hộ kinh doanh|tập đoàn|ngân hàng|"
-    r"hợp tác xã|văn phòng luật|chi nhánh|đơn vị sử dụng lao động)\b",
     re.IGNORECASE,
 )
 _PERSON_TITLE_RE = re.compile(
@@ -94,7 +89,12 @@ _PUBLIC_ACRONYMS = {
 def _contains_likely_private_entity(query: str) -> bool:
     """Conservatively exclude named people/organizations from answer caching."""
 
-    if _ORGANIZATION_CONTEXT_RE.search(query) or _PERSON_TITLE_RE.search(query):
+    # Generic actor words such as "doanh nghiệp" and "người lao động" are
+    # common in public legal questions. Named organizations are already
+    # rejected by redact_sensitive_text() above and by the proper-name scan
+    # below, so treating every generic organization noun as private disabled
+    # the cache for a large share of ordinary labour-law questions.
+    if _PERSON_TITLE_RE.search(query):
         return True
 
     words = re.findall(r"[^\W\d_]+", query, flags=re.UNICODE)

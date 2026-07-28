@@ -12,9 +12,11 @@ from fastapi import HTTPException, Response
 from pydantic import ValidationError
 
 from app.api import (
+    _cache_verification_is_reusable,
     _complete_with_citation_repair,
     _grounded_source_fallback,
     _legal_sources,
+    _normalize_allowed_citation_syntax,
     _summary_prompt,
     _verification_prompt,
     chat,
@@ -89,6 +91,65 @@ def test_chat_answer_repairs_missing_claim_citations_once() -> None:
     assert answer == "- Luật này còn hiệu lực [S1]."
     assert len(ai.prompts) == 2
     assert "DRAFT_WITH_INVALID_CITATIONS" in ai.prompts[1]
+
+
+def test_chat_answer_closes_allowed_citation_without_second_model_call() -> None:
+    class _AI:
+        def __init__(self) -> None:
+            self.complete_calls = 0
+            self.repair_calls = 0
+
+        async def complete(self, *_: object, **__: object) -> str:
+            self.complete_calls += 1
+            return "Quy định này đang có hiệu lực [S1."
+
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            self.repair_calls += 1
+            raise AssertionError("A punctuation-only citation fix must stay local")
+
+    ai = _AI()
+    answer = asyncio.run(
+        _complete_with_citation_repair(
+            ai,
+            "system",
+            "prompt",
+            allowed_ids=["S1"],
+            max_tokens=200,
+        )
+    )
+
+    assert answer == "Quy định này đang có hiệu lực [S1]."
+    assert ai.complete_calls == 1
+    assert ai.repair_calls == 0
+
+
+def test_citation_normalization_never_admits_an_unknown_source() -> None:
+    value = "Nguồn không thuộc allowlist [S2."
+
+    assert _normalize_allowed_citation_syntax(value, ["S1"]) == value
+
+
+@pytest.mark.parametrize(
+    ("verification", "expected"),
+    [
+        ({"checked": True, "all_current": True}, True),
+        (
+            {
+                "checked": False,
+                "all_current": False,
+                "reason": "freshness_check_disabled",
+            },
+            True,
+        ),
+        ({"checked": True, "all_current": False}, False),
+        ({"checked": False, "all_current": False}, False),
+    ],
+)
+def test_cache_reuse_requires_verified_or_explicitly_disabled_freshness(
+    verification: dict[str, object],
+    expected: bool,
+) -> None:
+    assert _cache_verification_is_reusable(verification) is expected
 
 
 class _FreshnessMustNotRun:

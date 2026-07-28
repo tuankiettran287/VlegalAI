@@ -26,6 +26,9 @@ from app.services.tavily import TavilyError, TavilyService
 
 
 settings = get_settings()
+logging.getLogger("app").setLevel(
+    getattr(logging, settings.log_level.upper(), logging.INFO)
+)
 logger = logging.getLogger(__name__)
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 

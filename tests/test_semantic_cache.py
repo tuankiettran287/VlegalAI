@@ -80,8 +80,13 @@ class _SimilarityEmbeddings:
 
 def test_privacy_gate_only_accepts_context_free_public_legal_questions() -> None:
     public = "Pháp luật quy định thời hạn khởi kiện tranh chấp lao động là bao lâu?"
+    generic_business_question = (
+        "Doanh nghiệp được đơn phương chấm dứt hợp đồng lao động "
+        "trong trường hợp nào?"
+    )
 
     assert is_public_cache_candidate(public)
+    assert is_public_cache_candidate(generic_business_question)
     assert normalize_public_query(public) == normalize_public_query(public.upper().rstrip("?"))
     assert not is_public_cache_candidate("Tôi bị công ty sa thải, quyền của tôi là gì?")
     assert not is_public_cache_candidate("Quy định áp dụng cho email an@example.com là gì?")
