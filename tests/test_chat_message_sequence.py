@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from fastapi import Response
+from fastapi import BackgroundTasks, Response
 
 from app.api import chat
 from app.core.config import Settings
@@ -158,6 +158,7 @@ def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() ->
             ),
             SimpleNamespace(),
             Response(),
+            BackgroundTasks(),
             db,
             SimpleNamespace(id=user_id),
             settings,

@@ -4,6 +4,7 @@ import difflib
 import hashlib
 import logging
 import re
+import time
 import unicodedata
 import uuid
 from binascii import Error as BinasciiError
@@ -11,7 +12,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.exceptions import InvalidTag
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
 from sqlalchemy import delete, func, select, text as sql_text
@@ -739,6 +749,56 @@ def _grounded_source_fallback(
     return "\n".join(statements)
 
 
+def _legal_answer_generation_policy(
+    answer_plan: dict[str, Any],
+) -> tuple[int, int, str]:
+    """Keep simple answers concise while preserving room for complex coverage."""
+
+    mode = str(answer_plan.get("mode") or "single_hop")
+    if mode == "multi_abstract":
+        return (
+            2200,
+            10,
+            "Tối đa 900 từ. Chia theo các nhóm vấn đề thực sự có trong câu hỏi; "
+            "mỗi nhóm chỉ nêu một lần và không lặp lại cùng căn cứ.",
+        )
+    if mode == "multi_hop":
+        return (
+            1400,
+            8,
+            "Tối đa 500 từ. Trả lời đủ từng vế, mỗi vế tối đa hai đoạn hoặc "
+            "gạch đầu dòng; không lặp lại cùng kết luận, tỷ lệ hoặc công thức.",
+        )
+    return (
+        900,
+        6,
+        "Từ 180 đến 300 từ, tối đa bốn đoạn hoặc gạch đầu dòng. Trả lời thẳng "
+        "một lần, chỉ giữ công thức/điều kiện cần thiết và dùng số nguồn tối "
+        "thiểu đủ chứng minh; tuyệt đối không diễn giải lặp lại cùng tỷ lệ, "
+        "công thức hoặc kết luận.",
+    )
+
+
+async def _store_answer_cache_safely(
+    answer_cache: SemanticAnswerCacheService,
+    lookup: CacheLookup,
+    answer: str,
+    sources: list[dict[str, Any]],
+    verification: dict[str, Any],
+) -> None:
+    """Persist cache after the HTTP response without making the user wait."""
+
+    try:
+        await answer_cache.store(
+            lookup,
+            answer,
+            sources,
+            verification,
+        )
+    except Exception:
+        logger.exception("Cannot store semantic answer cache entry")
+
+
 def _normalize_allowed_citation_syntax(
     value: str,
     allowed_ids: list[str],
@@ -1154,6 +1214,7 @@ async def chat(
     payload: ChatRequest,
     request: Request,
     response: Response,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(optional_user),
     settings: Settings = Depends(get_settings),
@@ -1164,6 +1225,11 @@ async def chat(
     memory: ConversationMemoryService = Depends(conversation_memory_service),
     answer_cache: SemanticAnswerCacheService = Depends(semantic_answer_cache_service),
 ) -> ChatResponse:
+    request_started = time.monotonic()
+    cache_lookup_ms = 0
+    retrieval_ms = 0
+    generation_ms = 0
+    persistence_ms = 0
     conversation: Conversation | None = None
     conversation_id: uuid.UUID | None = None
     authenticated_user_id = user.id if user else None
@@ -1210,10 +1276,22 @@ async def chat(
         has_conversation_context=bool(history_turns or summary_context),
     )
     if cache_eligible:
+        # Only context-free public-law questions pass the privacy gate, so
+        # their exact answers can be reused across authenticated and guest
+        # sessions without sharing private conversation data.
+        cache_scope = "public:legal"
         try:
+            cache_lookup_started = time.monotonic()
             cache_lookup = await answer_cache.lookup(
                 payload.message,
                 scope=cache_scope,
+                # A semantic miss needs an extra Vertex embedding before legal
+                # retrieval. At the production RPM limit that added about
+                # 13 seconds to every new question.
+                allow_semantic=False,
+            )
+            cache_lookup_ms += round(
+                (time.monotonic() - cache_lookup_started) * 1000
             )
         except Exception:
             logger.exception("Cannot query semantic answer cache")
@@ -1228,42 +1306,67 @@ async def chat(
                 [source.get("source_id", "") for source in cached.sources],
                 require_claim_coverage=True,
             )
-            current_sources, current_verification = await _legal_sources(
-                payload.message,
-                retrieval,
-                freshness,
-            )
-            fingerprint_matches = (
-                legal_fingerprint(current_sources, current_verification)
-                == cached.law_fingerprint
-            )
             if (
-                _cache_verification_is_reusable(current_verification)
-                and fingerprint_matches
+                cached.exact_match
+                and not settings.require_freshness_check
+                and _cache_verification_is_reusable(cached.verification)
             ):
-                validate_citations(
-                    cached.answer,
-                    [source.get("source_id", "") for source in current_sources],
-                    require_claim_coverage=True,
-                )
-                sources = current_sources
-                verification = current_verification
+                # Reindex clears this cache and prompt/model revisions are part
+                # of the lookup key, so an exact hit can skip legal retrieval
+                # when live freshness checks are explicitly disabled.
+                sources = cached.sources
+                verification = cached.verification
                 cache_similarity = cached.similarity
-                if cached.exact_match:
-                    answer = cached.answer
-                    cache_hit = True
-                    cache_mode = "exact"
-                else:
-                    cached_draft = cached.answer
-                    cache_mode = "semantic_draft"
+                answer = cached.answer
+                cache_hit = True
+                cache_mode = "exact"
                 try:
                     await answer_cache.record_hit(cached.id)
                 except Exception:
                     logger.exception("Cannot update semantic answer cache hit counter")
             else:
-                sources = current_sources
-                verification = current_verification
-                await answer_cache.invalidate(cached.id)
+                retrieval_started = time.monotonic()
+                current_sources, current_verification = await _legal_sources(
+                    payload.message,
+                    retrieval,
+                    freshness,
+                )
+                retrieval_ms += round(
+                    (time.monotonic() - retrieval_started) * 1000
+                )
+                fingerprint_matches = (
+                    legal_fingerprint(current_sources, current_verification)
+                    == cached.law_fingerprint
+                )
+                if (
+                    _cache_verification_is_reusable(current_verification)
+                    and fingerprint_matches
+                ):
+                    validate_citations(
+                        cached.answer,
+                        [source.get("source_id", "") for source in current_sources],
+                        require_claim_coverage=True,
+                    )
+                    sources = current_sources
+                    verification = current_verification
+                    cache_similarity = cached.similarity
+                    if cached.exact_match:
+                        answer = cached.answer
+                        cache_hit = True
+                        cache_mode = "exact"
+                    else:
+                        cached_draft = cached.answer
+                        cache_mode = "semantic_draft"
+                    try:
+                        await answer_cache.record_hit(cached.id)
+                    except Exception:
+                        logger.exception(
+                            "Cannot update semantic answer cache hit counter"
+                        )
+                else:
+                    sources = current_sources
+                    verification = current_verification
+                    await answer_cache.invalidate(cached.id)
         except HTTPException:
             try:
                 await answer_cache.invalidate(cached.id)
@@ -1282,11 +1385,24 @@ async def chat(
 
     if not cache_hit:
         if not sources:
+            retrieval_started = time.monotonic()
             sources, verification = await _legal_sources(
                 payload.message,
                 retrieval,
                 freshness,
             )
+            retrieval_ms += round(
+                (time.monotonic() - retrieval_started) * 1000
+            )
+        answer_plan = build_answer_plan(payload.message)
+        max_tokens, max_model_sources, length_instruction = (
+            _legal_answer_generation_policy(answer_plan)
+        )
+        model_sources = select_context_sources(
+            sources[:max_model_sources],
+            max_chars=24000,
+        )
+        generation_started = time.monotonic()
         try:
             answer = await _complete_with_citation_repair(
                 ai,
@@ -1295,17 +1411,18 @@ async def chat(
                 f"{_summary_prompt(summary_context)}\n\n"
                 f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
                 "KẾ HOẠCH PHỦ CÂU HỎI:\n"
-                f"{untrusted_data_block('ANSWER_PLAN', build_answer_plan(payload.message))}\n\n"
+                f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
+                f"GIỚI HẠN ĐỘ DÀI:\n{length_instruction}\n\n"
                 f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-                f"NGUỒN:\n{build_context(sources)}\n\n"
+                f"NGUỒN:\n{build_context(model_sources)}\n\n"
                 f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
                 f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
                 f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
                 "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
                 "không được sao chép các kết luận không còn phù hợp.",
-                allowed_ids=[source["source_id"] for source in sources],
-                sources=sources,
-                max_tokens=2200,
+                allowed_ids=[source["source_id"] for source in model_sources],
+                sources=model_sources,
+                max_tokens=max_tokens,
             )
         except GeminiError as exc:
             logger.error(
@@ -1322,20 +1439,25 @@ async def chat(
                 [source["source_id"] for source in sources],
                 require_claim_coverage=True,
             )
-            _validate_grounded_legal_references(answer, sources)
+            # This fallback is assembled only from server-retrieved excerpts.
+            # An excerpt can legitimately cross-reference a law outside the
+            # top-k set, so the model-hallucination guard does not apply here.
             _validate_professional_legal_opening(answer)
+        generation_ms += round(
+            (time.monotonic() - generation_started) * 1000
+        )
         answer = append_detailed_citations(answer, sources)
         if cache_lookup and _cache_verification_is_reusable(verification):
-            try:
-                await answer_cache.store(
-                    cache_lookup,
-                    answer,
-                    sources,
-                    verification,
-                )
-            except Exception:
-                logger.exception("Cannot store semantic answer cache entry")
+            background_tasks.add_task(
+                _store_answer_cache_safely,
+                answer_cache,
+                cache_lookup,
+                answer,
+                sources,
+                verification,
+            )
     message_id = uuid.uuid4()
+    persistence_started = time.monotonic()
     if user:
         if conversation_id is None:
             conversation = Conversation(
@@ -1405,6 +1527,23 @@ async def chat(
             # The full encrypted transcript is already durable. A later turn
             # retries every message after last_message_sequence automatically.
             logger.exception("Cannot refresh conversation summary for %s", conversation_id)
+    persistence_ms += round(
+        (time.monotonic() - persistence_started) * 1000
+    )
+    total_ms = round((time.monotonic() - request_started) * 1000)
+    logger.info(
+        "Legal chat completed cache_mode=%s cache_lookup_ms=%d retrieval_ms=%d "
+        "generation_ms=%d persistence_ms=%d total_ms=%d source_count=%d "
+        "answer_chars=%d",
+        cache_mode,
+        cache_lookup_ms,
+        retrieval_ms,
+        generation_ms,
+        persistence_ms,
+        total_ms,
+        len(sources),
+        len(answer),
+    )
     return ChatResponse(
         conversation_id=conversation_id,
         message_id=message_id,

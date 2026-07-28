@@ -12,7 +12,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from dotenv import load_dotenv
 
-from app.external_graphrag import ExternalGraphRAGConfig, sync_external_graphrag
+from app.external_graphrag import (
+    ExternalGraphRAGConfig,
+    clear_legal_answer_cache,
+    sync_external_graphrag,
+)
 from app.legal_graphrag import DEFAULT_DATA_DIR, DEFAULT_DB_PATH, DEFAULT_STORAGE_DIR, build_index
 
 
@@ -65,6 +69,8 @@ def main() -> None:
     failures = [name for name, value in result.items() if isinstance(value, dict) and value.get("error")]
     if failures:
         raise SystemExit(f"External GraphRAG sync failed for: {', '.join(failures)}")
+    cleared = clear_legal_answer_cache(config)
+    print(f"Legal answer cache invalidated: {cleared} row(s).")
 
 
 if __name__ == "__main__":

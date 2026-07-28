@@ -204,7 +204,7 @@ jobs:
           for attempt in {1..12}; do
             if curl --fail --silent --show-error \
               --max-time 15 \
-              "${frontend_url}/api/health/live"; then
+              "${frontend_url}/api/health/ready"; then
               echo
               echo "Production is healthy: ${frontend_url}"
               echo "### Deployment completed" >> "${GITHUB_STEP_SUMMARY}"
@@ -215,5 +215,5 @@ jobs:
             sleep 10
           done
 
-          echo "::error::Production health check failed: ${frontend_url}/api/health/live"
+          echo "::error::Production readiness check failed: ${frontend_url}/api/health/ready"
           exit 1

@@ -478,6 +478,24 @@ def postgres_connection(config: ExternalGraphRAGConfig):
     )
 
 
+def clear_legal_answer_cache(
+    config: ExternalGraphRAGConfig | None = None,
+) -> int:
+    """Invalidate generated answers after a successful legal-corpus sync."""
+
+    config = config or ExternalGraphRAGConfig.from_env()
+    with postgres_connection(config) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT to_regclass('public.legal_answer_cache') AS table_name"
+            )
+            row = cursor.fetchone() or {}
+            if not row.get("table_name"):
+                return 0
+            cursor.execute("DELETE FROM legal_answer_cache")
+            return max(int(cursor.rowcount or 0), 0)
+
+
 def neo4j_driver(config: ExternalGraphRAGConfig):
     return GraphDatabase.driver(
         config.neo4j_uri,

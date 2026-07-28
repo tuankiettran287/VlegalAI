@@ -28,7 +28,7 @@ from app.services.embeddings import (
 )
 
 
-LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v5-fast-citation-normalization"
+LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v6-concise-public-cache"
 _PRIVATE_CONTEXT_RE = re.compile(
     r"\b("
     r"tôi|mình|chúng tôi|của tôi|của mình|công ty tôi|gia đình tôi|"
@@ -207,7 +207,7 @@ class CacheLookup:
 
 
 class SemanticAnswerCacheService:
-    """Per-user/guest cache restricted to context-free public legal questions."""
+    """Scoped cache restricted to context-free public legal questions."""
 
     def __init__(
         self,
@@ -247,7 +247,13 @@ class SemanticAnswerCacheService:
             exact_match=exact_match,
         )
 
-    async def lookup(self, query: str, *, scope: str) -> CacheLookup:
+    async def lookup(
+        self,
+        query: str,
+        *,
+        scope: str,
+        allow_semantic: bool = True,
+    ) -> CacheLookup:
         if not scope.strip():
             raise ValueError("Semantic answer cache scope must not be blank.")
         scope_hash = hashlib.sha256(scope.encode("utf-8")).hexdigest()
@@ -278,6 +284,15 @@ class SemanticAnswerCacheService:
                     embedding=None,
                     hit=self._cached_answer(exact, 1.0, exact_match=True),
                 )
+
+        if not allow_semantic:
+            return CacheLookup(
+                scope_hash=scope_hash,
+                query_hash=query_hash,
+                normalized_query=normalized_query,
+                embedding=None,
+                hit=None,
+            )
 
         try:
             embedding = await run_in_threadpool(

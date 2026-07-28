@@ -198,6 +198,28 @@ def test_cache_lookup_requires_a_nonblank_private_scope() -> None:
         asyncio.run(service.lookup("Pháp luật quy định gì?", scope="  "))
 
 
+def test_exact_only_cache_miss_skips_similarity_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeSession()
+    monkeypatch.setattr(semantic_cache, "SessionFactory", lambda: db)
+    service = SemanticAnswerCacheService(
+        Settings(_env_file=None),
+        _FakeEmbeddings(),
+    )
+
+    lookup = asyncio.run(
+        service.lookup(
+            "Pháp luật quy định thời hạn khởi kiện là bao lâu?",
+            scope="public:legal",
+            allow_semantic=False,
+        )
+    )
+
+    assert lookup.hit is None
+    assert lookup.embedding is None
+
+
 def test_semantic_lookup_uses_symmetric_similarity_embeddings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

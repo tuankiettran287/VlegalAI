@@ -8,13 +8,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException, Response
+from fastapi import BackgroundTasks, HTTPException, Response
 from pydantic import ValidationError
 
 from app.api import (
     _cache_verification_is_reusable,
     _complete_with_citation_repair,
     _grounded_source_fallback,
+    _legal_answer_generation_policy,
     _legal_sources,
     _normalize_allowed_citation_syntax,
     _summary_prompt,
@@ -28,6 +29,7 @@ from app.services.ai import GeminiError, validate_citations
 from app.services.articles import ArticleResearchError
 from app.services.freshness import FreshnessUnavailable, LegalFreshnessService
 from app.services.retrieval import build_context, select_context_sources
+from app.services.semantic_cache import CacheLookup, CachedLegalAnswer
 from app.services.tavily import TavilyError
 
 
@@ -150,6 +152,111 @@ def test_cache_reuse_requires_verified_or_explicitly_disabled_freshness(
     expected: bool,
 ) -> None:
     assert _cache_verification_is_reusable(verification) is expected
+
+
+def test_public_exact_cache_hit_skips_retrieval_and_generation() -> None:
+    source = {
+        "source_id": "S1",
+        "score": 1,
+        "chunk_type": "article",
+        "citation": "Bộ luật Lao động (45/2019/QH14) > Điều 98",
+        "title": "Điều 98 Bộ luật Lao động",
+        "text": "Người lao động làm thêm giờ được trả ít nhất 150%.",
+        "reasons": [],
+        "doc_id": "labor-code",
+        "source_url": "https://vanban.chinhphu.vn/example",
+    }
+    verification = {
+        "checked": False,
+        "all_current": False,
+        "items": [],
+        "reason": "freshness_check_disabled",
+    }
+    cached = CachedLegalAnswer(
+        id=uuid.uuid4(),
+        answer=(
+            "Theo Điều 98, Bộ luật Lao động số 45/2019/QH14 [S1], "
+            "mức tối thiểu là 150%."
+        ),
+        sources=[source],
+        verification=verification,
+        law_fingerprint="f" * 64,
+        similarity=1,
+        exact_match=True,
+    )
+
+    class _Cache:
+        def __init__(self) -> None:
+            self.scope = ""
+            self.allow_semantic = True
+            self.recorded: list[uuid.UUID] = []
+
+        @staticmethod
+        def eligible(*_: object, **__: object) -> bool:
+            return True
+
+        async def lookup(
+            self,
+            _: str,
+            *,
+            scope: str,
+            allow_semantic: bool,
+        ) -> CacheLookup:
+            self.scope = scope
+            self.allow_semantic = allow_semantic
+            return CacheLookup(
+                scope_hash="a" * 64,
+                query_hash="b" * 64,
+                normalized_query="quy định lương làm thêm giờ",
+                embedding=None,
+                hit=cached,
+            )
+
+        async def record_hit(self, cache_id: uuid.UUID) -> None:
+            self.recorded.append(cache_id)
+
+    class _MustNotRun:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"{name} must not run for an exact cache hit")
+
+    class _Limiter:
+        async def check(self, _: str) -> None:
+            return None
+
+    cache = _Cache()
+    request = SimpleNamespace(
+        cookies={},
+        headers={},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+    result = asyncio.run(
+        chat(
+            ChatRequest(message="Cách tính lương làm thêm giờ theo pháp luật?"),
+            request,
+            Response(),
+            BackgroundTasks(),
+            SimpleNamespace(),
+            None,
+            Settings(
+                _env_file=None,
+                session_secret="public-cache-test-key-at-least-32-bytes",
+                require_freshness_check=False,
+            ),
+            _MustNotRun(),
+            _MustNotRun(),
+            _MustNotRun(),
+            _Limiter(),
+            _MustNotRun(),
+            cache,
+        )
+    )
+
+    assert result.cache_hit
+    assert result.cache_mode == "exact"
+    assert result.answer == cached.answer
+    assert cache.scope == "public:legal"
+    assert not cache.allow_semantic
+    assert cache.recorded == [cached.id]
 
 
 class _FreshnessMustNotRun:
@@ -278,6 +385,47 @@ def test_grounded_fallback_is_cited_and_passes_claim_validation() -> None:
 
     assert answer.startswith("Theo ")
     assert "[S1]" in answer
+    assert validate_citations(
+        answer,
+        ["S1"],
+        require_claim_coverage=True,
+    ) == {"S1"}
+
+
+def test_single_hop_answer_policy_is_shorter_than_complex_modes() -> None:
+    single_tokens, single_sources, instruction = _legal_answer_generation_policy(
+        {"mode": "single_hop"}
+    )
+    multi_tokens, multi_sources, _ = _legal_answer_generation_policy(
+        {"mode": "multi_hop"}
+    )
+    abstract_tokens, abstract_sources, _ = _legal_answer_generation_policy(
+        {"mode": "multi_abstract"}
+    )
+
+    assert (single_tokens, single_sources) == (900, 6)
+    assert single_tokens < multi_tokens < abstract_tokens
+    assert single_sources < multi_sources < abstract_sources
+    assert "không" in instruction.lower()
+
+
+def test_grounded_fallback_allows_cross_references_inside_retrieved_excerpt() -> None:
+    sources = [
+        {
+            "source_id": "S1",
+            "title": "Điều 98 Bộ luật Lao động",
+            "citation": "Bộ luật Lao động (45/2019/QH14) > Điều 98",
+            "text": (
+                "Cách tính chi tiết được hướng dẫn tại Nghị định 145/2020/NĐ-CP "
+                "và người lao động được trả ít nhất 150%."
+            ),
+        }
+    ]
+
+    answer = _grounded_source_fallback(sources)
+
+    assert answer.startswith("Theo ")
+    assert "145/2020/NĐ-CP" in answer
     assert validate_citations(
         answer,
         ["S1"],
@@ -639,6 +787,7 @@ def test_chat_does_not_write_or_call_ai_when_retrieval_has_no_source() -> None:
                 ChatRequest(message="Nghĩa vụ pháp lý của doanh nghiệp là gì?"),
                 SimpleNamespace(),
                 Response(),
+                BackgroundTasks(),
                 db,
                 SimpleNamespace(id=uuid.uuid4()),
                 Settings(_env_file=None, session_secret="guardrail-test"),
