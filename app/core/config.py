@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     # must switch to retrieved-evidence fallback before a retry cycle can make
     # the browser wait for minutes.
     legal_chat_generation_timeout_seconds: int = Field(
-        default=18,
+        default=12,
         ge=5,
         le=60,
     )

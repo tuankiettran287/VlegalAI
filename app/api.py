@@ -1401,6 +1401,21 @@ async def chat(
         max_tokens, max_model_sources, length_instruction = (
             _legal_answer_generation_policy(answer_plan)
         )
+        answer_mode = str(answer_plan.get("mode") or "single_hop")
+        generation_timeout_seconds = (
+            settings.legal_chat_generation_timeout_seconds
+            * (
+                3
+                if answer_mode == "multi_abstract"
+                else 2
+                if answer_mode == "multi_hop"
+                else 1
+            )
+        )
+        generation_timeout_seconds = min(
+            generation_timeout_seconds,
+            settings.gemini_timeout_seconds,
+        )
         model_sources = select_context_sources(
             sources[:max_model_sources],
             max_chars=24000,
@@ -1433,7 +1448,7 @@ async def chat(
                     else None
                 ),
                 ),
-                timeout=settings.legal_chat_generation_timeout_seconds,
+                timeout=generation_timeout_seconds,
             )
         except (GeminiError, TimeoutError) as exc:
             logger.error(
