@@ -343,13 +343,22 @@ class SemanticAnswerCacheService:
         answer: str,
         sources: list[dict[str, Any]],
         verification: dict[str, Any],
+        *,
+        embed_missing: bool = True,
     ) -> None:
         embedding = lookup.embedding
         if embedding is None:
-            embedding = await run_in_threadpool(
-                self.embeddings.embed_similarity,
-                lookup.normalized_query,
-            )
+            if embed_missing:
+                embedding = await run_in_threadpool(
+                    self.embeddings.embed_similarity,
+                    lookup.normalized_query,
+                )
+            else:
+                # A zero vector is intentionally not indexed by pgvector's
+                # cosine HNSW index. The row remains immediately reusable by
+                # its exact query hash without spending another scarce Vertex
+                # embedding request or competing with the next chat query.
+                embedding = [0.0] * self.embedding_config.dimensions
         now = datetime.now(UTC)
         values = {
             "id": uuid.uuid4(),

@@ -273,3 +273,35 @@ def test_store_uses_atomic_postgresql_upsert(
     assert "ON CONFLICT" in sql
     assert "cache_scope_hash" in sql
     assert "query_hash" in sql
+
+
+def test_exact_only_store_does_not_request_an_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(_env_file=None, session_secret="exact-only-cache-store-test")
+    db = _FakeSession()
+    monkeypatch.setattr(semantic_cache, "SessionFactory", lambda: db)
+    service = SemanticAnswerCacheService(settings, _FakeEmbeddings())
+    lookup = CacheLookup(
+        scope_hash="d" * 64,
+        query_hash="c" * 64,
+        normalized_query="pháp luật quy định thời hạn",
+        embedding=None,
+        hit=None,
+    )
+
+    asyncio.run(
+        service.store(
+            lookup,
+            "Câu trả lời công khai.",
+            [{"doc_id": "doc-1", "citation": "Điều 1"}],
+            {"checked": True, "all_current": True, "items": []},
+            embed_missing=False,
+        )
+    )
+
+    params = db.statements[0].compile(
+        dialect=postgresql.dialect()
+    ).params
+    assert db.committed
+    assert params["query_embedding"] == [0.0] * 1024

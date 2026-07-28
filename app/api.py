@@ -795,6 +795,7 @@ async def _store_answer_cache_safely(
             answer,
             sources,
             verification,
+            embed_missing=False,
         )
     except Exception:
         logger.exception("Cannot store semantic answer cache entry")
@@ -1569,6 +1570,13 @@ async def chat(
         total_ms,
         len(sources),
         len(answer),
+    )
+    response.headers["Server-Timing"] = (
+        f"cache;dur={cache_lookup_ms}, "
+        f"retrieval;dur={retrieval_ms}, "
+        f"generation;dur={generation_ms}, "
+        f"persistence;dur={persistence_ms}, "
+        f"total;dur={total_ms}"
     )
     return ChatResponse(
         conversation_id=conversation_id,
