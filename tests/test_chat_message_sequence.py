@@ -5,8 +5,6 @@ import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from fastapi import Response
-
 from app.api import chat
 from app.core.config import Settings
 from app.models import ChatMessage, Conversation
@@ -156,17 +154,14 @@ def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() ->
                 message="Quy định pháp luật thử nghiệm là gì?",
                 conversation_id=conversation_id,
             ),
-            SimpleNamespace(),
-            Response(),
-            db,
-            SimpleNamespace(id=user_id),
-            settings,
-            _Retrieval(db),
-            _Freshness(db),
-            _AI(db),
-            SimpleNamespace(),
-            memory,
-            _Cache(),
+            db=db,
+            user=SimpleNamespace(id=user_id, preferred_name="Minh"),
+            settings=settings,
+            retrieval=_Retrieval(db),
+            freshness=_Freshness(db),
+            ai=_AI(db),
+            memory=memory,
+            answer_cache=_Cache(),
         )
     )
 

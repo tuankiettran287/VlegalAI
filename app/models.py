@@ -49,6 +49,7 @@ class User(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(180), default="Người dùng")
+    preferred_name: Mapped[str | None] = mapped_column(String(60))
     avatar_url: Mapped[str | None] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(32), default="USER", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)

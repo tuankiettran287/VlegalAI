@@ -4,7 +4,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -27,7 +26,6 @@ import {
   FolderClock,
   History,
   Library,
-  LogIn,
   LogOut,
   Menu,
   MessageSquareText,
@@ -65,6 +63,8 @@ import {
   type SignatureResponse,
 } from "./api";
 import { sampleQuestions, templateFallback } from "./data";
+import LandingPage from "./LandingPage";
+import OnboardingPage from "./OnboardingPage";
 import type {
   Article,
   Artifact,
@@ -90,39 +90,6 @@ const routes = [
 
 function uid() {
   return globalThis.crypto?.randomUUID?.() || String(Date.now() + Math.random());
-}
-
-const GUEST_CHAT_STORAGE_KEY = "vlegal-guest-chat-v1";
-
-function readGuestMessages(): ChatMessage[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const parsed = JSON.parse(sessionStorage.getItem(GUEST_CHAT_STORAGE_KEY) || "[]") as ChatMessage[];
-    return parsed
-      .filter((item) => item && typeof item.id === "string" && typeof item.content === "string" && ["user", "assistant"].includes(item.role))
-      .slice(-24);
-  } catch {
-    return [];
-  }
-}
-
-function writeGuestMessages(messages: ChatMessage[]) {
-  if (typeof window === "undefined") return;
-  const completed = messages.filter((item) => !item.pending).slice(-24);
-  try {
-    if (!completed.length) {
-      sessionStorage.removeItem(GUEST_CHAT_STORAGE_KEY);
-      return;
-    }
-    sessionStorage.setItem(GUEST_CHAT_STORAGE_KEY, JSON.stringify(completed));
-  } catch {
-    const compact = completed.map(({ id, role, content, created_at }) => ({ id, role, content, created_at }));
-    try {
-      sessionStorage.setItem(GUEST_CHAT_STORAGE_KEY, JSON.stringify(compact));
-    } catch {
-      // Storage can be disabled by browser privacy settings; the in-memory chat still works.
-    }
-  }
 }
 
 function escapeHtml(value: string) {
@@ -327,19 +294,10 @@ function DocumentInput({ title, value, onChange }: { title: string; value: strin
   );
 }
 
-function ChatPage({
-  user,
-  authAvailable,
-  onNavigate,
-}: {
-  user: User | null;
-  authAvailable: boolean;
-  onNavigate: (path: string) => void;
-}) {
-  const authenticated = Boolean(user);
+function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>(() => (authenticated ? [] : readGuestMessages()));
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -383,24 +341,10 @@ function ChatPage({
   }, [hasMessages, syncHomeComposerPosition]);
 
   const reloadHistory = useCallback(() => {
-    if (!authenticated) {
-      setConversations([]);
-      return;
-    }
     conversationApi.list().then(setConversations).catch((reason) => setError((reason as Error).message));
-  }, [authenticated]);
+  }, []);
 
   useEffect(() => reloadHistory(), [reloadHistory]);
-  useEffect(() => {
-    if (!authenticated) writeGuestMessages(messages);
-  }, [authenticated, messages]);
-  useEffect(() => {
-    if (!authenticated) {
-      conversationRequestRef.current += 1;
-      setLoadingConversationId(null);
-      setHistoryOpen(false);
-    }
-  }, [authenticated]);
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setHistoryOpen(false);
@@ -410,7 +354,6 @@ function ChatPage({
   }, []);
 
   const openConversation = async (id: string) => {
-    if (!authenticated) return;
     if (id === conversationId) {
       conversationRequestRef.current += 1;
       setLoadingConversationId(null);
@@ -449,7 +392,6 @@ function ChatPage({
     setMessages([]);
     setInput("");
     setError("");
-    if (!authenticated) sessionStorage.removeItem(GUEST_CHAT_STORAGE_KEY);
   };
 
   const submit = async (question = input) => {
@@ -466,15 +408,7 @@ function ChatPage({
     ]);
     setInput("");
     try {
-      const history = messages
-        .filter((message) => !message.pending)
-        .slice(-12)
-        .map(({ role, content }) => ({ role, content: content.slice(0, 4000) }));
-      const data = await askLegalQuestion(
-        trimmed,
-        authenticated ? conversationId : null,
-        authenticated ? [] : history,
-      );
+      const data = await askLegalQuestion(trimmed, conversationId);
       setConversationId(data.conversation_id || null);
       setMessages((current) =>
         current.map((message) =>
@@ -490,7 +424,7 @@ function ChatPage({
             : message,
         ),
       );
-      if (authenticated) reloadHistory();
+      reloadHistory();
     } catch (reason) {
       const message = (reason as Error).message;
       setMessages((current) => current.filter((item) => item.id !== pendingId));
@@ -533,7 +467,7 @@ function ChatPage({
         <div className="composer-toolbar">
           <span className="policy-line">
             <ShieldCheck size={14} />
-            {authenticated ? "Đối chiếu căn cứ và kiểm tra hiệu lực" : "Phiên tạm · câu trả lời có dẫn nguồn"}
+            Đối chiếu căn cứ và kiểm tra hiệu lực
           </span>
           <span className="counter">{input.length}/5000</span>
           <button className="primary-icon" type="submit" disabled={!input.trim() || loading || Boolean(loadingConversationId)} aria-label="Gửi câu hỏi">
@@ -560,13 +494,13 @@ function ChatPage({
         aria-label="Lịch sử trò chuyện"
       >
         <div className="history-head">
-          <strong>{authenticated ? "Lịch sử hỏi đáp" : "Phiên trò chuyện tạm"}</strong>
+          <strong>Lịch sử hỏi đáp</strong>
           <button className="icon-button compact" type="button" onClick={newConversation} aria-label="Tạo cuộc trò chuyện">
             <Plus size={16} />
           </button>
         </div>
         <div className="conversation-list">
-          {authenticated && conversations.map((item) => {
+          {conversations.map((item) => {
             const isLoading = item.id === loadingConversationId;
             const isActive = item.id === (loadingConversationId || conversationId);
             return (
@@ -602,15 +536,7 @@ function ChatPage({
               </div>
             );
           })}
-          {authenticated && !conversations.length && <p className="empty-copy">Các cuộc trò chuyện đã lưu sẽ xuất hiện tại đây.</p>}
-          {!authenticated && (
-            <div className="guest-session-card">
-              <Clock3 size={18} />
-              <strong>Phiên trò chuyện tạm</strong>
-              <p>Nội dung chỉ được giữ trong tab hiện tại và sẽ tự xóa khi bạn kết thúc phiên.</p>
-              {authAvailable && <a href={authApi.loginUrl("/")}><LogIn size={14} /> Đăng nhập để lưu lịch sử</a>}
-            </div>
-          )}
+          {!conversations.length && <p className="empty-copy">Các cuộc trò chuyện đã lưu sẽ xuất hiện tại đây.</p>}
         </div>
       </aside>
 
@@ -631,10 +557,9 @@ function ChatPage({
           </button>
           <div className="chat-title">
             <strong>Trợ lý pháp lý</strong>
-            <span><i aria-hidden="true" /><ShieldCheck size={12} /> {authenticated ? "Tự động đối chiếu căn cứ liên quan" : "Đang dùng phiên trò chuyện tạm"}</span>
+            <span><i aria-hidden="true" /><ShieldCheck size={12} /> Tự động đối chiếu căn cứ liên quan</span>
           </div>
           <div className="chat-topbar-actions">
-            {!authenticated && authAvailable && <a className="google-login-inline" href={authApi.loginUrl("/")}><LogIn size={15} /> Đăng nhập Google</a>}
             <button className="ghost-button" type="button" onClick={newConversation}>
               <Plus size={16} /> Cuộc trò chuyện mới
             </button>
@@ -939,10 +864,6 @@ function FeedbackModal({ open, page, onClose }: { open: boolean; page: string; o
   return <div className="modal-backdrop"><form className="modal feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-title" onSubmit={async (event) => { event.preventDefault(); await sendFeedback({ message, page }); setSent(true); setMessage(""); }}><header><div><span className="eyebrow">Phản hồi</span><h2 id="feedback-title">Giúp VLegal tốt hơn</h2></div><button className="icon-button" type="button" onClick={onClose} aria-label="Đóng hộp thoại góp ý"><X size={17} /></button></header>{sent && <div className="success-notice"><CheckCircle2 size={16} />Đã ghi nhận góp ý.</div>}<textarea aria-label="Nội dung góp ý" value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Nội dung góp ý…" /><footer><button className="ghost-button" type="button" onClick={onClose}>Đóng</button><button className="primary-button" type="submit" disabled={message.length < 3}>Gửi góp ý</button></footer></form></div>;
 }
 
-function SignInGate({ available, returnTo, onContinue }: { available: boolean; returnTo: string; onContinue: () => void }) {
-  return <div className="signin-page"><div className="signin-card"><div className="brand-mark"><Scale size={29} /></div><span className="eyebrow">Không gian cá nhân</span><h1>{available ? "Đăng nhập để tiếp tục" : "Tính năng này đang tạm gián đoạn"}</h1><p>{available ? "Dùng tài khoản Google để lưu lịch sử, quản lý tài liệu và sử dụng các công cụ hợp đồng." : "Bạn vẫn có thể hỏi đáp pháp luật trong phiên trò chuyện tạm thời."}</p>{available && <a className="primary-button signin-button google-signin" href={authApi.loginUrl(returnTo)}><span className="google-mark">G</span>Tiếp tục với Google</a>}<button className="guest-continue" type="button" onClick={onContinue}>Quay lại hỏi đáp</button><small>Phiên khách chỉ được lưu tạm trong trình duyệt và không gắn với tài khoản.</small></div></div>;
-}
-
 function App() {
   const [path, navigate] = usePath();
   const [collapsed, setCollapsed] = useState(
@@ -988,19 +909,35 @@ function App() {
     }).finally(() => setAuthLoading(false));
   }, []);
 
-  const activeRoute = useMemo(() => routes.find((route) => route.path === path) || routes[0], [path]);
-  const page = useMemo(() => {
-    if (!user && path !== "/") return <SignInGate available={authAvailable} returnTo={path} onContinue={() => navigate("/")} />;
-    if (path === "/tao-hop-dong") return <ContractPage />;
-    if (path === "/review-hop-dong" || path === "/phan-tich-hop-dong") return <ReviewPage />;
-    if (path === "/so-sanh-hop-dong") return <ComparePage />;
-    if (path === "/ky-van-ban") return <SignaturePage />;
-    if (path === "/bai-viet") return <ArticlesPage />;
-    if (path === "/thu-vien") return <LibraryPage />;
-    return <ChatPage user={user} authAvailable={authAvailable} onNavigate={navigate} />;
-  }, [authAvailable, navigate, path, user]);
-
   if (authLoading) return <div className="app-loading"><Scale size={34} /><span>Đang mở VLegal AI…</span></div>;
+  if (!user) {
+    return (
+      <LandingPage
+        authAvailable={authAvailable}
+        loginUrl={authApi.loginUrl(path)}
+      />
+    );
+  }
+  if (user.onboarding_required) {
+    return (
+      <OnboardingPage
+        user={user}
+        onComplete={async (preferredName) => {
+          setUser(await authApi.updateProfile(preferredName));
+        }}
+      />
+    );
+  }
+
+  const activeRoute = routes.find((route) => route.path === path) || routes[0];
+  let page: ReactNode;
+  if (path === "/tao-hop-dong") page = <ContractPage />;
+  else if (path === "/review-hop-dong" || path === "/phan-tich-hop-dong") page = <ReviewPage />;
+  else if (path === "/so-sanh-hop-dong") page = <ComparePage />;
+  else if (path === "/ky-van-ban") page = <SignaturePage />;
+  else if (path === "/bai-viet") page = <ArticlesPage />;
+  else if (path === "/thu-vien") page = <LibraryPage />;
+  else page = <ChatPage onNavigate={navigate} />;
 
   return (
     <div className="app-shell">
@@ -1020,7 +957,7 @@ function App() {
         <div className="brand-row"><button className="brand" type="button" title={collapsed ? "Mở thanh điều hướng" : "Về trang chủ"} aria-label={collapsed ? "Mở thanh điều hướng" : "Về trang chủ"} onClick={() => { if (collapsed) { setCollapsed(false); return; } if (path !== "/") navigate("/"); }}><span className="brand-mark"><Scale size={22} /></span><span><strong>VLegal</strong><small>Trợ lý pháp lý</small></span></button><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Mở thanh điều hướng" : "Thu gọn thanh điều hướng"}><AlignLeft size={18} /></button></div>
         <nav className="nav-list"><span className="nav-label">Trung tâm pháp lý</span>{routes.map((route) => { const Icon = route.icon; const active = activeRoute.path === route.path; return <button key={route.path} type="button" className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => { navigate(route.path); if (window.innerWidth <= 1080) setCollapsed(true); }}><Icon size={19} /><span>{route.label}</span></button>; })}</nav>
         <div className="trust-card"><ShieldCheck size={17} /><span><strong>Căn cứ minh bạch</strong><small>Kiểm tra hiệu lực trước khi trả lời</small></span></div>
-        <div className="sidebar-actions"><button type="button" onClick={() => setFeedbackOpen(true)}><Bot size={17} /><span>Gửi góp ý</span></button><button type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={17} /> : <Moon size={17} />}<span>{dark ? "Giao diện sáng" : "Giao diện tối"}</span></button>{user ? <div className="user-card"><span className="user-avatar">{user.avatar_url ? <img src={user.avatar_url} alt="" /> : user.display_name.charAt(0).toUpperCase()}</span><span><strong>{user.display_name}</strong><small>{user.email}</small></span><button type="button" onClick={async () => { await authApi.logout(); window.location.reload(); }} aria-label="Đăng xuất"><LogOut size={16} /></button></div> : <div className="user-card guest-user-card"><span className="user-avatar"><UserRound size={17} /></span><span><strong>Khách</strong><small>Phiên tạm thời</small></span>{authAvailable && <a href={authApi.loginUrl(path)} aria-label="Đăng nhập bằng Google"><LogIn size={16} /></a>}</div>}</div>
+        <div className="sidebar-actions"><button type="button" onClick={() => setFeedbackOpen(true)}><Bot size={17} /><span>Gửi góp ý</span></button><button type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={17} /> : <Moon size={17} />}<span>{dark ? "Giao diện sáng" : "Giao diện tối"}</span></button><div className="user-card"><span className="user-avatar">{user.avatar_url ? <img src={user.avatar_url} alt="" /> : (user.preferred_name || user.display_name).charAt(0).toUpperCase()}</span><span><strong>{user.preferred_name || user.display_name}</strong><small>{user.email}</small></span><button type="button" onClick={async () => { await authApi.logout(); window.location.reload(); }} aria-label="Đăng xuất"><LogOut size={16} /></button></div></div>
       </aside>
       <div className="content-shell"><header className="mobile-topbar"><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Mở thanh điều hướng" : "Đóng thanh điều hướng"} aria-controls="primary-navigation" aria-expanded={!collapsed}><Menu size={19} /></button><strong>{activeRoute.label}</strong><button className="icon-button" type="button" onClick={() => setDark((value) => !value)} aria-label={dark ? "Chuyển sang giao diện sáng" : "Chuyển sang giao diện tối"}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button></header><main className="content">{page}</main></div>
       <FeedbackModal open={feedbackOpen} page={path} onClose={() => setFeedbackOpen(false)} />

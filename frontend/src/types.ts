@@ -2,8 +2,10 @@ export type User = {
   id: string;
   email: string;
   display_name: string;
+  preferred_name?: string | null;
   avatar_url?: string | null;
   role: string;
+  onboarding_required: boolean;
 };
 
 export type Source = {

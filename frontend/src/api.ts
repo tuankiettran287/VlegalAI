@@ -162,6 +162,8 @@ export const authApi = {
   capabilities: () => requestJson<{ google_login: boolean }>("/api/auth/capabilities"),
   me: () => requestJson<User>("/api/auth/me"),
   loginUrl: (returnTo = typeof window !== "undefined" ? window.location.pathname : "/") => apiUrl(`/api/auth/google/login?return_to=${encodeURIComponent(returnTo)}`),
+  updateProfile: (preferredName: string) =>
+    patch<User>("/api/auth/profile", { preferred_name: preferredName }),
   logout: () => requestJson<void>("/api/auth/logout", { method: "POST" }),
 };
 
@@ -198,9 +200,8 @@ export type ChatResponse = {
 export function askLegalQuestion(
   message: string,
   conversationId?: string | null,
-  history: Array<{ role: "user" | "assistant"; content: string }> = [],
 ) {
-  return post<ChatResponse>("/api/chat", { message, conversation_id: conversationId || null, history });
+  return post<ChatResponse>("/api/chat", { message, conversation_id: conversationId || null });
 }
 
 export type DraftResponse = {

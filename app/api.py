@@ -22,7 +22,7 @@ from sqlalchemy.orm import selectinload
 from app.auth import current_user, optional_user, require_roles, router as auth_router
 from app.core.config import Settings, get_settings
 from app.core.observability import log_progress
-from app.core.security import create_guest_token, decode_guest_token, decrypt_text, encrypt_text
+from app.core.security import decrypt_text, encrypt_text
 from app.db import get_db
 from app.models import (
     Article,
@@ -78,7 +78,6 @@ from app.services.freshness import (
     FreshnessUnavailable,
     LegalFreshnessService,
 )
-from app.services.guest_limit import GuestRateLimitExceeded, GuestRateLimitUnavailable, GuestRateLimiter
 from app.services.query_rewrite import rewrite_query_if_needed
 from app.services.retrieval import (
     RetrievalService,
@@ -218,10 +217,6 @@ def article_research_service(request: Request) -> ArticleResearchService:
     return request.app.state.article_research
 
 
-def guest_rate_limiter(request: Request) -> GuestRateLimiter:
-    return request.app.state.guest_limiter
-
-
 def conversation_memory_service(request: Request) -> ConversationMemoryService:
     return request.app.state.conversation_memory
 
@@ -232,30 +227,6 @@ def semantic_answer_cache_service(request: Request) -> SemanticAnswerCacheServic
 
 def _hash_content(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _guest_rate_subject(request: Request, response: Response, settings: Settings) -> str:
-    token = request.cookies.get("vlegal_guest")
-    guest_id = ""
-    if token:
-        try:
-            guest_id = str(uuid.UUID(str(decode_guest_token(token, settings)["sub"])))
-        except Exception:
-            guest_id = ""
-    if not guest_id:
-        guest_id = str(uuid.uuid4())
-        response.set_cookie(
-            "vlegal_guest",
-            create_guest_token(guest_id, settings),
-            max_age=24 * 60 * 60,
-            httponly=True,
-            secure=settings.cookie_secure,
-            samesite="lax",
-            path="/api",
-        )
-    forwarded = request.headers.get("x-forwarded-for", "")
-    client_ip = forwarded.split(",")[-1].strip() if forwarded else (request.client.host if request.client else "unknown")
-    return _hash_content(f"{guest_id}:{client_ip}")
 
 
 def _artifact_out(artifact: Artifact, settings: Settings) -> ArtifactOut:
@@ -1197,60 +1168,47 @@ async def delete_conversation(
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
-    request: Request,
-    response: Response,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(optional_user),
+    user: User = Depends(current_user),
     settings: Settings = Depends(get_settings),
     retrieval: RetrievalService = Depends(retrieval_service),
     freshness: LegalFreshnessService = Depends(freshness_service),
     ai: GeminiService = Depends(ai_service),
-    limiter: GuestRateLimiter = Depends(guest_rate_limiter),
     memory: ConversationMemoryService = Depends(conversation_memory_service),
     answer_cache: SemanticAnswerCacheService = Depends(semantic_answer_cache_service),
 ) -> ChatResponse:
+    if not user.preferred_name:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Vui lòng chọn tên gọi trước khi bắt đầu trò chuyện",
+        )
+
     operation_started = time.perf_counter()
     conversation: Conversation | None = None
     conversation_id: uuid.UUID | None = None
-    authenticated_user_id = user.id if user else None
+    authenticated_user_id = user.id
+    is_new_conversation = payload.conversation_id is None
     log_progress(
         logger,
         "chat",
         "started",
         operation_started,
-        authenticated=bool(user),
+        authenticated=True,
         has_conversation_id=bool(payload.conversation_id),
-        history_turn_count=len(payload.history),
+        history_turn_count=0,
     )
-    cache_scope = f"user:{authenticated_user_id}" if authenticated_user_id else ""
+    cache_scope = f"user:{authenticated_user_id}"
     summary_context = ""
-    # Client-provided history is only for an anonymous, temporary browser
-    # session. Authenticated history always comes from PostgreSQL below.
-    history_turns = [] if user else [(turn.role, turn.content) for turn in payload.history]
-    if not user:
-        guest_subject = _guest_rate_subject(request, response, settings)
-        cache_scope = f"guest:{guest_subject}"
-        try:
-            await limiter.check(guest_subject)
-        except GuestRateLimitExceeded as exc:
-            raise HTTPException(status_code=429, detail=str(exc)) from exc
-        except GuestRateLimitUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if user:
-        if payload.conversation_id:
-            conversation = await _owned_conversation(db, payload.conversation_id, user)
-            conversation_id = conversation.id
-            summary_context = await memory.get_summary(db, conversation_id)
-            history_turns = await _load_postgres_chat_history(db, conversation_id, settings)
-        # Authentication and history reads must not retain a PostgreSQL
-        # transaction while cache/search/Gemini network calls are in flight.
-        await db.rollback()
-        conversation = None
-    elif payload.conversation_id:
-        raise HTTPException(
-            status_code=401,
-            detail="Đăng nhập bằng Google để tiếp tục một cuộc trò chuyện đã lưu",
-        )
+    history_turns: list[tuple[str, str]] = []
+    if payload.conversation_id:
+        conversation = await _owned_conversation(db, payload.conversation_id, user)
+        conversation_id = conversation.id
+        summary_context = await memory.get_summary(db, conversation_id)
+        history_turns = await _load_postgres_chat_history(db, conversation_id, settings)
+    # Authentication and history reads must not retain a PostgreSQL
+    # transaction while cache/search/Gemini network calls are in flight.
+    await db.rollback()
+    conversation = None
 
     log_progress(
         logger,
@@ -1473,85 +1431,88 @@ async def chat(
                     )
                 except Exception:
                     logger.exception("Cannot store semantic answer cache entry")
-    message_id = uuid.uuid4()
-    if user:
-        persistence_started = time.perf_counter()
-        log_progress(logger, "chat", "persistence_started", operation_started)
-        if conversation_id is None:
-            conversation = Conversation(
-                user_id=authenticated_user_id,
-                title=payload.message[:100],
-                retrieval_mode=settings.retriever_backend.upper(),
-            )
-            db.add(conversation)
-            await db.flush()
-            conversation_id = conversation.id
-            lock_key = f"vlegal:conversation-messages:{conversation_id}"
-            await db.execute(
-                sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": lock_key},
-            )
-        else:
-            lock_key = f"vlegal:conversation-messages:{conversation_id}"
-            await db.execute(
-                sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": lock_key},
-            )
-            # Authorization is re-evaluated after the network phase and while
-            # the append lock is held, so deletion/ownership changes cannot be
-            # bypassed by the earlier snapshot.
-            conversation = await db.scalar(
-                select(Conversation).where(
-                    Conversation.id == conversation_id,
-                    Conversation.user_id == authenticated_user_id,
-                )
-            )
-            if conversation is None:
-                raise HTTPException(status_code=404, detail="Không tìm thấy cuộc trò chuyện")
 
-        last_sequence = int(
-            await db.scalar(
-                select(func.max(ChatMessage.message_sequence)).where(
-                    ChatMessage.conversation_id == conversation_id
-                )
+    if is_new_conversation:
+        answer = f"Chào {user.preferred_name},\n\n{answer}"
+
+    message_id = uuid.uuid4()
+    persistence_started = time.perf_counter()
+    log_progress(logger, "chat", "persistence_started", operation_started)
+    if conversation_id is None:
+        conversation = Conversation(
+            user_id=authenticated_user_id,
+            title=payload.message[:100],
+            retrieval_mode=settings.retriever_backend.upper(),
+        )
+        db.add(conversation)
+        await db.flush()
+        conversation_id = conversation.id
+        lock_key = f"vlegal:conversation-messages:{conversation_id}"
+        await db.execute(
+            sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": lock_key},
+        )
+    else:
+        lock_key = f"vlegal:conversation-messages:{conversation_id}"
+        await db.execute(
+            sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": lock_key},
+        )
+        # Authorization is re-evaluated after the network phase and while
+        # the append lock is held, so deletion/ownership changes cannot be
+        # bypassed by the earlier snapshot.
+        conversation = await db.scalar(
+            select(Conversation).where(
+                Conversation.id == conversation_id,
+                Conversation.user_id == authenticated_user_id,
             )
-            or 0
         )
-        user_message = ChatMessage(
-            conversation_id=conversation_id,
-            message_sequence=last_sequence + 1,
-            role="USER",
-            content_ciphertext=encrypt_text(payload.message, settings),
-            content_hash=_hash_content(payload.message),
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Không tìm thấy cuộc trò chuyện")
+
+    last_sequence = int(
+        await db.scalar(
+            select(func.max(ChatMessage.message_sequence)).where(
+                ChatMessage.conversation_id == conversation_id
+            )
         )
-        db.add(user_message)
-        assistant_message = ChatMessage(
-            conversation_id=conversation_id,
-            message_sequence=last_sequence + 2,
-            role="ASSISTANT",
-            content_ciphertext=encrypt_text(answer, settings),
-            content_hash=_hash_content(answer),
-            sources=sources,
-            verification=verification,
-        )
-        db.add(assistant_message)
-        conversation.updated_at = datetime.now(UTC)
-        await db.commit()
-        await db.refresh(assistant_message)
-        message_id = assistant_message.id
-        try:
-            await memory.refresh(conversation_id)
-        except Exception:
-            # The full encrypted transcript is already durable. A later turn
-            # retries every message after last_message_sequence automatically.
-            logger.exception("Cannot refresh conversation summary for %s", conversation_id)
-        log_progress(
-            logger,
-            "chat",
-            "persistence_completed",
-            operation_started,
-            phase_ms=round((time.perf_counter() - persistence_started) * 1000),
-        )
+        or 0
+    )
+    user_message = ChatMessage(
+        conversation_id=conversation_id,
+        message_sequence=last_sequence + 1,
+        role="USER",
+        content_ciphertext=encrypt_text(payload.message, settings),
+        content_hash=_hash_content(payload.message),
+    )
+    db.add(user_message)
+    assistant_message = ChatMessage(
+        conversation_id=conversation_id,
+        message_sequence=last_sequence + 2,
+        role="ASSISTANT",
+        content_ciphertext=encrypt_text(answer, settings),
+        content_hash=_hash_content(answer),
+        sources=sources,
+        verification=verification,
+    )
+    db.add(assistant_message)
+    conversation.updated_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(assistant_message)
+    message_id = assistant_message.id
+    try:
+        await memory.refresh(conversation_id)
+    except Exception:
+        # The full encrypted transcript is already durable. A later turn
+        # retries every message after last_message_sequence automatically.
+        logger.exception("Cannot refresh conversation summary for %s", conversation_id)
+    log_progress(
+        logger,
+        "chat",
+        "persistence_completed",
+        operation_started,
+        phase_ms=round((time.perf_counter() - persistence_started) * 1000),
+    )
     log_progress(
         logger,
         "chat",
@@ -1559,7 +1520,7 @@ async def chat(
         operation_started,
         cache_mode=cache_mode,
         source_count=len(sources),
-        temporary=conversation is None,
+        temporary=False,
     )
     return ChatResponse(
         conversation_id=conversation_id,
@@ -1567,7 +1528,7 @@ async def chat(
         answer=answer,
         sources=sources,
         verification=verification,
-        temporary=conversation is None,
+        temporary=False,
         cache_hit=cache_hit,
         cache_similarity=cache_similarity,
         cache_mode=cache_mode,

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException, Response
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.api import (
@@ -387,6 +387,37 @@ def test_legal_sources_returns_data_unavailable_when_freshness_fails_for_chat() 
 
 
 def test_chat_returns_http_success_payload_when_generation_is_unavailable() -> None:
+    class _Db:
+        def __init__(self) -> None:
+            self.added: list[object] = []
+
+        def add(self, value: object) -> None:
+            self.added.append(value)
+
+        async def flush(self) -> None:
+            conversation = next(
+                (value for value in self.added if isinstance(value, Conversation)),
+                None,
+            )
+            if conversation is not None and conversation.id is None:
+                conversation.id = uuid.uuid4()
+
+        async def execute(self, *_: object, **__: object) -> None:
+            return None
+
+        async def scalar(self, *_: object, **__: object) -> int:
+            return 0
+
+        async def commit(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
+        async def refresh(self, value: object) -> None:
+            if isinstance(value, ChatMessage) and value.id is None:
+                value.id = uuid.uuid4()
+
     class _Retrieval:
         async def retrieve(self, _: str) -> list[dict]:
             return [
@@ -428,39 +459,32 @@ def test_chat_returns_http_success_payload_when_generation_is_unavailable() -> N
     ai = SimpleNamespace(
         complete=AsyncMock(side_effect=GeminiError("private Vertex detail"))
     )
-    limiter = SimpleNamespace(check=AsyncMock())
-    request = SimpleNamespace(
-        cookies={},
-        headers={},
-        client=SimpleNamespace(host="127.0.0.1"),
-    )
+    db = _Db()
+    memory = SimpleNamespace(refresh=AsyncMock())
 
     result = asyncio.run(
         chat(
             ChatRequest(message="Quy định pháp luật thử nghiệm là gì?"),
-            request,
-            Response(),
-            SimpleNamespace(),
-            None,
-            Settings(
+            db=db,
+            user=SimpleNamespace(id=uuid.uuid4(), preferred_name="An"),
+            settings=Settings(
                 _env_file=None,
                 session_secret="guardrail-test-secret-at-least-32-bytes",
             ),
-            _Retrieval(),
-            _Freshness(),
-            ai,
-            limiter,
-            SimpleNamespace(),
-            _Cache(),
+            retrieval=_Retrieval(),
+            freshness=_Freshness(),
+            ai=ai,
+            memory=memory,
+            answer_cache=_Cache(),
         )
     )
 
-    assert result.answer == AI_TEMPORARILY_UNAVAILABLE_MESSAGE
+    assert result.answer == f"Chào An,\n\n{AI_TEMPORARILY_UNAVAILABLE_MESSAGE}"
     assert result.sources == []
     assert result.verification.checked is False
     assert result.verification.note == AI_TEMPORARILY_UNAVAILABLE_MESSAGE
-    assert result.temporary is True
-    limiter.check.assert_awaited_once()
+    assert result.temporary is False
+    memory.refresh.assert_awaited_once()
 
 
 def test_gemini_error_handler_does_not_expose_internal_details() -> None:
@@ -666,22 +690,19 @@ def test_chat_returns_and_persists_data_unavailable_without_calling_ai() -> None
     async def scenario() -> object:
         return await chat(
             ChatRequest(message="Nghĩa vụ pháp lý của doanh nghiệp là gì?"),
-            SimpleNamespace(),
-            Response(),
-            db,
-            SimpleNamespace(id=uuid.uuid4()),
-            Settings(_env_file=None, session_secret="guardrail-test"),
-            _EmptyRetrieval(),
-            _FreshnessMustNotRun(),
-            ai,
-            SimpleNamespace(),
-            memory,
-            _Cache(),
+            db=db,
+            user=SimpleNamespace(id=uuid.uuid4(), preferred_name="Minh"),
+            settings=Settings(_env_file=None, session_secret="guardrail-test"),
+            retrieval=_EmptyRetrieval(),
+            freshness=_FreshnessMustNotRun(),
+            ai=ai,
+            memory=memory,
+            answer_cache=_Cache(),
         )
 
     result = asyncio.run(scenario())
 
-    assert result.answer == "Dữ liệu không có sẵn"
+    assert result.answer == "Chào Minh,\n\nDữ liệu không có sẵn"
     assert result.sources == []
     assert result.verification.checked is False
     assert result.verification.note == "Dữ liệu không có sẵn"

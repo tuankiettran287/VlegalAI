@@ -10,6 +10,7 @@ from app import auth
 from app.core.config import Settings
 from app.core.security import decode_session_token
 from app.models import User
+from app.schemas import UserProfileUpdate
 
 
 class _TokenResponse:
@@ -54,6 +55,9 @@ class _Session:
 
     async def rollback(self) -> None:
         self.rolled_back = True
+
+    async def refresh(self, _: object) -> None:
+        return None
 
 
 def _settings(**overrides: object) -> Settings:
@@ -130,6 +134,31 @@ def test_oidc_callback_sets_backend_cookie_and_redirects_to_frontend(
     payload = decode_session_token(token, settings)
     user = next(value for value in db.added if isinstance(value, User))
     assert payload["sub"] == str(user.id)
+    assert user.preferred_name is None
+
+
+def test_profile_update_completes_first_login_onboarding() -> None:
+    user = User(
+        id=uuid.uuid4(),
+        email="user@example.com",
+        display_name="Google Name",
+        preferred_name=None,
+        avatar_url=None,
+        role="USER",
+    )
+    db = _Session()
+
+    result = asyncio.run(
+        auth.update_profile(
+            UserProfileUpdate(preferred_name="Minh Anh"),
+            db=db,  # type: ignore[arg-type]
+            user=user,
+        )
+    )
+
+    assert user.preferred_name == "Minh Anh"
+    assert result.preferred_name == "Minh Anh"
+    assert result.onboarding_required is False
 
 
 def test_oidc_callback_does_not_issue_session_when_user_persistence_fails(

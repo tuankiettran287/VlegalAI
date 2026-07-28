@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AuthCapabilities(BaseModel):
@@ -17,8 +17,25 @@ class UserOut(BaseModel):
     id: uuid.UUID
     email: str
     display_name: str
+    preferred_name: str | None = None
     avatar_url: str | None = None
     role: str
+    onboarding_required: bool = False
+
+
+class UserProfileUpdate(BaseModel):
+    preferred_name: str = Field(min_length=1, max_length=60)
+
+    @field_validator("preferred_name")
+    @classmethod
+    def normalize_preferred_name(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("Tên gọi không được để trống")
+        allowed_punctuation = {" ", ".", "-", "'", "_"}
+        if any(not (character.isalnum() or character in allowed_punctuation) for character in normalized):
+            raise ValueError("Tên gọi chứa ký tự không được hỗ trợ")
+        return normalized
 
 
 class SourceOut(BaseModel):

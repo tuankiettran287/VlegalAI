@@ -3,7 +3,7 @@ name: Test, build and deploy to GCP
 on:
   push:
     branches:
-      - master
+      - deploy/unified-cloud-run
   pull_request:
     branches:
       - master

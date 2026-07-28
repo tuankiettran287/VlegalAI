@@ -111,7 +111,6 @@ def _patch_lifespan_dependencies(
         return SimpleNamespace()
 
     monkeypatch.setattr(main, "LegalFreshnessService", freshness_factory)
-    monkeypatch.setattr(main, "GuestRateLimiter", lambda _: SimpleNamespace())
     monkeypatch.setattr(
         main,
         "ConversationMemoryService",

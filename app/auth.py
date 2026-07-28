@@ -25,7 +25,7 @@ from app.core.security import (
 )
 from app.db import get_db
 from app.models import SsoIdentity, User
-from app.schemas import AuthCapabilities, UserOut
+from app.schemas import AuthCapabilities, UserOut, UserProfileUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -290,5 +290,29 @@ async def logout(settings: Settings = Depends(get_settings)) -> Response:
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user: User = Depends(current_user)) -> User:
-    return user
+async def me(user: User = Depends(current_user)) -> UserOut:
+    return _user_out(user)
+
+
+@router.patch("/profile", response_model=UserOut)
+async def update_profile(
+    payload: UserProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+) -> UserOut:
+    user.preferred_name = payload.preferred_name
+    await db.commit()
+    await db.refresh(user)
+    return _user_out(user)
+
+
+def _user_out(user: User) -> UserOut:
+    return UserOut(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        preferred_name=user.preferred_name,
+        avatar_url=user.avatar_url,
+        role=user.role,
+        onboarding_required=not bool(user.preferred_name),
+    )
