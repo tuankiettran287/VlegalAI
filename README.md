@@ -1,7 +1,7 @@
 # VLegal AI
 
 Nền tảng trợ lý pháp lý Việt Nam gồm hỏi đáp có căn cứ, lịch sử chat, tạo/review/so
-sánh hợp đồng bằng Gemini 3.5 Flash, chuẩn bị gói ký và nghiên cứu bài viết trên internet.
+sánh hợp đồng bằng Gemini 2.5 Flash, chuẩn bị gói ký và nghiên cứu bài viết trên internet.
 
 Người dùng có thể hỏi đáp ngay mà không đăng nhập. Khi đó hội thoại chỉ nằm trong
 `sessionStorage` của tab trình duyệt và không được ghi vào PostgreSQL. Đăng nhập
@@ -16,10 +16,10 @@ trên toàn bộ kho luật bằng Hybrid GraphRAG, sau đó thực hiện tuầ
 1. Mã hoá câu hỏi bằng Vertex AI `gemini-embedding-001`, lấy các chunk gần nghĩa bằng `pgvector` trong PostgreSQL và mở rộng quan hệ trên Neo4j.
 2. Chạy Tavily và Google Search grounding song song, khử trùng lặp rồi chỉ giữ
    kết quả thuộc các nguồn chính thức được cho phép.
-3. Dùng Gemini 3.5 Flash phân loại còn hiệu lực, sửa đổi, hết hiệu lực hoặc bị thay thế.
+3. Dùng Gemini 2.5 Flash phân loại còn hiệu lực, sửa đổi, hết hiệu lực hoặc bị thay thế.
 4. Nếu có bản mới, tải nguồn chính thức, tách Điều/Khoản thành chunk, upsert
    PostgreSQL/pgvector, dựng node/edge Neo4j và truy xuất lại.
-5. Chỉ sau đó Gemini 3.5 Flash mới sinh kết quả có trích dẫn `[S1]`, `[S2]`.
+5. Chỉ sau đó Gemini 2.5 Flash mới sinh kết quả có trích dẫn `[S1]`, `[S2]`.
 
 Nếu văn bản đã hết hiệu lực hoặc bị thay thế, backend tải văn bản thay thế từ URL
 chính thức, tách Điều/Khoản thành chunk, tạo embedding bằng Vertex AI, upsert
@@ -85,9 +85,9 @@ và Gemini dùng service identity qua ADC. Các biến bắt buộc cho producti
 `RETRIEVER_BACKEND`, provider và API key chỉ tồn tại ở backend; frontend không
 có màn hình cấu hình kỹ thuật hoặc bộ chọn luật.
 
-Gemini 3.5 Flash được gọi qua Vertex AI. Backend đọc Google service-account
+Gemini 2.5 Flash được gọi qua Vertex AI. Backend đọc Google service-account
 credential từ file `env.json` (hoặc `GEMINI_CREDENTIALS_PATH`), lấy OAuth access
-token và gửi prompt tới model `gemini-3.5-flash`; credential không được trả về
+token và gửi prompt tới model `gemini-2.5-flash`; credential không được trả về
 frontend hay ghi vào log. Service account cần quyền gọi Vertex AI trong project
 và Vertex AI API phải được bật. Google Search grounding dùng cùng credential,
 không cần thêm Custom Search API key/CX; project cần bật Google Search

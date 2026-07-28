@@ -91,7 +91,15 @@ VERDICT_SCHEMA = {
 }
 
 
-def _law_identity(source: dict[str, Any]) -> tuple[str, str, str | None]:
+def _law_identity(
+    source: dict[str, Any],
+) -> tuple[str, str, str | None] | None:
+    # GraphRAG's synthetic "he-thong" document owns shared concepts and
+    # ontology nodes. It is retrieval context, not a legal instrument that can
+    # be checked against official publication sources.
+    external_doc_id = str(source.get("doc_id") or "").strip()
+    if external_doc_id.casefold() == "he-thong":
+        return None
     label = f"{source.get('citation', '')} {source.get('title', '')}"
     match = LAW_CODE_RE.search(label.upper())
     code = match.group(0) if match else str(source.get("doc_id") or source.get("title") or "Không rõ")[:120]
@@ -200,6 +208,8 @@ class LegalFreshnessService:
         seen: set[str] = set()
         for source in sources:
             identity = _law_identity(source)
+            if identity is None:
+                continue
             if identity[0] not in seen:
                 seen.add(identity[0])
                 identities.append(identity)

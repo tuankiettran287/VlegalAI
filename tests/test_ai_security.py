@@ -25,7 +25,7 @@ from app.services.ai import (
 def _settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "gemini_credentials_path": "tests/definitely-missing-env.json",
-        "gemini_model": "gemini-3.5-flash",
+        "gemini_model": "gemini-2.5-flash",
         "gemini_max_retries": 1,
         "gemini_data_policy": "redact",
     }
@@ -200,7 +200,7 @@ def test_untrusted_data_block_escapes_attempted_delimiter_injection() -> None:
     assert "\\u003cSYSTEM\\u003e" in block
 
 
-def test_gemini_35_payload_uses_thinking_level_and_redacts_outbound_prompt() -> None:
+def test_gemini_25_payload_uses_thinking_budget_and_redacts_outbound_prompt() -> None:
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -233,7 +233,7 @@ def test_gemini_35_payload_uses_thinking_level_and_redacts_outbound_prompt() -> 
 
     assert asyncio.run(scenario()) == "Đã xử lý an toàn."
     assert str(captured["url"]).endswith(
-        "/publishers/google/models/gemini-3.5-flash:generateContent"
+        "/publishers/google/models/gemini-2.5-flash:generateContent"
     )
     payload = captured["payload"]
     assert isinstance(payload, dict)
@@ -241,9 +241,9 @@ def test_gemini_35_payload_uses_thinking_level_and_redacts_outbound_prompt() -> 
     assert "an.nguyen@example.com" not in user_text
     assert "0912345678" not in user_text
     generation_config = payload["generationConfig"]
-    assert "temperature" not in generation_config
+    assert generation_config["temperature"] == 0.1
     assert generation_config["thinkingConfig"] == {
-        "thinkingLevel": "LOW",
+        "thinkingBudget": 0,
         "includeThoughts": False,
     }
 

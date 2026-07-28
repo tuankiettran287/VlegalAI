@@ -59,16 +59,31 @@ class _FakeGoogleAI:
 
 
 def test_freshness_recognizes_consolidated_law_code_without_year() -> None:
-    code, _, external_doc_id = _law_identity(
+    identity = _law_identity(
         {
             "doc_id": "22-vbhn-btc-445967",
             "title": "Thông tư hợp nhất 22/VBHN-BTC",
             "citation": "22/VBHN-BTC",
         }
     )
+    assert identity is not None
+    code, _, external_doc_id = identity
 
     assert code == "22/VBHN-BTC"
     assert external_doc_id == "22-vbhn-btc-445967"
+
+
+def test_freshness_skips_synthetic_system_document() -> None:
+    assert (
+        _law_identity(
+            {
+                "doc_id": "he-thong",
+                "title": "Bản đồ tri thức LaborCare",
+                "citation": "Mức phạt tiền",
+            }
+        )
+        is None
+    )
 
 
 def test_google_search_filters_to_official_domains() -> None:
