@@ -692,7 +692,14 @@ def _normalized_legal_reference(value: str) -> str:
         for character in normalized
         if unicodedata.category(character) != "Mn"
     )
-    return re.sub(r"\s+", " ", without_marks).strip().lower()
+    # Instrument titles are often written with optional punctuation, for
+    # example "Luật An toàn, vệ sinh lao động" versus "Luật An toàn vệ sinh
+    # lao động". Punctuation is not evidence that these are different laws.
+    return re.sub(
+        r"\s+",
+        " ",
+        re.sub(r"[^0-9A-Za-z]+", " ", without_marks),
+    ).strip().lower()
 
 
 def _validate_grounded_legal_references(
@@ -742,7 +749,10 @@ def _validate_grounded_legal_references(
             for title in allowed_titles
         ):
             continue
-        if any(code.lower() in normalized_tail for code in allowed_codes):
+        if any(
+            _normalized_legal_reference(code) in normalized_tail
+            for code in allowed_codes
+        ):
             continue
         # A source title may occur immediately before a parenthetical or an
         # inline citation and therefore not be captured by startswith above.
@@ -793,6 +803,40 @@ _ANSWER_CONCEPT_GENERIC_TERMS = {
 }
 
 
+class _AnswerCoverageError(GeminiError):
+    """A grounded answer omitted a requested concept after synthesis."""
+
+
+def _answer_validation_kind(exc: BaseException) -> str:
+    if isinstance(exc, _AnswerCoverageError):
+        return "answer_plan_coverage"
+    message = _normalized_legal_reference(str(exc))
+    if "trich dan" in message or "citation" in message:
+        return "citation"
+    if "so hieu van ban" in message or "van ban khong co trong nguon" in message:
+        return "legal_reference"
+    if "mo dau" in message or "bat dau" in message:
+        return "opening"
+    return "grounding"
+
+
+def _validate_answer_safety(
+    value: str,
+    *,
+    allowed_ids: list[str],
+    sources: list[dict[str, Any]] | None,
+) -> None:
+    """Validate citations and reject legal instruments absent from context."""
+
+    validate_citations(
+        value,
+        allowed_ids,
+        require_claim_coverage=True,
+    )
+    if sources is not None:
+        _validate_grounded_legal_references(value, sources)
+
+
 def _validate_answer_plan_coverage(
     value: str,
     answer_plan: dict[str, Any] | None,
@@ -829,7 +873,7 @@ def _validate_answer_plan_coverage(
         if matched < min(2, len(terms)):
             missing.append(label)
     if missing:
-        raise GeminiError(
+        raise _AnswerCoverageError(
             "Câu trả lời chưa giải quyết đúng khái niệm bắt buộc: "
             + ", ".join(missing)
         )
@@ -867,14 +911,15 @@ async def _complete_with_citation_repair(
         operation_started,
         answer_chars=len(answer),
     )
+    draft_safety_valid = False
     try:
-        validate_citations(
+        _validate_answer_safety(
             answer,
-            allowed_ids,
-            require_claim_coverage=True,
+            allowed_ids=allowed_ids,
+            sources=sources,
         )
+        draft_safety_valid = True
         if sources is not None:
-            _validate_grounded_legal_references(answer, sources)
             _validate_professional_legal_opening(answer)
         _validate_answer_plan_coverage(answer, answer_plan)
         log_progress(
@@ -885,12 +930,14 @@ async def _complete_with_citation_repair(
             outcome="draft_valid",
         )
         return answer
-    except GeminiError:
+    except GeminiError as draft_validation_exc:
+        validation_kind = _answer_validation_kind(draft_validation_exc)
         log_progress(
             logger,
             "answer_generation",
             "citation_repair_started",
             operation_started,
+            validation_kind=validation_kind,
         )
         repair_prompt = (
             f"{prompt}\n\n"
@@ -980,27 +1027,72 @@ async def _complete_with_citation_repair(
                     )
         repaired = "\n".join(repaired_units)
         try:
-            validate_citations(
+            _validate_answer_safety(
                 repaired,
-                allowed_ids,
-                require_claim_coverage=True,
+                allowed_ids=allowed_ids,
+                sources=sources,
             )
-            if sources is not None:
-                _validate_grounded_legal_references(repaired, sources)
-                _validate_professional_legal_opening(repaired)
-            _validate_answer_plan_coverage(repaired, answer_plan)
-            log_progress(
-                logger,
-                "answer_generation",
-                "completed",
-                operation_started,
-                outcome="citation_repaired",
+        except Exception as repair_safety_exc:
+            repair_validation_kind = _answer_validation_kind(
+                repair_safety_exc
             )
-            return repaired
-        except Exception as exc:
+            logger.warning(
+                "Repaired answer safety validation failed "
+                "validation_kind=%s draft_safety_valid=%s",
+                repair_validation_kind,
+                draft_safety_valid,
+            )
+            if draft_safety_valid:
+                log_progress(
+                    logger,
+                    "answer_generation",
+                    "completed",
+                    operation_started,
+                    outcome="grounded_draft_fallback",
+                    validation_kind=repair_validation_kind,
+                )
+                return answer
             raise GeminiError(
                 "Không thể tạo câu trả lời có căn cứ và trích dẫn hợp lệ."
-            ) from exc
+            ) from repair_safety_exc
+
+        soft_validation_failures: list[str] = []
+        if sources is not None:
+            try:
+                _validate_professional_legal_opening(repaired)
+            except GeminiError as opening_exc:
+                soft_validation_failures.append(
+                    _answer_validation_kind(opening_exc)
+                )
+        try:
+            _validate_answer_plan_coverage(repaired, answer_plan)
+        except _AnswerCoverageError as coverage_exc:
+            soft_validation_failures.append(
+                _answer_validation_kind(coverage_exc)
+            )
+        if soft_validation_failures:
+            logger.warning(
+                "Repaired answer retained after soft validation "
+                "validation_kinds=%s",
+                ",".join(dict.fromkeys(soft_validation_failures)),
+            )
+        log_progress(
+            logger,
+            "answer_generation",
+            "completed",
+            operation_started,
+            outcome=(
+                "citation_repaired_with_warning"
+                if soft_validation_failures
+                else "citation_repaired"
+            ),
+            validation_kind=(
+                ",".join(dict.fromkeys(soft_validation_failures))
+                if soft_validation_failures
+                else "none"
+            ),
+        )
+        return repaired
     except Exception as exc:
         logger.warning(
             "Citation validation failed closed error_type=%s",

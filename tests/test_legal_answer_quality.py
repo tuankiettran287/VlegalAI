@@ -119,6 +119,35 @@ def test_ontology_expands_specific_concepts_instead_of_broad_wage_terms() -> Non
     }
 
 
+def test_long_safety_scenario_focuses_on_the_explicit_legal_question() -> None:
+    query = (
+        "Vì mưu sinh chị H ký hợp đồng làm công nhân khai thác đá. "
+        "Tại công trường, chị thấy việc nổ mìn có nguy cơ đá văng, đá lở "
+        "đe dọa tính mạng, sức khỏe nên từ chối làm việc. Chủ doanh nghiệp "
+        "cho rằng đã ký hợp đồng thì không được từ chối. Theo quy định pháp "
+        "luật, chị H có được từ chối làm việc không?"
+    )
+
+    answer_plan = build_answer_plan(query)
+    planned = plan_retrieval_queries(query)
+
+    assert answer_plan["question_focus"] == (
+        "Theo quy định pháp luật, chị H có được từ chối làm việc không?"
+    )
+    assert answer_plan["must_answer"] == [answer_plan["question_focus"]]
+    assert {
+        concept["label"]
+        for concept in answer_plan["required_concepts"]
+    } == {
+        "Quyền từ chối hoặc rời bỏ nơi làm việc không bảo đảm an toàn"
+    }
+    assert any(
+        "nguy cơ tai nạn lao động" in item
+        and "tính mạng hoặc sức khỏe" in item
+        for item in planned[1:]
+    )
+
+
 def test_concept_filter_rejects_adjacent_sources_and_keeps_direct_rules() -> None:
     query = (
         "tăng ca ban đêm thì lương nhận được "
@@ -744,6 +773,99 @@ def test_valid_citations_but_generic_preamble_triggers_style_repair() -> None:
     assert ai.calls == 2
     assert answer.startswith("Theo Điều 98")
     assert "[S1]" in answer
+
+
+def test_grounded_title_matching_ignores_optional_punctuation() -> None:
+    class _AI:
+        calls = 0
+
+        async def complete(self, *_: object, **__: object) -> str:
+            self.calls += 1
+            return (
+                "Theo Điều 6 Luật An toàn vệ sinh lao động, người lao động "
+                "có quyền từ chối công việc nguy hiểm [S1]."
+            )
+
+    ai = _AI()
+    source = _source(
+        citation=(
+            "Luật An Toàn, Vệ Sinh Lao Động (84/2015/QH13) > "
+            "Điều 6. Quyền và nghĩa vụ về an toàn, vệ sinh lao động"
+        ),
+        text=(
+            "Người lao động có quyền từ chối làm công việc hoặc rời bỏ "
+            "nơi làm việc khi thấy rõ nguy cơ xảy ra tai nạn lao động."
+        ),
+    )
+
+    answer = asyncio.run(
+        _complete_with_citation_repair(
+            ai,
+            "system",
+            "prompt",
+            allowed_ids=["S1"],
+            sources=[source],
+            max_tokens=300,
+        )
+    )
+
+    assert ai.calls == 1
+    assert answer.startswith("Theo Điều 6")
+
+
+def test_safe_draft_is_retained_when_style_repair_hallucinates_a_law() -> None:
+    draft = (
+        "Người lao động có quyền từ chối công việc có nguy cơ nghiêm trọng "
+        "đối với tính mạng hoặc sức khỏe [S1]."
+    )
+
+    class _AI:
+        calls = 0
+
+        async def complete(self, *_: object, **__: object) -> str:
+            self.calls += 1
+            return draft
+
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            self.calls += 1
+            return {
+                "statements": [
+                    {
+                        "text": (
+                            "Theo Bộ luật Hình sự số 100/2015/QH13, "
+                            "người lao động có quyền từ chối."
+                        ),
+                        "citations": ["S1"],
+                    }
+                ]
+            }
+
+    ai = _AI()
+    source = _source(
+        citation=(
+            "Luật An Toàn, Vệ Sinh Lao Động (84/2015/QH13) > "
+            "Điều 6. Quyền và nghĩa vụ về an toàn, vệ sinh lao động"
+        ),
+        text=(
+            "Người lao động có quyền từ chối làm công việc hoặc rời bỏ "
+            "nơi làm việc khi thấy rõ nguy cơ xảy ra tai nạn lao động."
+        ),
+    )
+
+    answer = asyncio.run(
+        _complete_with_citation_repair(
+            ai,
+            "system",
+            "prompt",
+            allowed_ids=["S1"],
+            sources=[source],
+            max_tokens=300,
+        )
+    )
+
+    assert ai.calls == 2
+    assert answer == draft
+    assert "Bộ luật Hình sự" not in answer
 
 
 def test_freshness_limit_counts_laws_instead_of_chunks() -> None:

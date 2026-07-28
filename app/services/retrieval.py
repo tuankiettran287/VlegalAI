@@ -512,6 +512,28 @@ def _question_facets(query: str) -> list[str]:
     ]
 
 
+def _question_focus(query: str) -> str:
+    """Return the explicit question at the end of a narrative scenario."""
+
+    normalized = " ".join(str(query or "").split())
+    if not normalized:
+        return ""
+    sentences = [
+        item.strip()
+        for item in re.split(r"(?<=[.!?])\s+", normalized)
+        if item.strip()
+    ]
+    for sentence in reversed(sentences):
+        if "?" in sentence:
+            return re.sub(
+                r"^(?:câu\s+hỏi\s*\d*\s*:\s*)",
+                "",
+                sentence,
+                flags=re.IGNORECASE,
+            ).strip()
+    return normalized
+
+
 RetrievalRoute = Literal["single_hop", "multi_hop", "multi_abstract"]
 
 
@@ -613,7 +635,15 @@ def build_answer_plan(query: str) -> dict[str, Any]:
     """Expose question coverage and actor focus to the synthesis prompt."""
 
     planned = plan_retrieval_queries(query)
-    facets = _question_facets(" ".join(str(query or "").split()))
+    normalized_query = " ".join(str(query or "").split())
+    facets = _question_facets(normalized_query)
+    question_focus = _question_focus(normalized_query)
+    if (
+        question_focus
+        and question_focus != normalized_query
+        and len(facets) <= 1
+    ):
+        facets = [question_focus]
     if not facets and planned:
         facets = [planned[0]]
     query_ascii = _ascii(query)
@@ -644,7 +674,9 @@ def build_answer_plan(query: str) -> dict[str, Any]:
         "actors": actors,
         "focus_actor": focus or (actors[-1] if actors else ""),
     }
-    matched_concepts = _matched_query_concepts(query)
+    if question_focus and question_focus != normalized_query:
+        plan["question_focus"] = question_focus
+    matched_concepts = _matched_query_concepts(question_focus or query)
     if matched_concepts:
         plan["required_concepts"] = [
             {
@@ -652,6 +684,19 @@ def build_answer_plan(query: str) -> dict[str, Any]:
                 "guidance": _concept_retrieval_query(concept),
             }
             for concept in matched_concepts
+        ]
+    supporting_concepts = [
+        concept
+        for concept in _matched_query_concepts(query)
+        if concept.key not in {item.key for item in matched_concepts}
+    ]
+    if supporting_concepts:
+        plan["supporting_concepts"] = [
+            {
+                "label": concept.label,
+                "guidance": _concept_retrieval_query(concept),
+            }
+            for concept in supporting_concepts
         ]
     if _is_public_sector_base_wage_query(query):
         plan.update(

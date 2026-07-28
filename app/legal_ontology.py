@@ -586,6 +586,23 @@ EVENTS: tuple[Concept, ...] = (
 
 BENEFITS: tuple[Concept, ...] = (
     _c("quyen-huong-luong-tang-ca", "Lương làm thêm giờ", ["tien luong lam them gio"], "Quyền hưởng lương làm thêm."),
+    _c(
+        "quyen-tu-choi-cong-viec-khong-an-toan",
+        "Quyền từ chối hoặc rời bỏ nơi làm việc không bảo đảm an toàn",
+        [
+            "tu choi lam viec",
+            "tu choi cong viec",
+            "roi bo noi lam viec",
+            "nguy co xay ra tai nan lao dong",
+            "de doa nghiem trong tinh mang",
+            "khong bao dam an toan",
+        ],
+        (
+            "Người lao động có quyền từ chối làm công việc hoặc rời bỏ nơi "
+            "làm việc khi thấy rõ nguy cơ tai nạn lao động đe dọa nghiêm "
+            "trọng tính mạng hoặc sức khỏe."
+        ),
+    ),
     _c("quyen-tro-cap-thoi-viec", "Trợ cấp thôi việc", ["tro cap thoi viec"], "Quyền hưởng trợ cấp thôi việc."),
     _c("quyen-tro-cap-mat-viec", "Trợ cấp mất việc làm", ["tro cap mat viec lam"], "Quyền hưởng trợ cấp mất việc."),
     _c("quyen-tro-cap-that-nghiep", "Trợ cấp thất nghiệp", ["tro cap that nghiep"], "Quyền hưởng BHTN."),
