@@ -3,6 +3,8 @@ param(
     [string]$ProjectId = $env:GOOGLE_CLOUD_PROJECT,
     [string]$Region = "asia-southeast1",
     [string]$EmbeddingLocation = "",
+    [string]$EmbeddingVertexLocations = $env:EMBEDDING_VERTEX_LOCATIONS,
+    [double]$EmbeddingVertexRequestsPerMinute = 4.5,
     [string]$Repository = "vlegal",
     [string]$Tag = "",
     [string]$RunServiceAccount = "",
@@ -11,6 +13,7 @@ param(
     [string]$Subnet = "default",
     [string]$Neo4jUri = $env:NEO4J_URI,
     [string]$Neo4jUser = "neo4j",
+    [string]$Neo4jDatabase = "neo4j",
     [string]$FrontendUrl = "",
     [ValidateSet("all", "migrate", "reindex", "api", "frontend", "worker", "beat")]
     [string]$Component = "all",
@@ -39,7 +42,27 @@ if ([string]::IsNullOrWhiteSpace($RunServiceAccount)) {
     $RunServiceAccount = "vlegal-run@$ProjectId.iam.gserviceaccount.com"
 }
 if ([string]::IsNullOrWhiteSpace($EmbeddingLocation)) {
-    $EmbeddingLocation = $Region
+    $EmbeddingLocation = "global"
+}
+if ([string]::IsNullOrWhiteSpace($EmbeddingVertexLocations)) {
+    $EmbeddingVertexLocations = @(
+        "asia-east1", "asia-east2", "asia-northeast1", "asia-northeast3",
+        "asia-south1", "asia-southeast1", "australia-southeast1",
+        "europe-central2", "europe-north1", "europe-southwest1",
+        "europe-west1", "europe-west2", "europe-west3", "europe-west4",
+        "europe-west6", "europe-west8", "europe-west9", "me-central1",
+        "me-central2", "me-west1", "northamerica-northeast1",
+        "southamerica-east1", "us-central1", "us-east1", "us-east4",
+        "us-east5", "us-south1", "us-west1", "us-west4"
+    ) -join "|"
+}
+$EmbeddingVertexLocations = (
+    $EmbeddingVertexLocations -split "[,;|\s]+" |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+) -join "|"
+if ($EmbeddingVertexRequestsPerMinute -le 0) {
+    throw "EmbeddingVertexRequestsPerMinute must be greater than zero."
 }
 if ([string]::IsNullOrWhiteSpace($CorpusBucket)) {
     $CorpusBucket = "$ProjectId-vlegal-corpus"
@@ -117,18 +140,20 @@ function Deploy-Reindex {
         "EMBEDDING_PROVIDER=vertex",
         "EMBEDDING_MODEL=gemini-embedding-001",
         "EMBEDDING_LOCATION=$EmbeddingLocation",
-        "EMBEDDING_MAX_CONCURRENCY=1",
+        "EMBEDDING_VERTEX_LOCATIONS=$EmbeddingVertexLocations",
+        "EMBEDDING_VERTEX_REQUESTS_PER_MINUTE=$EmbeddingVertexRequestsPerMinute",
+        "EMBEDDING_MAX_CONCURRENCY=32",
         "EMBEDDING_BATCH_SIZE=20",
-        "EMBEDDING_MAX_ITEMS_PER_MINUTE=4",
         "EMBEDDING_TIMEOUT_SECONDS=60",
         "EMBEDDING_MAX_RETRIES=8",
         "LEGAL_EMBEDDING_CHECKPOINT_ENABLED=true",
-        "LEGAL_EMBEDDING_CHECKPOINT_BATCH_SIZE=20",
+        "LEGAL_EMBEDDING_CHECKPOINT_BATCH_SIZE=640",
         "EMBEDDING_AUTO_TRUNCATE=true",
         "GEMINI_DATA_POLICY=redact",
         "POSTGRES_VECTOR_SIZE=1024",
         "NEO4J_URI=$Neo4jUri",
-        "NEO4J_USER=$Neo4jUser"
+        "NEO4J_USER=$Neo4jUser",
+        "NEO4J_DATABASE=$Neo4jDatabase"
     ) -join ","
 
     Invoke-Gcloud @(
@@ -162,9 +187,10 @@ function Deploy-Api {
         "EMBEDDING_PROVIDER=vertex",
         "EMBEDDING_MODEL=gemini-embedding-001",
         "EMBEDDING_LOCATION=$EmbeddingLocation",
-        "EMBEDDING_MAX_CONCURRENCY=1",
+        "EMBEDDING_VERTEX_LOCATIONS=$EmbeddingVertexLocations",
+        "EMBEDDING_VERTEX_REQUESTS_PER_MINUTE=$EmbeddingVertexRequestsPerMinute",
+        "EMBEDDING_MAX_CONCURRENCY=8",
         "EMBEDDING_BATCH_SIZE=20",
-        "EMBEDDING_MAX_ITEMS_PER_MINUTE=4",
         "EMBEDDING_TIMEOUT_SECONDS=60",
         "EMBEDDING_MAX_RETRIES=8",
         "EMBEDDING_AUTO_TRUNCATE=true",
@@ -173,9 +199,11 @@ function Deploy-Api {
         "DATABASE_POOL_SIZE=5",
         "DATABASE_MAX_OVERFLOW=5",
         "RETRIEVER_BACKEND=hybrid_rag",
+        "REQUIRE_FRESHNESS_CHECK=false",
         "POSTGRES_VECTOR_SIZE=1024",
         "NEO4J_URI=$Neo4jUri",
-        "NEO4J_USER=$Neo4jUser"
+        "NEO4J_USER=$Neo4jUser",
+        "NEO4J_DATABASE=$Neo4jDatabase"
     ) -join ","
 
     Invoke-Gcloud @(
@@ -227,9 +255,10 @@ function Deploy-Worker {
         "EMBEDDING_PROVIDER=vertex",
         "EMBEDDING_MODEL=gemini-embedding-001",
         "EMBEDDING_LOCATION=$EmbeddingLocation",
-        "EMBEDDING_MAX_CONCURRENCY=1",
+        "EMBEDDING_VERTEX_LOCATIONS=$EmbeddingVertexLocations",
+        "EMBEDDING_VERTEX_REQUESTS_PER_MINUTE=$EmbeddingVertexRequestsPerMinute",
+        "EMBEDDING_MAX_CONCURRENCY=8",
         "EMBEDDING_BATCH_SIZE=20",
-        "EMBEDDING_MAX_ITEMS_PER_MINUTE=4",
         "EMBEDDING_TIMEOUT_SECONDS=60",
         "EMBEDDING_MAX_RETRIES=8",
         "EMBEDDING_AUTO_TRUNCATE=true",
@@ -239,7 +268,9 @@ function Deploy-Worker {
         "RETRIEVER_BACKEND=hybrid_rag",
         "POSTGRES_VECTOR_SIZE=1024",
         "NEO4J_URI=$Neo4jUri",
-        "NEO4J_USER=$Neo4jUser"
+        "NEO4J_USER=$Neo4jUser",
+        "NEO4J_DATABASE=$Neo4jDatabase",
+        "REQUIRE_FRESHNESS_CHECK=false"
     ) -join ","
 
     Invoke-Gcloud @(

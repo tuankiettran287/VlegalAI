@@ -73,6 +73,8 @@ jobs:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION || 'asia-southeast1' }}
       GCP_EMBEDDING_LOCATION: ${{ vars.GCP_EMBEDDING_LOCATION || 'asia-southeast1' }}
+      GCP_EMBEDDING_VERTEX_LOCATIONS: ${{ vars.GCP_EMBEDDING_VERTEX_LOCATIONS }}
+      GCP_EMBEDDING_VERTEX_REQUESTS_PER_MINUTE: ${{ vars.GCP_EMBEDDING_VERTEX_REQUESTS_PER_MINUTE || '4.5' }}
       GCP_REPOSITORY: ${{ vars.GCP_REPOSITORY || 'vlegal' }}
       GCP_RUN_SERVICE_ACCOUNT: ${{ vars.GCP_RUN_SERVICE_ACCOUNT }}
       GCP_CORPUS_BUCKET: ${{ vars.GCP_CORPUS_BUCKET }}
@@ -161,6 +163,8 @@ jobs:
             ProjectId = $env:GCP_PROJECT_ID
             Region = $env:GCP_REGION
             EmbeddingLocation = $env:GCP_EMBEDDING_LOCATION
+            EmbeddingVertexLocations = $env:GCP_EMBEDDING_VERTEX_LOCATIONS
+            EmbeddingVertexRequestsPerMinute = [double]$env:GCP_EMBEDDING_VERTEX_REQUESTS_PER_MINUTE
             Repository = $env:GCP_REPOSITORY
             Tag = $env:IMAGE_TAG
             RunServiceAccount = $env:GCP_RUN_SERVICE_ACCOUNT

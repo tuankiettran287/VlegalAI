@@ -102,9 +102,10 @@ def _safe_request_id(request: Request | None) -> str:
 async def gemini_error(request: Request, exc: GeminiError) -> JSONResponse:
     request_id = _safe_request_id(request)
     logger.error(
-        "Gemini generation unavailable request_id=%s error_type=%s",
+        "Gemini generation unavailable request_id=%s error_type=%s reason=%s",
         request_id,
         type(exc).__name__,
+        " ".join(str(exc).split())[:500],
     )
     return JSONResponse(
         status_code=503,

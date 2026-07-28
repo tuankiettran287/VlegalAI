@@ -82,6 +82,7 @@ from app.services.retrieval import (
     append_detailed_citations,
     build_answer_plan,
     build_context,
+    format_source_locator,
     select_context_sources,
 )
 from app.services.semantic_cache import (
@@ -380,13 +381,14 @@ async def _legal_sources(
         return selected
 
     def source_law_code(source: dict[str, Any]) -> str:
+        explicit_code = str(source.get("law_code") or "").strip().upper()
+        if explicit_code:
+            return explicit_code
         label = f"{source.get('citation', '')} {source.get('title', '')}"
         match = LAW_CODE_RE.search(label.upper())
         if match:
             return match.group(0).upper()
-        return str(
-            source.get("doc_id") or source.get("title") or "Không rõ"
-        )[:120].strip().upper()
+        return ""
 
     try:
         sources = usable_sources(await retrieval.retrieve(query))
@@ -412,6 +414,16 @@ async def _legal_sources(
             True,
         )
     )
+    if not require_freshness:
+        for index, source in enumerate(sources, start=1):
+            source["source_id"] = f"S{index}"
+        return sources, {
+            "checked": False,
+            "all_current": False,
+            "items": [],
+            "reason": "freshness_check_disabled",
+        }
+
     for _ in range(3):
         try:
             verification, updated = await freshness.verify_sources(sources)
@@ -694,6 +706,34 @@ def _validate_professional_legal_opening(value: str) -> None:
         )
 
 
+def _grounded_source_fallback(
+    sources: list[dict[str, Any]],
+    *,
+    max_sources: int = 3,
+    excerpt_chars: int = 420,
+) -> str:
+    """Build a deterministic, cited answer when model repair fails closed."""
+
+    statements: list[str] = []
+    for source in sources[:max_sources]:
+        source_id = str(source.get("source_id") or "").strip().upper()
+        text = " ".join(str(source.get("text") or "").split())
+        if not re.fullmatch(r"S\d+", source_id) or not text:
+            continue
+        text = re.sub(r"\[(?:S\d+)\]", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"[.!?]+(?:\s+|$)", ", ", text).strip(" ,")
+        if len(text) > excerpt_chars:
+            shortened = text[:excerpt_chars].rsplit(" ", 1)[0].rstrip(" ,;:")
+            text = f"{shortened}…"
+        locator = format_source_locator(source)
+        prefix = "" if not statements else "- "
+        statements.append(
+            f"{prefix}Theo {locator} [{source_id}], "
+            f"nguồn pháp lý truy hồi ghi nhận: {text} [{source_id}]."
+        )
+    return "\n".join(statements)
+
+
 async def _complete_with_citation_repair(
     ai: GeminiService,
     system: str,
@@ -720,7 +760,11 @@ async def _complete_with_citation_repair(
             _validate_grounded_legal_references(answer, sources)
             _validate_professional_legal_opening(answer)
         return answer
-    except GeminiError:
+    except GeminiError as exc:
+        logger.warning(
+            "Initial legal answer validation failed reason=%s",
+            " ".join(str(exc).split())[:500],
+        )
         repair_prompt = (
             f"{prompt}\n\n"
             "YÊU CẦU SỬA TRÍCH DẪN BẮT BUỘC:\n"
@@ -809,6 +853,10 @@ async def _complete_with_citation_repair(
                 _validate_professional_legal_opening(repaired)
             return repaired
         except Exception as exc:
+            logger.warning(
+                "Repaired legal answer validation failed reason=%s",
+                " ".join(str(exc).split())[:500],
+            )
             raise GeminiError(
                 "Không thể tạo câu trả lời có căn cứ và trích dẫn hợp lệ."
             ) from exc
@@ -1185,25 +1233,43 @@ async def chat(
                 retrieval,
                 freshness,
             )
-        answer = await _complete_with_citation_repair(
-            ai,
-            LEGAL_SYSTEM_PROMPT,
-            "BỘ NHỚ TÓM TẮT:\n"
-            f"{_summary_prompt(summary_context)}\n\n"
-            f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
-            "KẾ HOẠCH PHỦ CÂU HỎI:\n"
-            f"{untrusted_data_block('ANSWER_PLAN', build_answer_plan(payload.message))}\n\n"
-            f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-            f"NGUỒN:\n{build_context(sources)}\n\n"
-            f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
-            f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
-            f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
-            "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
-            "không được sao chép các kết luận không còn phù hợp.",
-            allowed_ids=[source["source_id"] for source in sources],
-            sources=sources,
-            max_tokens=2200,
-        )
+        try:
+            answer = await _complete_with_citation_repair(
+                ai,
+                LEGAL_SYSTEM_PROMPT,
+                "BỘ NHỚ TÓM TẮT:\n"
+                f"{_summary_prompt(summary_context)}\n\n"
+                f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
+                "KẾ HOẠCH PHỦ CÂU HỎI:\n"
+                f"{untrusted_data_block('ANSWER_PLAN', build_answer_plan(payload.message))}\n\n"
+                f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
+                f"NGUỒN:\n{build_context(sources)}\n\n"
+                f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
+                f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
+                f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
+                "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
+                "không được sao chép các kết luận không còn phù hợp.",
+                allowed_ids=[source["source_id"] for source in sources],
+                sources=sources,
+                max_tokens=2200,
+            )
+        except GeminiError as exc:
+            logger.error(
+                "Legal answer generation failed; returning grounded fallback "
+                "error_type=%s reason=%s",
+                type(exc).__name__,
+                " ".join(str(exc).split())[:500],
+            )
+            answer = _grounded_source_fallback(sources)
+            if not answer:
+                raise
+            validate_citations(
+                answer,
+                [source["source_id"] for source in sources],
+                require_claim_coverage=True,
+            )
+            _validate_grounded_legal_references(answer, sources)
+            _validate_professional_legal_opening(answer)
         answer = append_detailed_citations(answer, sources)
         if cache_lookup and verification.get("checked") and verification.get("all_current"):
             try:

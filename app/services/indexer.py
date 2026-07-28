@@ -26,6 +26,7 @@ from app.external_graphrag import (
     upsert_postgres_chunks,
 )
 from app.models import LegalChunk, LegalDocument, normalize_legal_document_code
+from app.services.embeddings import parse_vertex_locations
 
 
 ARTICLE_RE = re.compile(r"(?im)^\s*(Điều\s+\d+[a-zA-Z]?[\.:]?\s*[^\n]*)")
@@ -367,6 +368,12 @@ class LegalIndexer:
             embedding_max_retries=self.settings.embedding_max_retries,
             embedding_auto_truncate=self.settings.embedding_auto_truncate,
             embedding_data_policy=self.settings.gemini_data_policy,
+            embedding_vertex_locations=parse_vertex_locations(
+                self.settings.embedding_vertex_locations
+            ),
+            embedding_vertex_requests_per_minute=(
+                self.settings.embedding_vertex_requests_per_minute
+            ),
         )
 
     async def index_candidate(self, db: AsyncSession, candidate: LegalCandidate) -> LegalDocument:

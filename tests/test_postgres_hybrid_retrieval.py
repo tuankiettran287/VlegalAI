@@ -20,6 +20,7 @@ from app.external_graphrag import (
     reciprocal_rank_fusion,
     validate_postgres_embeddings,
 )
+from app.services.retrieval import serialize_source
 
 
 def _row(chunk_id: str, text: str = "nghia vu thue") -> dict:
@@ -36,6 +37,18 @@ def _row(chunk_id: str, text: str = "nghia vu thue") -> dict:
         "ordinal": 0,
         "source_url": None,
     }
+
+
+def test_serialized_retrieval_source_preserves_law_code() -> None:
+    serialized = serialize_source(
+        {
+            **_row("labor-code"),
+            "law_code": "45/2019/QH14",
+            "citation": "Bộ luật Lao động > Điều 98",
+        }
+    )
+
+    assert serialized["law_code"] == "45/2019/QH14"
 
 
 def test_bootstrap_provenance_quarantines_unknown_documents() -> None:

@@ -33,7 +33,7 @@ GEMINI_API_PROVIDER_REVISION = "gemini-api-v1"
 VERTEX_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 VERTEX_API_SERVICE = "aiplatform.googleapis.com"
 GEMINI_API_SERVICE = "generativelanguage.googleapis.com"
-RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {408, 417, 429, 500, 502, 503, 504}
 VERTEX_LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 EMBEDDING_PROVIDERS = {"vertex", "gemini-api"}
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +48,29 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_vertex_locations(value: Any) -> tuple[str, ...]:
+    """Parse an ordered, de-duplicated Vertex AI location pool."""
+
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        candidates = re.split(r"[\s,;|]+", value)
+    else:
+        try:
+            candidates = list(value)
+        except TypeError:
+            candidates = [value]
+
+    locations: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        location = str(candidate or "").strip()
+        if location and location not in seen:
+            locations.append(location)
+            seen.add(location)
+    return tuple(locations)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +90,8 @@ class EmbeddingConfig:
     max_retries: int = 3
     auto_truncate: bool = True
     data_policy: str = "redact"
+    vertex_locations: tuple[str, ...] = ()
+    vertex_requests_per_minute: float = 0.0
 
     @classmethod
     def from_env(cls) -> "EmbeddingConfig":
@@ -98,6 +123,12 @@ class EmbeddingConfig:
             data_policy=os.getenv("GEMINI_DATA_POLICY", "redact")
             .strip()
             .lower(),
+            vertex_locations=parse_vertex_locations(
+                os.getenv("EMBEDDING_VERTEX_LOCATIONS", "")
+            ),
+            vertex_requests_per_minute=float(
+                os.getenv("EMBEDDING_VERTEX_REQUESTS_PER_MINUTE", "0")
+            ),
         )
 
     @property
@@ -125,6 +156,7 @@ class EmbeddingConfig:
     @property
     def ready(self) -> bool:
         provider = self.normalized_provider
+        vertex_locations = self.vertex_locations or (self.location.strip(),)
         credentials_configured = (
             bool(self.api_key.strip())
             if provider == "gemini-api"
@@ -139,7 +171,13 @@ class EmbeddingConfig:
             and self.model.strip()
             and (
                 provider == "gemini-api"
-                or VERTEX_LOCATION_RE.fullmatch(self.location.strip())
+                or (
+                    all(
+                        VERTEX_LOCATION_RE.fullmatch(location)
+                        for location in vertex_locations
+                    )
+                    and self.vertex_requests_per_minute >= 0
+                )
             )
             and 128 <= self.dimensions <= 3072
             and self.max_concurrency >= 1
@@ -176,6 +214,12 @@ def embedding_config_from_settings(settings: Any) -> EmbeddingConfig:
         max_retries=settings.embedding_max_retries,
         auto_truncate=settings.embedding_auto_truncate,
         data_policy=settings.gemini_data_policy,
+        vertex_locations=parse_vertex_locations(
+            settings.embedding_vertex_locations
+        ),
+        vertex_requests_per_minute=(
+            settings.embedding_vertex_requests_per_minute
+        ),
     )
 
 
@@ -193,6 +237,14 @@ class VertexAIEmbeddingService:
         self._project_id = ""
         self._credentials_lock = threading.Lock()
         self._readiness_lock = threading.Lock()
+        self._location_lock = threading.Lock()
+        self._location_cursor = 0
+        self._location_next_ready = {
+            location: 0.0
+            for location in (
+                config.vertex_locations or (config.location.strip(),)
+            )
+        }
         self._vertex_ready = False
         self._rate_lock = threading.Lock()
         self._rate_events: deque[tuple[float, int]] = deque()
@@ -214,6 +266,20 @@ class VertexAIEmbeddingService:
                 "EMBEDDING_PROVIDER must be 'vertex' or 'gemini-api'."
             )
         return provider
+
+    @property
+    def _vertex_locations(self) -> tuple[str, ...]:
+        locations = self.config.vertex_locations or (
+            self.config.location.strip(),
+        )
+        if not locations or not all(
+            VERTEX_LOCATION_RE.fullmatch(location)
+            for location in locations
+        ):
+            raise EmbeddingModelError(
+                "Vertex AI embedding model and valid locations must be configured."
+            )
+        return locations
 
     def _load_credentials(self) -> tuple[Credentials, str]:
         detected_project_id = ""
@@ -288,13 +354,11 @@ class VertexAIEmbeddingService:
                 )
             return credentials.token
 
-    @property
-    def _predict_url(self) -> str:
+    def _predict_url_for_location(self, location: str) -> str:
         if self._provider != "vertex":
             raise EmbeddingModelError(
                 "The Vertex AI prediction endpoint requires EMBEDDING_PROVIDER=vertex."
             )
-        location = self.config.location.strip()
         model = self.config.model.strip()
         if not VERTEX_LOCATION_RE.fullmatch(location) or not model:
             raise EmbeddingModelError(
@@ -312,6 +376,36 @@ class VertexAIEmbeddingService:
             f"locations/{quote(location, safe='')}/publishers/google/models/"
             f"{quote(model, safe='')}:predict"
         )
+
+    @property
+    def _predict_url(self) -> str:
+        return self._predict_url_for_location(self.config.location.strip())
+
+    def _reserve_vertex_location(self) -> str:
+        """Reserve one endpoint using a per-region request-rate budget."""
+
+        locations = self._vertex_locations
+        rate = self.config.vertex_requests_per_minute
+        if rate < 0:
+            raise EmbeddingModelError(
+                "EMBEDDING_VERTEX_REQUESTS_PER_MINUTE cannot be negative."
+            )
+        interval = 60.0 / rate if rate > 0 else 0.0
+
+        while True:
+            with self._location_lock:
+                now = time.monotonic()
+                for offset in range(len(locations)):
+                    index = (self._location_cursor + offset) % len(locations)
+                    location = locations[index]
+                    if self._location_next_ready[location] <= now:
+                        self._location_cursor = (index + 1) % len(locations)
+                        self._location_next_ready[location] = now + interval
+                        return location
+
+                next_ready = min(self._location_next_ready.values())
+                delay = max(next_ready - now, 0.001)
+            time.sleep(delay)
 
     def _gemini_api_url(self, action: str) -> str:
         if self._provider != "gemini-api":
@@ -491,14 +585,19 @@ class VertexAIEmbeddingService:
         }
         for attempt in range(self.config.max_retries):
             response: httpx.Response | None = None
-            # Vertex enforces this quota per HTTP prediction request, not per
-            # instance inside the request.
-            self._throttle_items(1)
+            # New deployments use a per-region request budget. Preserve the
+            # legacy single-endpoint limiter when no pool/rate is configured.
+            if (
+                not self.config.vertex_locations
+                and self.config.vertex_requests_per_minute <= 0
+            ):
+                self._throttle_items(1)
             token = self._access_token(force_refresh=force_refresh)
+            location = self._reserve_vertex_location()
             force_refresh = False
             try:
                 response = self._client.post(
-                    self._predict_url,
+                    self._predict_url_for_location(location),
                     headers={
                         "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json; charset=utf-8",

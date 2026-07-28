@@ -17,7 +17,11 @@ from app.external_graphrag import (
 )
 from app.legal_graphrag import GraphRAGStore
 from app.services.ai import untrusted_data_block
-from app.services.embeddings import EmbeddingConfig, embedding_config_from_settings
+from app.services.embeddings import (
+    EmbeddingConfig,
+    embedding_config_from_settings,
+    parse_vertex_locations,
+)
 
 
 _WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", re.UNICODE)
@@ -427,6 +431,12 @@ def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
         embedding_max_retries=settings.embedding_max_retries,
         embedding_auto_truncate=settings.embedding_auto_truncate,
         embedding_data_policy=settings.gemini_data_policy,
+        embedding_vertex_locations=parse_vertex_locations(
+            settings.embedding_vertex_locations
+        ),
+        embedding_vertex_requests_per_minute=(
+            settings.embedding_vertex_requests_per_minute
+        ),
         hybrid_vector_weight=settings.hybrid_vector_weight,
         hybrid_bm25_weight=settings.hybrid_bm25_weight,
         hybrid_rrf_k=settings.hybrid_rrf_k,
@@ -528,6 +538,7 @@ def serialize_source(source: dict[str, Any]) -> dict[str, Any]:
         "reasons": [str(item) for item in source.get("reasons", [])],
         "doc_id": str(source.get("doc_id")) if source.get("doc_id") else None,
         "node_id": str(source.get("node_id")) if source.get("node_id") else None,
+        "law_code": str(source.get("law_code")) if source.get("law_code") else None,
         "source_url": source.get("source_url"),
         "law_status": source.get("law_status"),
         "law_version": source.get("law_version"),

@@ -20,6 +20,8 @@ NEO4J_DATABASE="${NEO4J_DATABASE:-neo4j}"
 RUNTIME_SERVICE_ACCOUNT="${GCP_RUN_SERVICE_ACCOUNT:-}"
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
 EMBEDDING_LOCATION="${GCP_EMBEDDING_LOCATION:-asia-southeast1}"
+EMBEDDING_VERTEX_LOCATIONS="${EMBEDDING_VERTEX_LOCATIONS:-asia-east1|asia-east2|asia-northeast1|asia-northeast3|asia-south1|asia-southeast1|australia-southeast1|europe-central2|europe-north1|europe-southwest1|europe-west1|europe-west2|europe-west3|europe-west4|europe-west6|europe-west8|europe-west9|me-central1|me-central2|me-west1|northamerica-northeast1|southamerica-east1|us-central1|us-east1|us-east4|us-east5|us-south1|us-west1|us-west4}"
+EMBEDDING_VERTEX_REQUESTS_PER_MINUTE="${EMBEDDING_VERTEX_REQUESTS_PER_MINUTE:-4.5}"
 CONFIGURE_SECRETS=true
 
 usage() {
@@ -225,12 +227,14 @@ env_vars="$(
     "@EMBEDDING_PROVIDER=vertex" \
     "@EMBEDDING_MODEL=gemini-embedding-001" \
     "@EMBEDDING_LOCATION=$EMBEDDING_LOCATION" \
-    "@EMBEDDING_MAX_CONCURRENCY=1" \
+    "@EMBEDDING_VERTEX_LOCATIONS=$EMBEDDING_VERTEX_LOCATIONS" \
+    "@EMBEDDING_VERTEX_REQUESTS_PER_MINUTE=$EMBEDDING_VERTEX_REQUESTS_PER_MINUTE" \
+    "@EMBEDDING_MAX_CONCURRENCY=8" \
     "@EMBEDDING_BATCH_SIZE=20" \
-    "@EMBEDDING_MAX_ITEMS_PER_MINUTE=4" \
     "@EMBEDDING_MAX_RETRIES=8" \
     "@POSTGRES_VECTOR_SIZE=1024" \
     "@RETRIEVER_BACKEND=hybrid_rag" \
+    "@REQUIRE_FRESHNESS_CHECK=false" \
     "@NEO4J_URI=$NEO4J_URI" \
     "@NEO4J_USER=$NEO4J_USER" \
     "@NEO4J_DATABASE=$NEO4J_DATABASE" \

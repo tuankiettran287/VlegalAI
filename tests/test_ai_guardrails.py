@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from app.api import (
     _complete_with_citation_repair,
+    _grounded_source_fallback,
     _legal_sources,
     _summary_prompt,
     _verification_prompt,
@@ -164,6 +165,63 @@ def test_legal_ai_rejects_blank_retrieved_source_content() -> None:
         assert error.value.status_code == 422
 
     asyncio.run(scenario())
+
+
+def test_optional_freshness_check_is_skipped_without_dropping_sources() -> None:
+    class _Retrieval:
+        async def retrieve(self, _: str) -> list[dict]:
+            return [
+                {
+                    "doc_id": "labor-code",
+                    "law_code": "45/2019/QH14",
+                    "title": "Bộ luật Lao động",
+                    "citation": "Bộ luật Lao động (45/2019/QH14) > Điều 98",
+                    "text": "Tiền lương làm thêm giờ được trả theo Điều 98.",
+                }
+            ]
+
+    class _Freshness:
+        settings = SimpleNamespace(
+            max_laws_verified_per_request=16,
+            require_freshness_check=False,
+        )
+
+        async def verify_sources(self, _: list[dict]) -> tuple[object, bool]:
+            raise AssertionError("optional freshness check must be skipped")
+
+    sources, verification = asyncio.run(
+        _legal_sources("lương làm thêm giờ", _Retrieval(), _Freshness())
+    )
+
+    assert sources[0]["source_id"] == "S1"
+    assert sources[0]["law_code"] == "45/2019/QH14"
+    assert verification == {
+        "checked": False,
+        "all_current": False,
+        "items": [],
+        "reason": "freshness_check_disabled",
+    }
+
+
+def test_grounded_fallback_is_cited_and_passes_claim_validation() -> None:
+    sources = [
+        {
+            "source_id": "S1",
+            "title": "Điều 98 Bộ luật Lao động",
+            "citation": "Bộ luật Lao động (45/2019/QH14) > Điều 98",
+            "text": "Người lao động làm thêm giờ được trả ít nhất 150%.",
+        }
+    ]
+
+    answer = _grounded_source_fallback(sources)
+
+    assert answer.startswith("Theo ")
+    assert "[S1]" in answer
+    assert validate_citations(
+        answer,
+        ["S1"],
+        require_claim_coverage=True,
+    ) == {"S1"}
 
 
 def test_verification_and_summary_prompts_are_serialized_as_untrusted_data() -> None:

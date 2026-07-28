@@ -13,6 +13,7 @@ from app.services.embeddings import (
     EmbeddingConfig,
     EmbeddingModelError,
     VertexAIEmbeddingService,
+    parse_vertex_locations,
 )
 
 
@@ -148,6 +149,103 @@ def test_vertex_batches_documents_and_preserves_order() -> None:
         for body in bodies
         for instance in body["instances"]
     ] == ["one", "two", "three", "four", "five"]
+
+
+def test_vertex_location_pool_round_robins_requests_and_preserves_order() -> None:
+    hosts: list[str] = []
+    vectors = {
+        "one": [1.0, 0.0, 0.0],
+        "two": [0.0, 1.0, 0.0],
+        "three": [0.0, 0.0, 1.0],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        instances = json.loads(request.content)["instances"]
+        return httpx.Response(
+            200,
+            json={
+                "predictions": [
+                    {"embeddings": {"values": vectors[item["content"]]}}
+                    for item in instances
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            project_id="legal-project",
+            location="asia-southeast1",
+            vertex_locations=("asia-southeast1", "us-central1"),
+            vertex_requests_per_minute=0,
+            dimensions=3,
+            max_concurrency=1,
+            batch_size=1,
+            max_retries=1,
+            data_policy="allow",
+        ),
+        client=client,
+    )
+    service._credentials = SimpleNamespace(valid=True, token="access-token")
+    service._project_id = "legal-project"
+    try:
+        result = service.embed_documents(["one", "two", "three"])
+    finally:
+        client.close()
+
+    assert result == [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    assert hosts == [
+        "asia-southeast1-aiplatform.googleapis.com",
+        "us-central1-aiplatform.googleapis.com",
+        "asia-southeast1-aiplatform.googleapis.com",
+    ]
+
+
+def test_vertex_location_pool_rate_limits_each_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_time = [100.0]
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(
+        "app.services.embeddings.time.monotonic",
+        lambda: current_time[0],
+    )
+
+    def advance_time(seconds: float) -> None:
+        sleeps.append(seconds)
+        current_time[0] += seconds
+
+    monkeypatch.setattr("app.services.embeddings.time.sleep", advance_time)
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(500))
+    )
+    service = VertexAIEmbeddingService(
+        EmbeddingConfig(
+            vertex_locations=("asia-southeast1", "us-central1"),
+            vertex_requests_per_minute=2,
+        ),
+        client=client,
+    )
+    try:
+        assert service._reserve_vertex_location() == "asia-southeast1"
+        assert service._reserve_vertex_location() == "us-central1"
+        assert service._reserve_vertex_location() == "asia-southeast1"
+    finally:
+        client.close()
+
+    assert sleeps == [30.0]
+
+
+def test_parse_vertex_locations_deduplicates_and_preserves_order() -> None:
+    assert parse_vertex_locations(
+        "asia-southeast1|us-central1,asia-southeast1; europe-west1"
+    ) == ("asia-southeast1", "us-central1", "europe-west1")
 
 
 def test_vertex_batch_counts_one_rate_limit_unit(

@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     embedding_timeout_seconds: int = Field(default=60, ge=5, le=600)
     embedding_max_retries: int = Field(default=3, ge=1, le=10)
     embedding_auto_truncate: bool = True
+    embedding_vertex_locations: str = ""
+    embedding_vertex_requests_per_minute: float = Field(
+        default=0,
+        ge=0,
+        le=10_000,
+    )
 
     tavily_api_key: str = ""
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"
