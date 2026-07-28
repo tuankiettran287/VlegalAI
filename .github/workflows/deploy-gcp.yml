@@ -393,16 +393,9 @@ jobs:
           check_health "/api/health/live" "Liveness"
           check_health "/api/health/ready" "Readiness"
 
-      - name: Promote verified images to latest
+      - name: Record verified deployment
         shell: bash
         run: |
-          image_root="${GCP_REGION}-docker.pkg.dev/${PROJECT_ID}/${GCP_REPOSITORY}"
-
-          gcloud artifacts docker tags add \
-            "${image_root}/vlegal-app:${IMAGE_TAG}" \
-            "${image_root}/vlegal-app:latest" \
-            --quiet
-
           service_url="$(
             gcloud run services describe "${GCP_RUN_SERVICE}" \
               --project="${PROJECT_ID}" \
@@ -415,5 +408,5 @@ jobs:
             echo "- Commit: \`${IMAGE_TAG}\`"
             echo "- Service: ${service_url}"
             echo "- Health: live and ready"
-            echo "- Promoted tag: vlegal-app/latest"
+            echo "- Image tag: immutable commit SHA"
           } >> "${GITHUB_STEP_SUMMARY}"
