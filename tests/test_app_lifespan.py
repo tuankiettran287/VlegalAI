@@ -61,6 +61,23 @@ def test_mutating_request_is_logged_before_and_after_processing(
     assert "stage=completed request_id=request-42" in caplog.text
 
 
+def test_runtime_logging_reuses_gunicorn_handlers() -> None:
+    runtime_logger = logging.getLogger("gunicorn.error")
+    original_runtime_handlers = list(runtime_logger.handlers)
+    original_application_handlers = list(main.application_logger.handlers)
+    original_propagate = main.application_logger.propagate
+    handler = logging.NullHandler()
+    try:
+        runtime_logger.handlers = [handler]
+        main._configure_runtime_logging()
+        assert main.application_logger.handlers == [handler]
+        assert main.application_logger.propagate is False
+    finally:
+        runtime_logger.handlers = original_runtime_handlers
+        main.application_logger.handlers = original_application_handlers
+        main.application_logger.propagate = original_propagate
+
+
 def _patch_lifespan_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     events: list[str],

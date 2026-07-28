@@ -44,6 +44,18 @@ logger = logging.getLogger(__name__)
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
+def _configure_runtime_logging() -> None:
+    """Route application INFO logs through the active ASGI server handlers."""
+
+    for runtime_logger_name in ("gunicorn.error", "uvicorn.error"):
+        runtime_logger = logging.getLogger(runtime_logger_name)
+        if not runtime_logger.handlers:
+            continue
+        application_logger.handlers = list(runtime_logger.handlers)
+        application_logger.propagate = False
+        return
+
+
 def _normalized_request_id(value: str | None) -> str:
     candidate = (value or "").strip()
     if REQUEST_ID_RE.fullmatch(candidate):
@@ -53,6 +65,7 @@ def _normalized_request_id(value: str | None) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _configure_runtime_logging()
     async with AsyncExitStack() as stack:
         ai = GeminiService(settings)
         stack.push_async_callback(ai.close)
