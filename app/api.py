@@ -98,6 +98,9 @@ router = APIRouter()
 router.include_router(auth_router)
 logger = logging.getLogger(__name__)
 LEGAL_DATA_UNAVAILABLE_MESSAGE = "Dữ liệu không có sẵn"
+AI_TEMPORARILY_UNAVAILABLE_MESSAGE = (
+    "Dịch vụ AI tạm thời không khả dụng. Vui lòng thử lại sau."
+)
 
 
 CONTRACT_TEMPLATES = [
@@ -476,6 +479,8 @@ async def _legal_sources(
                 "Freshness verification unavailable error_type=%s",
                 type(exc).__name__,
             )
+            if allow_empty:
+                return unavailable_result()
             raise HTTPException(
                 status_code=503,
                 detail="Không thể kiểm tra hiệu lực văn bản tại thời điểm này.",
@@ -485,6 +490,8 @@ async def _legal_sources(
                 "Freshness verification failed error_type=%s",
                 type(exc).__name__,
             )
+            if allow_empty:
+                return unavailable_result()
             raise HTTPException(
                 status_code=503,
                 detail="Không thể kiểm tra hiệu lực văn bản tại thời điểm này.",
@@ -567,6 +574,8 @@ async def _legal_sources(
 
         if verification_items:
             if not current_sources:
+                if allow_empty:
+                    return unavailable_result()
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -576,12 +585,16 @@ async def _legal_sources(
                 )
             sources = current_sources
         elif require_freshness:
+            if allow_empty:
+                return unavailable_result()
             raise HTTPException(
                 status_code=503,
                 detail="Không nhận được bằng chứng kiểm tra hiệu lực văn bản.",
             )
         break
     else:
+        if allow_empty:
+            return unavailable_result()
         raise HTTPException(
             status_code=409,
             detail="Chuỗi văn bản thay thế vượt quá giới hạn xử lý an toàn.",
@@ -1398,36 +1411,60 @@ async def chat(
                 operation_started,
                 source_count=len(sources),
             )
-            answer = await _complete_with_citation_repair(
-                ai,
-                LEGAL_SYSTEM_PROMPT,
-                "BỘ NHỚ TÓM TẮT:\n"
-                f"{_summary_prompt(summary_context)}\n\n"
-                f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
-                "KẾ HOẠCH PHỦ CÂU HỎI:\n"
-                f"{untrusted_data_block('ANSWER_PLAN', build_answer_plan(retrieval_query))}\n\n"
-                f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-                f"NGUỒN:\n{build_context(sources)}\n\n"
-                f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
-                "\n\nCÁCH HIỂU ĐÃ CHUẨN HÓA:\n"
-                f"{untrusted_data_block('REWRITTEN_QUERY', retrieval_query) if query_rewrite.rewritten else '(Không cần chuẩn hóa)'}"
-                f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
-                f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
-                "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
-                "không được sao chép các kết luận không còn phù hợp.",
-                allowed_ids=[source["source_id"] for source in sources],
-                sources=sources,
-                max_tokens=2200,
-            )
-            answer = append_detailed_citations(answer, sources)
-            log_progress(
-                logger,
-                "chat",
-                "answer_generation_completed",
-                operation_started,
-                answer_chars=len(answer),
-                source_count=len(sources),
-            )
+            try:
+                answer = await _complete_with_citation_repair(
+                    ai,
+                    LEGAL_SYSTEM_PROMPT,
+                    "BỘ NHỚ TÓM TẮT:\n"
+                    f"{_summary_prompt(summary_context)}\n\n"
+                    f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
+                    "KẾ HOẠCH PHỦ CÂU HỎI:\n"
+                    f"{untrusted_data_block('ANSWER_PLAN', build_answer_plan(retrieval_query))}\n\n"
+                    f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
+                    f"NGUỒN:\n{build_context(sources)}\n\n"
+                    f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
+                    "\n\nCÁCH HIỂU ĐÃ CHUẨN HÓA:\n"
+                    f"{untrusted_data_block('REWRITTEN_QUERY', retrieval_query) if query_rewrite.rewritten else '(Không cần chuẩn hóa)'}"
+                    f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
+                    f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
+                    "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
+                    "không được sao chép các kết luận không còn phù hợp.",
+                    allowed_ids=[source["source_id"] for source in sources],
+                    sources=sources,
+                    max_tokens=2200,
+                )
+            except GeminiError as exc:
+                logger.warning(
+                    "Chat generation unavailable error_type=%s",
+                    type(exc).__name__,
+                )
+                answer = AI_TEMPORARILY_UNAVAILABLE_MESSAGE
+                sources = []
+                verification = VerificationReport(
+                    checked=False,
+                    all_current=False,
+                    checked_at=datetime.now(UTC),
+                    items=[],
+                    note=AI_TEMPORARILY_UNAVAILABLE_MESSAGE,
+                ).model_dump(mode="json")
+                cache_mode = "miss"
+                log_progress(
+                    logger,
+                    "chat",
+                    "answer_generation_fallback",
+                    operation_started,
+                    outcome="ai_unavailable",
+                )
+            else:
+                answer = append_detailed_citations(answer, sources)
+                log_progress(
+                    logger,
+                    "chat",
+                    "answer_generation_completed",
+                    operation_started,
+                    answer_chars=len(answer),
+                    source_count=len(sources),
+                )
             if cache_lookup and verification.get("checked") and verification.get("all_current"):
                 try:
                     await answer_cache.store(

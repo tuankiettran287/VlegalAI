@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -12,6 +13,7 @@ from fastapi import HTTPException, Response
 from pydantic import ValidationError
 
 from app.api import (
+    AI_TEMPORARILY_UNAVAILABLE_MESSAGE,
     _complete_with_citation_repair,
     _legal_sources,
     _summary_prompt,
@@ -21,7 +23,7 @@ from app.api import (
 )
 from app.core.config import Settings
 from app.models import ChatMessage, Conversation
-from app.schemas import ChatRequest
+from app.schemas import ChatRequest, VerificationItem, VerificationReport
 from app.services.ai import GeminiError, validate_citations
 from app.services.articles import ArticleResearchError
 from app.services.freshness import FreshnessUnavailable, LegalFreshnessService
@@ -351,6 +353,114 @@ def test_legal_sources_sanitizes_second_freshness_failure_after_reindex() -> Non
 
     asyncio.run(scenario())
     assert freshness.calls == 2
+
+
+def test_legal_sources_returns_data_unavailable_when_freshness_fails_for_chat() -> None:
+    source = {
+        "doc_id": "doc-1",
+        "title": "Luật 100/2020/QH14",
+        "citation": "100/2020/QH14",
+        "text": "Nội dung nguồn",
+    }
+
+    class _Retrieval:
+        async def retrieve(self, _: str) -> list[dict]:
+            return [dict(source)]
+
+    class _Freshness:
+        async def verify_sources(self, _: list[dict]) -> tuple[object, bool]:
+            raise FreshnessUnavailable("private provider detail")
+
+    sources, verification = asyncio.run(
+        _legal_sources(
+            "query",
+            _Retrieval(),
+            _Freshness(),
+            allow_empty=True,
+        )
+    )
+
+    assert sources == []
+    assert verification["checked"] is False
+    assert verification["note"] == "Dữ liệu không có sẵn"
+    assert "private provider detail" not in str(verification)
+
+
+def test_chat_returns_http_success_payload_when_generation_is_unavailable() -> None:
+    class _Retrieval:
+        async def retrieve(self, _: str) -> list[dict]:
+            return [
+                {
+                    "doc_id": "doc-1",
+                    "title": "Luật thử nghiệm",
+                    "citation": "Điều 1 Luật 100/2020/QH14",
+                    "text": "Nội dung nguồn pháp lý.",
+                }
+            ]
+
+    class _Freshness:
+        async def verify_sources(
+            self,
+            _: list[dict],
+        ) -> tuple[VerificationReport, bool]:
+            return (
+                VerificationReport(
+                    checked=True,
+                    all_current=True,
+                    checked_at=datetime.now(UTC),
+                    items=[
+                        VerificationItem(
+                            code="100/2020/QH14",
+                            title="Luật thử nghiệm",
+                            status="IN_FORCE",
+                            checked_at=datetime.now(UTC),
+                        )
+                    ],
+                ),
+                False,
+            )
+
+    class _Cache:
+        @staticmethod
+        def eligible(*_: object, **__: object) -> bool:
+            return False
+
+    ai = SimpleNamespace(
+        complete=AsyncMock(side_effect=GeminiError("private Vertex detail"))
+    )
+    limiter = SimpleNamespace(check=AsyncMock())
+    request = SimpleNamespace(
+        cookies={},
+        headers={},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    result = asyncio.run(
+        chat(
+            ChatRequest(message="Quy định pháp luật thử nghiệm là gì?"),
+            request,
+            Response(),
+            SimpleNamespace(),
+            None,
+            Settings(
+                _env_file=None,
+                session_secret="guardrail-test-secret-at-least-32-bytes",
+            ),
+            _Retrieval(),
+            _Freshness(),
+            ai,
+            limiter,
+            SimpleNamespace(),
+            _Cache(),
+        )
+    )
+
+    assert result.answer == AI_TEMPORARILY_UNAVAILABLE_MESSAGE
+    assert result.sources == []
+    assert result.verification.checked is False
+    assert result.verification.note == AI_TEMPORARILY_UNAVAILABLE_MESSAGE
+    assert result.temporary is True
+    limiter.check.assert_awaited_once()
 
 
 def test_gemini_error_handler_does_not_expose_internal_details() -> None:
