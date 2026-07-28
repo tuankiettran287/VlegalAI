@@ -836,12 +836,14 @@ async def _complete_with_citation_repair(
     sources: list[dict[str, Any]] | None = None,
     max_tokens: int,
     temperature: float = 0.1,
+    thinking_level: str | None = None,
 ) -> str:
     answer = await ai.complete(
         system,
         prompt,
         max_tokens=max_tokens,
         temperature=temperature,
+        thinking_level=thinking_level,
     )
     normalized_answer = _normalize_allowed_citation_syntax(
         answer,
@@ -1423,6 +1425,11 @@ async def chat(
                 allowed_ids=[source["source_id"] for source in model_sources],
                 sources=model_sources,
                 max_tokens=max_tokens,
+                thinking_level=(
+                    "minimal"
+                    if answer_plan.get("mode") == "single_hop"
+                    else None
+                ),
             )
         except GeminiError as exc:
             logger.error(

@@ -671,6 +671,7 @@ class GeminiService:
         temperature: float,
         max_tokens: int,
         json_schema: dict[str, Any] | None,
+        thinking_level: str | None = None,
     ) -> dict[str, Any]:
         generation_config: dict[str, Any] = {
             "maxOutputTokens": max_tokens,
@@ -678,7 +679,9 @@ class GeminiService:
         model = self.settings.gemini_model.strip().lower()
         if model.startswith("gemini-3"):
             generation_config["thinkingConfig"] = {
-                "thinkingLevel": self.settings.gemini_thinking_level.upper(),
+                "thinkingLevel": (
+                    thinking_level or self.settings.gemini_thinking_level
+                ).upper(),
                 "includeThoughts": False,
             }
         else:
@@ -857,6 +860,7 @@ class GeminiService:
         temperature: float,
         max_tokens: int,
         json_schema: dict[str, Any] | None,
+        thinking_level: str | None = None,
     ) -> str:
         payload = self._payload(
             system,
@@ -864,6 +868,7 @@ class GeminiService:
             temperature=temperature,
             max_tokens=max_tokens,
             json_schema=json_schema,
+            thinking_level=thinking_level,
         )
         return _response_text(await self._request_payload(payload))
 
@@ -977,6 +982,7 @@ class GeminiService:
         temperature: float = 0.1,
         max_tokens: int = 2400,
         json_schema: dict[str, Any] | None = None,
+        thinking_level: str | None = None,
     ) -> str:
         if not system.strip():
             raise GeminiError("System instruction không được để trống.")
@@ -991,6 +997,7 @@ class GeminiService:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_schema=json_schema,
+                thinking_level=thinking_level,
             )
 
     async def complete_json(

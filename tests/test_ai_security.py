@@ -248,6 +248,48 @@ def test_gemini_35_payload_uses_thinking_level_and_redacts_outbound_prompt() -> 
     }
 
 
+def test_gemini_three_allows_request_specific_minimal_thinking() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "Phản hồi ngắn."}],
+                        },
+                        "finishReason": "STOP",
+                    }
+                ]
+            },
+        )
+
+    async def scenario() -> str:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        service = GeminiService(_settings(), client=client)
+        service._credentials = SimpleNamespace(valid=True, token="test-token")
+        service._project_id = "test-project"
+        try:
+            return await service.complete(
+                "Hướng dẫn hệ thống",
+                "Câu hỏi pháp lý đơn giản.",
+                thinking_level="minimal",
+            )
+        finally:
+            await client.aclose()
+
+    assert asyncio.run(scenario()) == "Phản hồi ngắn."
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "MINIMAL",
+        "includeThoughts": False,
+    }
+
+
 def test_blank_model_is_rejected_before_vertex_request() -> None:
     service = GeminiService(_settings(gemini_model=""))
     service._project_id = "test-project"
