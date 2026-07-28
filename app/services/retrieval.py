@@ -491,12 +491,22 @@ class RetrievalService:
                 min(18, max(10, (result_limit + len(planned_queries) - 1) // len(planned_queries))),
             )
             result_sets = []
+            skip_graph_expansion = (
+                isinstance(store, Neo4jPostgresGraphRAGStore)
+                and build_answer_plan(query).get("mode") == "single_hop"
+            )
             for planned_query in planned_queries:
+                retrieve_kwargs = (
+                    {"expand_graph": False}
+                    if skip_graph_expansion
+                    else {}
+                )
                 result_sets.append(
                     await run_in_threadpool(
                         store.retrieve,
                         planned_query,
                         per_query_limit,
+                        **retrieve_kwargs,
                     )
                 )
             rows = _merge_retrieval_rows(

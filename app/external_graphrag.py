@@ -1732,13 +1732,29 @@ class Neo4jPostgresGraphRAGStore:
             },
         }
 
-    def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 10,
+        *,
+        expand_graph: bool = True,
+    ) -> list[dict[str, Any]]:
         query = normalize_space(query)
         if not query:
             return []
-        candidates = self._postgres_candidates(query, max(32, top_k * 5))
+        candidate_limit = (
+            max(32, top_k * 5)
+            if expand_graph
+            else max(24, top_k * 3)
+        )
+        candidates = self._postgres_candidates(query, candidate_limit)
         if not candidates:
             return []
+        if not expand_graph:
+            selected = [dict(row) for row in candidates[:top_k]]
+            for index, row in enumerate(selected, start=1):
+                row["source_id"] = f"S{index}"
+            return selected
 
         scores: dict[str, float] = {}
         rows_by_chunk: dict[str, dict[str, Any]] = {}

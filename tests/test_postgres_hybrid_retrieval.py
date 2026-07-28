@@ -166,6 +166,32 @@ def test_neo4j_hybrid_falls_back_to_postgres_when_graph_is_unavailable() -> None
     assert rows[0]["reasons"] == ["postgres_vector_cosine", "postgres_bm25"]
 
 
+def test_neo4j_hybrid_can_skip_graph_expansion_for_single_hop_chat() -> None:
+    store = object.__new__(Neo4jPostgresGraphRAGStore)
+    seed = {
+        **_row("seed"),
+        "node_id": "seed-node",
+        "score": 2.0,
+        "reasons": ["postgres_vector_cosine", "postgres_bm25"],
+    }
+    recorded_limits: list[int] = []
+
+    def candidates(_: str, limit: int) -> list[dict]:
+        recorded_limits.append(limit)
+        return [seed]
+
+    store._postgres_candidates = candidates
+    store._expand_node_scores = lambda _: (_ for _ in ()).throw(
+        AssertionError("Graph expansion must not run")
+    )
+
+    rows = store.retrieve("nghia vu thue", top_k=3, expand_graph=False)
+
+    assert [row["chunk_id"] for row in rows] == ["seed"]
+    assert rows[0]["source_id"] == "S1"
+    assert recorded_limits == [24]
+
+
 class _RecordingCursor:
     def __init__(
         self,
