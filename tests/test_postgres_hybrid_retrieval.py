@@ -359,29 +359,18 @@ def test_postgres_vector_and_bm25_paths_use_latest_indexed_versions(
         "law_status": "IN_FORCE",
         "law_version": 2,
     }
-    bm25_cursor = _RecordingCursor(
-        fetchall_results=[
-            [row],
-            [{"term": "thuế", "document_frequency": 1}],
-        ],
-        fetchone_results=[{"documents": 1, "average_length": 3.0}],
-    )
+    bm25_cursor = _RecordingCursor(fetchall_results=[[row]])
     bm25_store = object.__new__(PostgresGraphRAGStore)
     bm25_store.connection = _RecordingConnection(bm25_cursor)
     bm25_store._bm25_corpus_statistics = None
     bm25_store.config = SimpleNamespace(bm25_k1=1.5, bm25_b=0.75)
 
-    assert bm25_store._bm25_candidates("thuế", 5)
-    candidate_query, frequency_query, statistics_query = [
-        query for query, _ in bm25_cursor.queries
-    ]
+    candidates = bm25_store._bm25_candidates("thuế", 5)
+    assert candidates[0]["_bm25_score"] == 1.0
+    candidate_query = bm25_cursor.queries[0][0]
     assert "current_chunk.law_status IN" not in candidate_query
-    assert "frequency_chunk.law_status IN" not in frequency_query
-    assert "current_chunk.law_status IN" not in statistics_query
-    assert all(
-        "graphrag_law_version AS latest_law" in query
-        for query in (candidate_query, frequency_query, statistics_query)
-    )
+    assert "graphrag_law_version AS latest_law" in candidate_query
+    assert len(bm25_cursor.queries) == 1
 
 
 def test_neo4j_candidate_and_expansion_paths_use_latest_indexed_versions() -> None:

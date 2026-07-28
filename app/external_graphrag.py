@@ -1283,7 +1283,6 @@ class PostgresGraphRAGStore:
             return []
 
         current_chunk = postgres_latest_chunk_predicate("current_chunk")
-        frequency_chunk = postgres_latest_chunk_predicate("frequency_chunk")
         with self.connection.cursor() as cursor:
             cursor.execute(
                 f"""
@@ -1306,37 +1305,16 @@ class PostgresGraphRAGStore:
                 (tsquery, limit),
             )
             rows = [dict(row) for row in cursor.fetchall()]
-            if not rows:
-                return []
-            cursor.execute(
-                f"""
-                SELECT term, (
-                    SELECT count(*)
-                    FROM graphrag_chunk AS frequency_chunk
-                    WHERE {frequency_chunk}
-                      AND {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ plainto_tsquery('simple', term)
-                ) AS document_frequency
-                FROM unnest(%s::text[]) AS terms(term)
-                """,
-                (terms,),
-            )
-            document_frequencies = {
-                str(row["term"]): int(row["document_frequency"])
-                for row in cursor.fetchall()
-            }
 
-        total_documents, average_document_length = self._corpus_statistics()
+        # PostgreSQL has already ordered this shortlist with its indexed
+        # full-text rank. Recomputing BM25 here used one correlated corpus
+        # count per query term plus another corpus-wide statistics scan. On
+        # remote PostgreSQL that made an uncached chat spend tens of seconds
+        # in lexical retrieval before generation could begin. Keep the
+        # indexed rank as the lexical score; reciprocal-rank fusion still
+        # combines this ordering with dense-vector retrieval.
         for row in rows:
-            row["_bm25_score"] = bm25_score(
-                row,
-                terms,
-                document_frequencies,
-                total_documents,
-                average_document_length,
-                k1=self.config.bm25_k1,
-                b=self.config.bm25_b,
-            )
-        rows.sort(key=lambda row: (-float(row["_bm25_score"]), row["chunk_id"]))
+            row["_bm25_score"] = float(row.get("_fts_score", 0.0) or 0.0)
         return rows
 
     def _corpus_statistics(self) -> tuple[int, float]:
