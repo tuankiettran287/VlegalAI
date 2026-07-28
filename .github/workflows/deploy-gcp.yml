@@ -119,7 +119,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@v3
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
-          version: ">= 576.0.0"
+       
 
       - name: Configure Artifact Registry authentication
         shell: bash
