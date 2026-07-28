@@ -243,12 +243,19 @@ def _filter_rows_for_query_intent(
     query: str,
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep adjacent wage concepts from answering a public-sector wage query.
+    """Remove rows that match broad vocabulary but miss the user's concept.
 
-    In Vietnamese conversation, “lương cơ bản của cán bộ nhà nước” normally
-    points to the public-sector “mức lương cơ sở”. It must not silently fall
-    through to private-sector minimum-wage provisions.
+    Definition queries are especially vulnerable because words such as
+    “người lao động” appear in many nearby provisions. Keep only evidence
+    that names the requested concept before the model sees the context.
     """
+
+    query_ascii = _ascii(query)
+    if "cuong buc lao dong" in query_ascii or "cuong buc" in query_ascii:
+        return [
+            row for row in rows
+            if "cuong buc" in _row_evidence(row)
+        ]
 
     if not _is_public_sector_base_wage_query(query):
         return rows

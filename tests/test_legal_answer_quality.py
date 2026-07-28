@@ -182,6 +182,17 @@ def test_short_forced_labor_query_retrieves_expanded_legal_definition() -> None:
                 return []
             return [
                 _source(
+                    "S2",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > Chương I > "
+                        "Điều 3. Giải thích từ ngữ > Khoản 1"
+                    ),
+                    text=(
+                        "Người lao động là người làm việc cho người sử dụng "
+                        "lao động theo thỏa thuận và được trả lương."
+                    ),
+                ),
+                _source(
                     citation=(
                         "Bộ Luật Lao Động (45/2019/QH14) > Chương I > "
                         "Điều 3. Giải thích từ ngữ > Khoản 7"
