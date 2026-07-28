@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from app.core.observability import (
     reset_request_id,
     set_request_id,
 )
+from app.schemas import VerificationItem
 from app.services.freshness import FreshnessUnavailable, LegalFreshnessService
 
 
@@ -68,3 +70,54 @@ def test_freshness_batch_has_a_hard_timeout() -> None:
     started_at = time.perf_counter()
     asyncio.run(scenario())
     assert time.perf_counter() - started_at < 1
+
+
+def test_freshness_batch_keeps_verified_items_when_a_secondary_item_fails() -> None:
+    service = object.__new__(LegalFreshnessService)
+    service.settings = SimpleNamespace(
+        legal_freshness_timeout_seconds=1,
+        max_laws_verified_per_request=16,
+        require_freshness_check=True,
+        tavily_ready=True,
+    )
+
+    async def partial_verification(
+        code: str,
+        *_: object,
+    ) -> tuple[VerificationItem, bool]:
+        if code == "45/2019/QH14":
+            return (
+                VerificationItem(
+                    code=code,
+                    title="Bộ luật Lao động",
+                    status="IN_FORCE",
+                    checked_at=datetime.now(UTC),
+                    source_url="https://vbpl.vn/example",
+                ),
+                False,
+            )
+        raise FreshnessUnavailable("secondary source unavailable")
+
+    service._verify_one = partial_verification  # type: ignore[method-assign]
+    sources = [
+        {
+            "doc_id": "45-2019",
+            "title": "Bộ luật Lao động 45/2019/QH14",
+            "citation": "45/2019/QH14",
+            "text": "Nội dung pháp luật.",
+        },
+        {
+            "doc_id": "58-2010",
+            "title": "Luật 58/2010/QH12",
+            "citation": "58/2010/QH12",
+            "text": "Nguồn phụ.",
+        },
+    ]
+
+    report, updated = asyncio.run(service.verify_sources(sources))
+
+    assert not updated
+    assert report.checked is False
+    assert report.all_current is False
+    assert [item.code for item in report.items] == ["45/2019/QH14"]
+    assert "58/2010/QH12" in report.note

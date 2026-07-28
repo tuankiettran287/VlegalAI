@@ -286,7 +286,7 @@ class LegalFreshnessService:
                 item, changed = result
                 items.append(item)
                 updated = updated or changed
-        if failures and self.settings.require_freshness_check:
+        if failures and self.settings.require_freshness_check and not items:
             log_progress(
                 logger,
                 "freshness",
@@ -300,7 +300,7 @@ class LegalFreshnessService:
         log_progress(
             logger,
             "freshness",
-            "batch_completed",
+            "batch_partial" if failures else "batch_completed",
             operation_started,
             all_current=all_current and not failures,
             checked_count=len(items),
