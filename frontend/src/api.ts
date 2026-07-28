@@ -2,6 +2,7 @@ import type {
   Article,
   Artifact,
   ChatMessage,
+  ChatEffort,
   Conversation,
   Risk,
   Source,
@@ -195,13 +196,19 @@ export type ChatResponse = {
   cache_hit: boolean;
   cache_similarity: number | null;
   cache_mode: "miss" | "exact" | "semantic_draft";
+  effort: ChatEffort;
 };
 
 export function askLegalQuestion(
   message: string,
   conversationId?: string | null,
+  effort: ChatEffort = "medium",
 ) {
-  return post<ChatResponse>("/api/chat", { message, conversation_id: conversationId || null });
+  return post<ChatResponse>("/api/chat", {
+    message,
+    conversation_id: conversationId || null,
+    effort,
+  });
 }
 
 export type DraftResponse = {

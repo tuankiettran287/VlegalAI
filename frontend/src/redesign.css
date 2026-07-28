@@ -1840,6 +1840,145 @@ summary:focus-visible {
   }
 }
 
+/* Per-question analysis depth */
+.effort-control {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.effort-options {
+  display: inline-grid;
+  min-width: 0;
+  grid-template-columns: repeat(3, minmax(76px, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-soft) 82%, transparent);
+}
+
+.effort-options button {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  transition:
+    color var(--motion-quick) var(--ease-standard),
+    border-color var(--motion-quick) var(--ease-standard),
+    background var(--motion-quick) var(--ease-standard),
+    box-shadow var(--motion-quick) var(--ease-standard);
+}
+
+.effort-options button:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--brand) 7%, var(--surface));
+}
+
+.effort-options button.active {
+  border-color: color-mix(in srgb, var(--brand) 32%, var(--line));
+  color: var(--brand-deep);
+  background: var(--surface);
+  box-shadow: 0 3px 10px rgb(16 42 45 / 8%);
+}
+
+.effort-options button span {
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.025em;
+}
+
+.effort-options button small {
+  color: var(--faint);
+  font-size: 7px;
+  white-space: nowrap;
+}
+
+.effort-options button.active small {
+  color: var(--brand);
+}
+
+.effort-recommendation {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.effort-recommendation strong {
+  color: var(--brand);
+  font-weight: 800;
+}
+
+.effort-description {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  margin: -1px 2px 0;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+.effort-description svg {
+  flex: 0 0 auto;
+  color: var(--brand);
+}
+
+@media (max-width: 680px) {
+  .effort-control {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .effort-options {
+    width: 100%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .effort-options button {
+    gap: 3px;
+    padding-inline: 4px;
+  }
+
+  .effort-recommendation {
+    align-self: flex-end;
+  }
+}
+
+@media (max-width: 420px) {
+  .effort-options button {
+    min-height: 32px;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .effort-options button span {
+    font-size: 7.5px;
+  }
+
+  .effort-options button small {
+    font-size: 6.5px;
+  }
+
+  .effort-description {
+    font-size: 7.5px;
+  }
+}
+
 /*
  * Short desktop/laptop viewports (including browser zoom above 100%).
  * `safe center` prevents equal overflow from clipping both edges; the

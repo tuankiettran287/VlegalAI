@@ -66,6 +66,7 @@ from app.services.ai import (
     validate_citations,
 )
 from app.services.articles import ArticleResearchService
+from app.services.chat_effort import ChatEffort, chat_effort_profile
 from app.services.conversation_memory import ConversationMemoryService
 from app.services.embeddings import (
     VertexAIEmbeddingService,
@@ -327,6 +328,7 @@ async def _legal_sources(
     freshness: LegalFreshnessService,
     *,
     allow_empty: bool = False,
+    effort: ChatEffort = "medium",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     operation_started = time.perf_counter()
     log_progress(
@@ -335,7 +337,14 @@ async def _legal_sources(
         "started",
         operation_started,
         allow_empty=allow_empty,
+        effort=effort,
     )
+
+    async def retrieve_sources(retrieval_query: str) -> list[dict[str, Any]]:
+        effort_retriever = getattr(retrieval, "retrieve_for_effort", None)
+        if callable(effort_retriever):
+            return await effort_retriever(retrieval_query, effort)
+        return await retrieval.retrieve(retrieval_query)
 
     def unavailable_result() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         log_progress(
@@ -400,7 +409,7 @@ async def _legal_sources(
     retrieval_started = time.perf_counter()
     log_progress(logger, "legal_sources", "retrieval_started", operation_started)
     try:
-        sources = usable_sources(await retrieval.retrieve(query))
+        sources = usable_sources(await retrieve_sources(query))
     except Exception as exc:
         logger.warning("Retrieval failed: %s", exc)
         sources = []
@@ -520,7 +529,7 @@ async def _legal_sources(
                 operation_started,
                 replacement_count=len(followed_replacements),
             )
-            sources = usable_sources(await retrieval.retrieve(retrieval_query))
+            sources = usable_sources(await retrieve_sources(retrieval_query))
             log_progress(
                 logger,
                 "legal_sources",
@@ -890,6 +899,7 @@ async def _complete_with_citation_repair(
     answer_plan: dict[str, Any] | None = None,
     max_tokens: int,
     temperature: float = 0.1,
+    thinking_budget: int | None = None,
 ) -> str:
     operation_started = time.perf_counter()
     log_progress(
@@ -904,6 +914,7 @@ async def _complete_with_citation_repair(
         prompt,
         max_tokens=max_tokens,
         temperature=temperature,
+        thinking_budget=thinking_budget,
     )
     log_progress(
         logger,
@@ -991,6 +1002,7 @@ async def _complete_with_citation_repair(
             schema=repair_schema,
             max_tokens=max_tokens,
             temperature=0,
+            thinking_budget=thinking_budget,
         )
         log_progress(
             logger,
@@ -1353,6 +1365,7 @@ async def chat(
         )
 
     operation_started = time.perf_counter()
+    effort_profile = chat_effort_profile(payload.effort)
     conversation: Conversation | None = None
     conversation_id: uuid.UUID | None = None
     is_new_conversation = payload.conversation_id is None
@@ -1362,10 +1375,16 @@ async def chat(
         "started",
         operation_started,
         authenticated=True,
+        effort=effort_profile.name,
         has_conversation_id=bool(payload.conversation_id),
         history_turn_count=0,
     )
-    cache_scope = f"user:{authenticated_user_id}"
+    cache_effort = (
+        "medium"
+        if effort_profile.name == "instant"
+        else effort_profile.name
+    )
+    cache_scope = f"user:{authenticated_user_id}:effort:{cache_effort}"
     summary_context = ""
     history_turns: list[tuple[str, str]] = []
     greeting_answer = greeting_response(payload.message, preferred_name)
@@ -1395,6 +1414,7 @@ async def chat(
     if greeting_answer is not None:
         retrieval_query = payload.message
         answer_plan: dict[str, Any] = {}
+        query_was_rewritten = False
         log_progress(
             logger,
             "chat",
@@ -1405,22 +1425,31 @@ async def chat(
     else:
         rewrite_started = time.perf_counter()
         log_progress(logger, "chat", "query_rewrite_started", operation_started)
-        query_rewrite = await rewrite_query_if_needed(
-            ai,
-            payload.message,
-            history=history_turns,
-            settings=settings,
-        )
-        retrieval_query = query_rewrite.retrieval_query
+        if effort_profile.skip_query_rewrite:
+            retrieval_query = payload.message
+            query_was_rewritten = False
+            rewrite_attempted = False
+        else:
+            query_rewrite = await rewrite_query_if_needed(
+                ai,
+                payload.message,
+                history=history_turns,
+                settings=settings,
+            )
+            retrieval_query = query_rewrite.retrieval_query
+            query_was_rewritten = query_rewrite.rewritten
+            rewrite_attempted = query_rewrite.attempted
         answer_plan = build_answer_plan(retrieval_query)
         log_progress(
             logger,
             "chat",
             "query_rewrite_completed",
             operation_started,
-            attempted=query_rewrite.attempted,
+            attempted=rewrite_attempted,
+            effort=effort_profile.name,
             phase_ms=round((time.perf_counter() - rewrite_started) * 1000),
-            rewritten=query_rewrite.rewritten,
+            rewritten=query_was_rewritten,
+            skipped_for_effort=effort_profile.skip_query_rewrite,
         )
 
     cache_lookup: CacheLookup | None = None
@@ -1453,10 +1482,17 @@ async def chat(
     )
     if cache_eligible:
         try:
-            cache_lookup = await answer_cache.lookup(
-                retrieval_query,
-                scope=cache_scope,
-            )
+            exact_lookup = getattr(answer_cache, "lookup_exact", None)
+            if effort_profile.name == "instant" and callable(exact_lookup):
+                cache_lookup = await exact_lookup(
+                    retrieval_query,
+                    scope=cache_scope,
+                )
+            else:
+                cache_lookup = await answer_cache.lookup(
+                    retrieval_query,
+                    scope=cache_scope,
+                )
         except Exception:
             logger.exception("Cannot query semantic answer cache")
     log_progress(
@@ -1484,6 +1520,7 @@ async def chat(
                 retrieval,
                 freshness,
                 allow_empty=True,
+                effort=effort_profile.name,
             )
             fingerprint_matches = (
                 legal_fingerprint(current_sources, current_verification)
@@ -1545,6 +1582,7 @@ async def chat(
                 retrieval,
                 freshness,
                 allow_empty=True,
+                effort=effort_profile.name,
             )
         if not sources:
             answer = LEGAL_DATA_UNAVAILABLE_MESSAGE
@@ -1577,7 +1615,7 @@ async def chat(
                     f"NGUỒN:\n{build_context(sources)}\n\n"
                     f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
                     "\n\nCÁCH HIỂU ĐÃ CHUẨN HÓA:\n"
-                    f"{untrusted_data_block('REWRITTEN_QUERY', retrieval_query) if query_rewrite.rewritten else '(Không cần chuẩn hóa)'}"
+                    f"{untrusted_data_block('REWRITTEN_QUERY', retrieval_query) if query_was_rewritten else '(Không cần chuẩn hóa)'}"
                     f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
                     f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
                     "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
@@ -1585,7 +1623,8 @@ async def chat(
                     allowed_ids=[source["source_id"] for source in sources],
                     sources=sources,
                     answer_plan=answer_plan,
-                    max_tokens=2200,
+                    max_tokens=effort_profile.max_output_tokens,
+                    thinking_budget=effort_profile.thinking_budget,
                 )
             except GeminiError as exc:
                 logger.warning(
@@ -1618,7 +1657,12 @@ async def chat(
                     answer_chars=len(answer),
                     source_count=len(sources),
                 )
-            if cache_lookup and verification.get("checked") and verification.get("all_current"):
+            if (
+                effort_profile.name != "instant"
+                and cache_lookup
+                and verification.get("checked")
+                and verification.get("all_current")
+            ):
                 try:
                     await answer_cache.store(
                         cache_lookup,
@@ -1697,7 +1741,10 @@ async def chat(
     await db.commit()
     await db.refresh(assistant_message)
     message_id = assistant_message.id
-    if greeting_answer is None:
+    if (
+        greeting_answer is None
+        and effort_profile.name != "instant"
+    ):
         try:
             await memory.refresh(conversation_id)
         except Exception:
@@ -1720,6 +1767,7 @@ async def chat(
         "completed",
         operation_started,
         cache_mode=cache_mode,
+        effort=effort_profile.name,
         source_count=len(sources),
         greeting=greeting_answer is not None,
         temporary=False,
@@ -1734,6 +1782,7 @@ async def chat(
         cache_hit=cache_hit,
         cache_similarity=cache_similarity,
         cache_mode=cache_mode,
+        effort=effort_profile.name,
     )
 
 

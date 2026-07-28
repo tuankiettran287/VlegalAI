@@ -69,6 +69,7 @@ import OnboardingPage from "./OnboardingPage";
 import type {
   Article,
   Artifact,
+  ChatEffort,
   ChatMessage,
   Conversation,
   Risk,
@@ -88,6 +89,86 @@ const routes = [
   { path: "/bai-viet", label: "Bài viết", icon: BookOpen },
   { path: "/thu-vien", label: "Lịch sử & tài liệu", icon: Library },
 ];
+
+const chatEffortOptions: Array<{
+  value: ChatEffort;
+  label: string;
+  time: string;
+  description: string;
+}> = [
+  {
+    value: "instant",
+    label: "Instant",
+    time: "~5–15 giây",
+    description: "Hỏi nhanh, ưu tiên tốc độ; có thể ít chi tiết hơn.",
+  },
+  {
+    value: "medium",
+    label: "Medium",
+    time: "~15–35 giây",
+    description: "Cân bằng tốc độ và độ chính xác cho câu hỏi thông thường.",
+  },
+  {
+    value: "high",
+    label: "High",
+    time: "~30–90 giây",
+    description: "Phân tích sâu cho tình huống, nhiều dữ kiện hoặc nhiều vấn đề.",
+  },
+];
+
+function normalizeQuestion(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function recommendChatEffort(question: string): ChatEffort {
+  const normalized = normalizeQuestion(question);
+  if (!normalized) return "medium";
+  const scenarioSignals = [
+    "tinh huong",
+    "truong hop",
+    "gia su",
+    "tranh chap",
+    "khoi kien",
+    "boi thuong",
+    "xu ly nhu the nao",
+    "toi nen lam gi",
+    "cau hoi 1",
+    "cau hoi 2",
+  ];
+  const sentenceCount = normalized.split(/[.!?;]+/).filter(Boolean).length;
+  if (
+    normalized.length >= 220
+    || sentenceCount >= 4
+    || scenarioSignals.some((signal) => normalized.includes(signal))
+  ) {
+    return "high";
+  }
+  const quickSignals = [
+    "la gi",
+    "bao nhieu",
+    "khi nao",
+    "o dau",
+    "co duoc khong",
+    "muc luong",
+    "thoi han",
+  ];
+  if (
+    normalized.length <= 48
+    || (
+      normalized.length <= 100
+      && quickSignals.some((signal) => normalized.includes(signal))
+    )
+  ) {
+    return "instant";
+  }
+  return "medium";
+}
 
 function uid() {
   return globalThis.crypto?.randomUUID?.() || String(Date.now() + Math.random());
@@ -418,6 +499,7 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const [effort, setEffort] = useState<ChatEffort>("medium");
   const [loading, setLoading] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState("");
@@ -428,6 +510,13 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
   const conversationRequestRef = useRef(0);
   const hasMessages = messages.length > 0;
   const lastMessageId = messages[messages.length - 1]?.id;
+  const recommendedEffort = useMemo(
+    () => recommendChatEffort(input),
+    [input],
+  );
+  const selectedEffort = chatEffortOptions.find(
+    (option) => option.value === effort,
+  ) || chatEffortOptions[1];
 
   const scrollToLatest = useCallback((onlyIfPinned = true) => {
     const container = chatScrollRef.current;
@@ -534,6 +623,12 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
     if (!trimmed || loading || loadingConversationId) return;
     setError("");
     setLoading(true);
+    const submittedEffort = effort;
+    const pendingCopy: Record<ChatEffort, string> = {
+      instant: "Thinking · Instant…",
+      medium: "Thinking · Medium…",
+      high: "Thinking · High…",
+    };
     const userMessage: ChatMessage = { id: uid(), role: "user", content: trimmed };
     const pendingId = uid();
     setMessages((current) => [
@@ -541,11 +636,20 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
         message.typing ? { ...message, typing: false } : message,
       ),
       userMessage,
-      { id: pendingId, role: "assistant", content: "Thinking…", pending: true },
+      {
+        id: pendingId,
+        role: "assistant",
+        content: pendingCopy[submittedEffort],
+        pending: true,
+      },
     ]);
     setInput("");
     try {
-      const data = await askLegalQuestion(trimmed, conversationId);
+      const data = await askLegalQuestion(
+        trimmed,
+        conversationId,
+        submittedEffort,
+      );
       setConversationId(data.conversation_id || null);
       setMessages((current) =>
         current.map((message) =>
@@ -602,6 +706,39 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
           }}
           placeholder="Hỏi VLegal về tình huống pháp lý của bạn…"
         />
+        <div className="effort-control">
+          <div
+            className="effort-options"
+            role="group"
+            aria-label="Mức độ phân tích"
+          >
+            {chatEffortOptions.map((option) => (
+              <button
+                key={option.value}
+                className={effort === option.value ? "active" : ""}
+                type="button"
+                aria-pressed={effort === option.value}
+                title={`${option.description} Thời gian thường ${option.time}.`}
+                onClick={() => setEffort(option.value)}
+              >
+                <span>{option.label}</span>
+                <small>{option.time}</small>
+              </button>
+            ))}
+          </div>
+          <span className="effort-recommendation" aria-live="polite">
+            Gợi ý:{" "}
+            <strong>
+              {chatEffortOptions.find(
+                (option) => option.value === recommendedEffort,
+              )?.label}
+            </strong>
+          </span>
+        </div>
+        <p className="effort-description">
+          <Sparkles size={12} />
+          {selectedEffort.description}
+        </p>
         <div className="composer-toolbar">
           <span className="policy-line">
             <ShieldCheck size={14} />

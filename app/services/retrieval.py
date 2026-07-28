@@ -19,6 +19,7 @@ from app.external_graphrag import (
 )
 from app.legal_graphrag import GraphRAGStore
 from app.services.ai import untrusted_data_block
+from app.services.chat_effort import ChatEffort, chat_effort_profile
 from app.services.embeddings import EmbeddingConfig, embedding_config_from_settings
 
 
@@ -557,9 +558,31 @@ def classify_retrieval_route(query: str) -> RetrievalRoute:
     legal_references = {
         match.casefold() for match in _LEGAL_REFERENCE_RE.findall(query_ascii)
     }
+    scenario_issue_markers = {
+        marker
+        for marker in (
+            "co duoc",
+            "phai",
+            "xu ly",
+            "boi thuong",
+            "quyen",
+            "nghia vu",
+            "trach nhiem",
+            "khoi kien",
+        )
+        if re.search(rf"\b{re.escape(marker)}\b", query_ascii)
+    }
+    scenario_is_multi_issue = (
+        any(
+            marker in query_ascii
+            for marker in ("tinh huong", "truong hop", "gia su")
+        )
+        and len(scenario_issue_markers) >= 2
+    )
     if (
         len(facets) >= 2
         or len(legal_references) >= 2
+        or scenario_is_multi_issue
         or any(pattern.search(query_ascii) for pattern in _MULTI_HOP_PATTERNS)
     ):
         return "multi_hop"
@@ -960,20 +983,75 @@ class RetrievalService:
         return store
 
     async def retrieve(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
+        return await self._retrieve(query, top_k=top_k, effort="medium")
+
+    async def retrieve_for_effort(
+        self,
+        query: str,
+        effort: ChatEffort,
+    ) -> list[dict[str, Any]]:
+        profile = chat_effort_profile(effort)
+        return await self._retrieve(
+            query,
+            top_k=profile.retrieval_top_k,
+            effort=profile.name,
+        )
+
+    async def _retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int | None,
+        effort: ChatEffort,
+    ) -> list[dict[str, Any]]:
         try:
-            route = classify_retrieval_route(query)
+            profile = chat_effort_profile(effort)
+            # Instant intentionally chooses the direct PostgreSQL path even for
+            # a compound question. The UI labels this speed/coverage trade-off
+            # explicitly; medium and high retain the semantic route classifier.
+            route: RetrievalRoute = (
+                "single_hop"
+                if profile.name == "instant"
+                else classify_retrieval_route(query)
+            )
             store = await self._get_store(route)
             logger.info(
-                "Retrieval route=%s backend=%s",
+                "Retrieval route=%s backend=%s effort=%s",
                 route,
                 getattr(self.settings, "retriever_backend", "rag"),
+                profile.name,
             )
-            base_top_k = top_k or self.settings.retrieval_top_k
-            planned_queries = plan_retrieval_queries(query)
-            result_limit = adaptive_retrieval_top_k(query, base_top_k)
-            per_query_limit = max(
-                base_top_k,
-                min(18, max(10, (result_limit + len(planned_queries) - 1) // len(planned_queries))),
+            base_top_k = (
+                top_k
+                if top_k is not None
+                else self.settings.retrieval_top_k
+            )
+            planned_queries = plan_retrieval_queries(query)[
+                : profile.retrieval_query_limit
+            ]
+            result_limit = (
+                base_top_k
+                if profile.name == "instant"
+                else adaptive_retrieval_top_k(query, base_top_k)
+            )
+            per_query_limit = (
+                base_top_k
+                if profile.name == "instant"
+                else max(
+                    base_top_k,
+                    min(
+                        18,
+                        max(
+                            10,
+                            (
+                                result_limit
+                                + len(planned_queries)
+                                - 1
+                            )
+                            // len(planned_queries),
+                        ),
+                    ),
+                )
             )
             result_sets = []
             for planned_query in planned_queries:
@@ -1002,10 +1080,22 @@ class RetrievalService:
             if not _rows_have_query_evidence(query, rows):
                 return []
             answer_limit = {
-                "single_hop": 6,
-                "multi_hop": 12,
-                "multi_abstract": 24,
-            }[route]
+                "instant": {
+                    "single_hop": 4,
+                    "multi_hop": 4,
+                    "multi_abstract": 4,
+                },
+                "medium": {
+                    "single_hop": 6,
+                    "multi_hop": 12,
+                    "multi_abstract": 24,
+                },
+                "high": {
+                    "single_hop": 8,
+                    "multi_hop": 16,
+                    "multi_abstract": 28,
+                },
+            }[profile.name][route]
             serialized = [
                 serialize_source(row)
                 for row in rows[:answer_limit]

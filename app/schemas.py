@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.services.chat_effort import ChatEffort
+
 
 class AuthCapabilities(BaseModel):
     google_login: bool = False
@@ -112,6 +114,10 @@ class ChatTurn(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=2, max_length=5000)
     conversation_id: uuid.UUID | None = None
+    effort: ChatEffort = Field(
+        default="medium",
+        description="Answer depth: instant is fastest, medium is balanced, high is most thorough.",
+    )
     history: list[ChatTurn] = Field(
         default_factory=list,
         max_length=12,
@@ -129,6 +135,7 @@ class ChatResponse(BaseModel):
     cache_hit: bool = False
     cache_similarity: float | None = None
     cache_mode: Literal["miss", "exact", "semantic_draft"] = "miss"
+    effort: ChatEffort = "medium"
 
 
 class DraftContractRequest(BaseModel):

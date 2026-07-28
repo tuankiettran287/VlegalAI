@@ -672,6 +672,8 @@ class GeminiService:
         temperature: float,
         max_tokens: int,
         json_schema: dict[str, Any] | None,
+        thinking_budget: int | None = None,
+        thinking_level: str | None = None,
     ) -> dict[str, Any]:
         generation_config: dict[str, Any] = {
             "maxOutputTokens": max_tokens,
@@ -679,13 +681,19 @@ class GeminiService:
         model = self.settings.gemini_model.strip().lower()
         if model.startswith("gemini-3"):
             generation_config["thinkingConfig"] = {
-                "thinkingLevel": self.settings.gemini_thinking_level.upper(),
+                "thinkingLevel": (
+                    thinking_level or self.settings.gemini_thinking_level
+                ).upper(),
                 "includeThoughts": False,
             }
         else:
             generation_config["temperature"] = temperature
             generation_config["thinkingConfig"] = {
-                "thinkingBudget": self.settings.gemini_thinking_budget,
+                "thinkingBudget": (
+                    self.settings.gemini_thinking_budget
+                    if thinking_budget is None
+                    else max(0, min(24_576, int(thinking_budget)))
+                ),
                 "includeThoughts": False,
             }
         if json_schema:
@@ -858,6 +866,8 @@ class GeminiService:
         temperature: float,
         max_tokens: int,
         json_schema: dict[str, Any] | None,
+        thinking_budget: int | None = None,
+        thinking_level: str | None = None,
     ) -> str:
         payload = self._payload(
             system,
@@ -865,6 +875,8 @@ class GeminiService:
             temperature=temperature,
             max_tokens=max_tokens,
             json_schema=json_schema,
+            thinking_budget=thinking_budget,
+            thinking_level=thinking_level,
         )
         return _response_text(await self._request_payload(payload))
 
@@ -978,6 +990,8 @@ class GeminiService:
         temperature: float = 0.1,
         max_tokens: int = 2400,
         json_schema: dict[str, Any] | None = None,
+        thinking_budget: int | None = None,
+        thinking_level: str | None = None,
     ) -> str:
         if not system.strip():
             raise GeminiError("System instruction không được để trống.")
@@ -992,6 +1006,8 @@ class GeminiService:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_schema=json_schema,
+                thinking_budget=thinking_budget,
+                thinking_level=thinking_level,
             )
 
     async def complete_json(
@@ -1002,6 +1018,8 @@ class GeminiService:
         schema: dict[str, Any],
         temperature: float = 0.05,
         max_tokens: int = 2600,
+        thinking_budget: int | None = None,
+        thinking_level: str | None = None,
     ) -> dict[str, Any]:
         content = await self.complete(
             system,
@@ -1009,6 +1027,8 @@ class GeminiService:
             temperature=temperature,
             max_tokens=max_tokens,
             json_schema=schema,
+            thinking_budget=thinking_budget,
+            thinking_level=thinking_level,
         )
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
         def reject_non_finite(value: str) -> None:

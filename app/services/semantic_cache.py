@@ -247,6 +247,40 @@ class SemanticAnswerCacheService:
             exact_match=exact_match,
         )
 
+    async def lookup_exact(self, query: str, *, scope: str) -> CacheLookup:
+        """Look up only an identical question without requesting an embedding."""
+
+        if not scope.strip():
+            raise ValueError("Semantic answer cache scope must not be blank.")
+        scope_hash = hashlib.sha256(scope.encode("utf-8")).hexdigest()
+        normalized_query = normalize_public_query(query)
+        query_hash = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
+        now = datetime.now(UTC)
+        async with SessionFactory() as db:
+            exact = await db.scalar(
+                select(LegalAnswerCache).where(
+                    LegalAnswerCache.cache_scope_hash == scope_hash,
+                    LegalAnswerCache.query_hash == query_hash,
+                    LegalAnswerCache.expires_at > now,
+                    LegalAnswerCache.model_name == self.settings.gemini_model,
+                    LegalAnswerCache.prompt_version == LEGAL_ANSWER_PROMPT_VERSION,
+                    LegalAnswerCache.embedding_model == self.embedding_config.model,
+                    LegalAnswerCache.embedding_revision
+                    == self.embedding_config.model_revision,
+                )
+            )
+        return CacheLookup(
+            scope_hash=scope_hash,
+            query_hash=query_hash,
+            normalized_query=normalized_query,
+            embedding=None,
+            hit=(
+                self._cached_answer(exact, 1.0, exact_match=True)
+                if exact
+                else None
+            ),
+        )
+
     async def lookup(self, query: str, *, scope: str) -> CacheLookup:
         if not scope.strip():
             raise ValueError("Semantic answer cache scope must not be blank.")
