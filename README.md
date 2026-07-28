@@ -204,7 +204,7 @@ Service account phải có `roles/aiplatform.user` và project phải bật
 bộ vector.
 
 Xem [hướng dẫn Cloud Run](deploy-gcp-cloud-run.md) để build và triển khai lên GCP.
-Frontend/API dùng chung một service `vlegal-unified` với URL `run.app`; worker/beat là
+Frontend/API dùng chung một service `vlegalai` với URL `run.app`; worker/beat là
 Worker Pool, migration/reindex là Job. PostgreSQL chạy trên Cloud SQL và Neo4j
 chạy trên Neo4j Aura.
 

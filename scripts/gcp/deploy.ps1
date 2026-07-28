@@ -8,7 +8,7 @@ param(
     [string]$Repository = "vlegal",
     [string]$Tag = "",
     [ValidatePattern("^[a-z][a-z0-9-]{0,47}[a-z0-9]$")]
-    [string]$ServiceName = "vlegal-unified",
+    [string]$ServiceName = "vlegalai",
     [string]$RunServiceAccount = "",
     [string]$CorpusBucket = "",
     [string]$CloudSqlInstance = $env:GCP_CLOUD_SQL_INSTANCE,
@@ -128,11 +128,46 @@ function Invoke-Gcloud {
 
 function Get-ServiceUrl {
     param([Parameter(Mandatory)][string]$Name)
-    $url = (& gcloud run services describe $Name --project=$ProjectId --region=$Region --format="value(status.url)").Trim()
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($url)) {
+    $serviceJson = & gcloud run services describe $Name --project=$ProjectId --region=$Region --format=json
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($serviceJson)) {
         throw "Không lấy được URL của Cloud Run service $Name."
     }
-    return $url
+
+    try {
+        $service = $serviceJson | ConvertFrom-Json
+        $projectNumber = [string]$service.metadata.namespace
+        $urlsJson = [string]$service.metadata.annotations.'run.googleapis.com/urls'
+        $urls = if ([string]::IsNullOrWhiteSpace($urlsJson)) {
+            @()
+        }
+        else {
+            $decodedUrls = $urlsJson | ConvertFrom-Json
+            @(
+                foreach ($candidateUrl in $decodedUrls) {
+                    [string]$candidateUrl
+                }
+            )
+        }
+        $projectNumberUrl = $urls |
+            Where-Object {
+                -not [string]::IsNullOrWhiteSpace($projectNumber) -and
+                ([uri]$_).Host -like "*-$projectNumber.*"
+            } |
+            Select-Object -First 1
+        if (-not [string]::IsNullOrWhiteSpace($projectNumberUrl)) {
+            return [string]$projectNumberUrl
+        }
+
+        $statusUrl = [string]$service.status.url
+        if (-not [string]::IsNullOrWhiteSpace($statusUrl)) {
+            return $statusUrl
+        }
+    }
+    catch {
+        throw "Cloud Run trả về cấu trúc URL không hợp lệ cho service ${Name}: $($_.Exception.Message)"
+    }
+
+    throw "Không lấy được URL của Cloud Run service $Name."
 }
 
 function Deploy-Migrate {

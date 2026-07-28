@@ -7,7 +7,7 @@ umask 077
 
 PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-}"
 REGION="${GCP_REGION:-asia-southeast1}"
-SERVICE="${GCP_RUN_SERVICE:-vlegal-unified}"
+SERVICE="${GCP_RUN_SERVICE:-vlegalai}"
 RUNTIME_SERVICE_ACCOUNT="${GCP_RUN_SERVICE_ACCOUNT:-}"
 
 usage() {
