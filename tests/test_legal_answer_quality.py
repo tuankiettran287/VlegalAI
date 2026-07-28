@@ -8,10 +8,12 @@ from app.api import (
     _legal_sources,
 )
 from app.services.ai import LEGAL_SYSTEM_PROMPT
+from app.services import retrieval as retrieval_module
 from app.services.retrieval import (
     RetrievalService,
     append_detailed_citations,
     build_answer_plan,
+    classify_retrieval_route,
     format_source_locator,
     format_source_opening,
     plan_retrieval_queries,
@@ -61,6 +63,8 @@ def test_short_forced_labor_query_expands_to_definition_and_prohibition() -> Non
     queries = plan_retrieval_queries("Cưỡng bức lao động")
 
     assert queries[0] == "Cưỡng bức lao động"
+    assert classify_retrieval_route("Cưỡng bức lao động") == "single_hop"
+    assert build_answer_plan("Cưỡng bức lao động")["mode"] == "single_hop"
     assert any(
         "Điều 3" in query
         and "Điều 8" in query
@@ -100,6 +104,132 @@ def test_short_forced_labor_query_retrieves_expanded_legal_definition() -> None:
     assert store.queries == plan_retrieval_queries("Cưỡng bức lao động")
     assert len(rows) == 1
     assert "Cưỡng bức lao động" in rows[0]["text"]
+
+
+def test_retrieval_route_distinguishes_single_hop_and_graph_questions() -> None:
+    assert (
+        classify_retrieval_route(
+            "Mức lương tối thiểu vùng hiện nay là bao nhiêu?"
+        )
+        == "single_hop"
+    )
+    assert (
+        classify_retrieval_route(
+            "Nếu công ty chậm trả lương thì người lao động có quyền gì?"
+        )
+        == "multi_hop"
+    )
+    assert (
+        classify_retrieval_route(
+            "Phân tích toàn bộ quyền và nghĩa vụ của các bên trong hợp đồng lao động"
+        )
+        == "multi_abstract"
+    )
+
+
+def test_single_hop_never_initializes_graph_store(
+    monkeypatch,
+) -> None:
+    class _Store:
+        def __init__(self, label: str) -> None:
+            self.label = label
+            self.queries: list[str] = []
+
+        def retrieve(self, query: str, _: int) -> list[dict]:
+            self.queries.append(query)
+            return [
+                _source(
+                    text=(
+                        "Cưỡng bức lao động là hành vi bị nghiêm cấm "
+                        "trong quan hệ lao động."
+                    ),
+                )
+            ]
+
+    postgres = _Store("postgres")
+    graph = _Store("graph")
+    graph_initializations = 0
+
+    def postgres_factory(_: object) -> _Store:
+        return postgres
+
+    def graph_factory(_: object) -> _Store:
+        nonlocal graph_initializations
+        graph_initializations += 1
+        return graph
+
+    monkeypatch.setattr(retrieval_module, "_external_config", lambda _: object())
+    monkeypatch.setattr(
+        retrieval_module,
+        "PostgresGraphRAGStore",
+        postgres_factory,
+    )
+    monkeypatch.setattr(
+        retrieval_module,
+        "Neo4jPostgresGraphRAGStore",
+        graph_factory,
+    )
+    service = RetrievalService(
+        SimpleNamespace(
+            retriever_backend="hybrid_rag",
+            retrieval_top_k=10,
+        )
+    )
+
+    rows = asyncio.run(service.retrieve("Cưỡng bức lao động"))
+
+    assert rows
+    assert postgres.queries == plan_retrieval_queries("Cưỡng bức lao động")
+    assert graph.queries == []
+    assert graph_initializations == 0
+    assert "retrieval_route:single_hop" in rows[0]["reasons"]
+
+
+def test_multi_hop_uses_graph_store(
+    monkeypatch,
+) -> None:
+    class _Store:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def retrieve(self, query: str, _: int) -> list[dict]:
+            self.queries.append(query)
+            return [
+                _source(
+                    text=(
+                        "Công ty chậm trả lương làm phát sinh quyền yêu cầu "
+                        "trả đủ tiền lương của người lao động."
+                    ),
+                )
+            ]
+
+    postgres = _Store()
+    graph = _Store()
+    monkeypatch.setattr(retrieval_module, "_external_config", lambda _: object())
+    monkeypatch.setattr(
+        retrieval_module,
+        "PostgresGraphRAGStore",
+        lambda _: postgres,
+    )
+    monkeypatch.setattr(
+        retrieval_module,
+        "Neo4jPostgresGraphRAGStore",
+        lambda _: graph,
+    )
+    service = RetrievalService(
+        SimpleNamespace(
+            retriever_backend="hybrid_rag",
+            retrieval_top_k=10,
+        )
+    )
+    query = "Nếu công ty chậm trả lương thì người lao động có quyền gì?"
+
+    rows = asyncio.run(service.retrieve(query))
+
+    assert rows
+    assert postgres.queries == []
+    assert graph.queries == plan_retrieval_queries(query)
+    assert "retrieval_route:multi_hop" in rows[0]["reasons"]
 
 
 def test_retrieval_runs_each_compound_facet_and_merges_results() -> None:
