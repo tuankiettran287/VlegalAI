@@ -16,6 +16,11 @@ from typing import Any, Iterable
 from docx import Document
 
 from app import legal_ontology as onto
+from app.services.embedding_checkpoint import (
+    EmbeddingCheckpointRecord,
+    PostgresEmbeddingCheckpoint,
+    embedding_content_hash,
+)
 from app.services.embeddings import EmbeddingConfig, get_embedding_service
 
 
@@ -141,6 +146,23 @@ def is_heading_title(text: str) -> bool:
 
 def token_count(text: str) -> int:
     return len(VN_WORD_RE.findall(text))
+
+
+def embedding_text_windows(text: str) -> list[str]:
+    """Bound structural chunks so Vertex never silently drops their tail."""
+
+    if token_count(text) <= CHUNK_WINDOW_WORDS + 80:
+        return [text]
+
+    raw_words = text.split()
+    step = max(80, CHUNK_WINDOW_WORDS - CHUNK_OVERLAP_WORDS)
+    windows: list[str] = []
+    for start in range(0, len(raw_words), step):
+        window = raw_words[start : start + CHUNK_WINDOW_WORDS]
+        if len(window) < 80:
+            break
+        windows.append(" ".join(window))
+    return windows or [text]
 
 
 #: Letterhead lines that precede the real title of a Vietnamese legal document.
@@ -1784,13 +1806,100 @@ class LegalGraphBuilder:
             "vector": b"",
         }
 
+    def _add_windowed_chunks(
+        self,
+        doc_id: str,
+        node_id: str,
+        primary_type: str,
+        text: str,
+        ordinal: int,
+    ) -> int:
+        for index, window in enumerate(embedding_text_windows(text)):
+            self._add_chunk(
+                doc_id,
+                node_id,
+                primary_type if index == 0 else "sliding",
+                window,
+                ordinal,
+            )
+            ordinal += 1
+        return ordinal
+
     def _embed_chunks(self) -> None:
         rows = list(self.chunks.values())
         texts = [f"{row['title']}\n{row['path_label']}\n{row['text']}" for row in rows]
         service = get_embedding_service(self.embedding_config)
-        embeddings = service.embed_documents(texts, show_progress=True)
-        for row, embedding in zip(rows, embeddings, strict=True):
-            row["vector"] = vector_to_blob(embedding)
+        checkpoint_enabled = os.getenv(
+            "LEGAL_EMBEDDING_CHECKPOINT_ENABLED",
+            "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        checkpoint: PostgresEmbeddingCheckpoint | None = None
+        cached: dict[str, tuple[str, list[float]]] = {}
+        if checkpoint_enabled:
+            checkpoint = PostgresEmbeddingCheckpoint(
+                os.getenv("DATABASE_URL", ""),
+                self.embedding_config,
+            )
+            cached = checkpoint.load()
+
+        pending: list[tuple[dict[str, Any], str, str]] = []
+        restored = 0
+        for row, text in zip(rows, texts, strict=True):
+            content_hash = embedding_content_hash(text)
+            cached_row = cached.get(row["chunk_id"])
+            if cached_row and cached_row[0] == content_hash:
+                row["vector"] = vector_to_blob(cached_row[1])
+                restored += 1
+            else:
+                pending.append((row, text, content_hash))
+
+        if checkpoint_enabled:
+            print(
+                "Embedding checkpoint: "
+                f"restored {restored}/{len(rows)}; pending {len(pending)}.",
+                flush=True,
+            )
+
+        checkpoint_batch_size = len(pending) or 1
+        if checkpoint_enabled:
+            checkpoint_batch_size = max(
+                1,
+                int(
+                    os.getenv(
+                        "LEGAL_EMBEDDING_CHECKPOINT_BATCH_SIZE",
+                        "20",
+                    )
+                ),
+            )
+        completed = restored
+        for offset in range(0, len(pending), checkpoint_batch_size):
+            batch = pending[offset : offset + checkpoint_batch_size]
+            embeddings = service.embed_documents(
+                [text for _, text, _ in batch],
+                show_progress=True,
+            )
+            records: list[EmbeddingCheckpointRecord] = []
+            for (row, _text, content_hash), embedding in zip(
+                batch,
+                embeddings,
+                strict=True,
+            ):
+                row["vector"] = vector_to_blob(embedding)
+                records.append(
+                    EmbeddingCheckpointRecord(
+                        chunk_id=row["chunk_id"],
+                        content_hash=content_hash,
+                        vector=embedding,
+                    )
+                )
+            if checkpoint is not None:
+                checkpoint.save(records)
+            completed += len(batch)
+            if checkpoint_enabled:
+                print(
+                    f"Embedding checkpoint: saved {completed}/{len(rows)}.",
+                    flush=True,
+                )
 
     def _semantic_chunk_text(self, node_id: str, node: dict[str, Any], outgoing: dict[str, list[str]]) -> str:
         """Give a concept node a body worth embedding.
@@ -1833,30 +1942,45 @@ class LegalGraphBuilder:
                 self._add_chunk(doc_id, node_id, "structure", text, ordinal)
                 ordinal += 1
             elif node_type == "VănBản":
-                self._add_chunk(doc_id, node_id, "document_intro", text, ordinal)
-                ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "document_intro",
+                    text,
+                    ordinal,
+                )
             elif node_type == "Điều":
-                self._add_chunk(doc_id, node_id, "article", text, ordinal)
-                ordinal += 1
-                words = VN_WORD_RE.findall(text)
-                if len(words) > CHUNK_WINDOW_WORDS + 80:
-                    raw_words = text.split()
-                    step = max(80, CHUNK_WINDOW_WORDS - CHUNK_OVERLAP_WORDS)
-                    for start in range(0, len(raw_words), step):
-                        window = raw_words[start : start + CHUNK_WINDOW_WORDS]
-                        if len(window) < 80:
-                            break
-                        self._add_chunk(doc_id, node_id, "sliding", " ".join(window), ordinal)
-                        ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "article",
+                    text,
+                    ordinal,
+                )
             elif node_type == "Khoản":
-                self._add_chunk(doc_id, node_id, "clause", text, ordinal)
-                ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "clause",
+                    text,
+                    ordinal,
+                )
             elif node_type == "Điểm":
-                self._add_chunk(doc_id, node_id, "point", text, ordinal)
-                ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "point",
+                    text,
+                    ordinal,
+                )
             elif node_type == "PhụLục_Bảng":
-                self._add_chunk(doc_id, node_id, "table", text, ordinal)
-                ordinal += 1
+                ordinal = self._add_windowed_chunks(
+                    doc_id,
+                    node_id,
+                    "table",
+                    text,
+                    ordinal,
+                )
             else:
                 self._add_chunk(
                     doc_id, node_id, "semantic", self._semantic_chunk_text(node_id, node, outgoing), ordinal

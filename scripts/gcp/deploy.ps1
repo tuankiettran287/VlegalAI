@@ -162,6 +162,8 @@ function Deploy-Reindex {
         "LEGAL_DATA_DIR=/app/legal-data",
         "LEGAL_STORAGE_DIR=/tmp/graphrag",
         "LEGAL_GRAPHRAG_DB=/tmp/graphrag/legal_graphrag.sqlite",
+        "LEGAL_EMBEDDING_CHECKPOINT_ENABLED=true",
+        "LEGAL_EMBEDDING_CHECKPOINT_BATCH_SIZE=20",
         "GEMINI_USE_ADC=true",
         "GEMINI_PROJECT_ID=$ProjectId",
         "EMBEDDING_PROVIDER=vertex",
