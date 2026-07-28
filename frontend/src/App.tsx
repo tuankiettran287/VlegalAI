@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -110,6 +111,118 @@ function markdown(value: string) {
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\n/g, "<br />");
+}
+
+function TypewriterMarkdown({
+  text,
+  active,
+  onComplete,
+  onProgress,
+}: {
+  text: string;
+  active: boolean;
+  onComplete: () => void;
+  onProgress: () => void;
+}) {
+  const characters = useMemo(() => Array.from(text), [text]);
+  const [visibleCount, setVisibleCount] = useState(active ? 0 : characters.length);
+  const animationFrameRef = useRef<number | null>(null);
+  const completedRef = useRef(!active);
+  const onCompleteRef = useRef(onComplete);
+  const onProgressRef = useRef(onProgress);
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+    onProgressRef.current = onProgress;
+  }, [onComplete, onProgress]);
+
+  useEffect(() => {
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    if (!active || !characters.length) {
+      completedRef.current = true;
+      setVisibleCount(characters.length);
+      return;
+    }
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setVisibleCount(characters.length);
+      if (!completedRef.current) {
+        completedRef.current = true;
+        onCompleteRef.current();
+      }
+      return;
+    }
+
+    completedRef.current = false;
+    setVisibleCount(0);
+    const startedAt = performance.now();
+    const duration = Math.min(6000, Math.max(700, characters.length * 14));
+
+    const reveal = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const nextCount = Math.min(
+        characters.length,
+        Math.max(1, Math.ceil(progress * characters.length)),
+      );
+      setVisibleCount(nextCount);
+
+      if (progress < 1) {
+        animationFrameRef.current = requestAnimationFrame(reveal);
+        return;
+      }
+
+      animationFrameRef.current = null;
+      if (!completedRef.current) {
+        completedRef.current = true;
+        onCompleteRef.current();
+      }
+    };
+
+    animationFrameRef.current = requestAnimationFrame(reveal);
+    return () => {
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+    };
+  }, [active, characters]);
+
+  useLayoutEffect(() => {
+    if (active && visibleCount > 0) onProgressRef.current();
+  }, [active, visibleCount]);
+
+  const finishImmediately = () => {
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    setVisibleCount(characters.length);
+    if (!completedRef.current) {
+      completedRef.current = true;
+      onCompleteRef.current();
+    }
+  };
+
+  const visibleText = characters.slice(0, visibleCount).join("");
+  return (
+    <div className={`assistant-answer${active ? " is-typing" : ""}`} aria-busy={active}>
+      <div
+        aria-hidden={active ? "true" : undefined}
+        dangerouslySetInnerHTML={{ __html: markdown(visibleText) }}
+      />
+      {active && (
+        <div className="typing-controls">
+          <span className="typing-cursor" aria-hidden="true" />
+          <span className="sr-only" role="status">Đang hiển thị câu trả lời</span>
+          <button type="button" onClick={finishImmediately}>Hiện ngay</button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function formatDate(value?: string | null) {
@@ -305,8 +418,24 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const composerSlotRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const conversationRequestRef = useRef(0);
   const hasMessages = messages.length > 0;
+  const lastMessageId = messages[messages.length - 1]?.id;
+
+  const scrollToLatest = useCallback((onlyIfPinned = true) => {
+    const container = chatScrollRef.current;
+    if (!container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (!onlyIfPinned || distanceFromBottom < 180) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    scrollToLatest(false);
+  }, [lastMessageId, messages.length, scrollToLatest]);
 
   const syncHomeComposerPosition = useCallback(() => {
     const composer = composerRef.current;
@@ -402,7 +531,9 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
     const userMessage: ChatMessage = { id: uid(), role: "user", content: trimmed };
     const pendingId = uid();
     setMessages((current) => [
-      ...current,
+      ...current.map((message) =>
+        message.typing ? { ...message, typing: false } : message,
+      ),
       userMessage,
       { id: pendingId, role: "assistant", content: "Thinking…", pending: true },
     ]);
@@ -420,6 +551,7 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
                 content: data.answer,
                 sources: data.sources,
                 verification: data.verification,
+                typing: true,
               }
             : message,
         ),
@@ -566,7 +698,7 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
           </div>
         </header>
 
-        <div className="chat-scroll">
+        <div className="chat-scroll" ref={chatScrollRef}>
             <div className="chat-empty" aria-hidden={hasMessages}>
               <header className="empty-heading">
                 <span className="empty-logo" aria-hidden="true"><Scale size={24} /></span>
@@ -608,10 +740,27 @@ function ChatPage({ onNavigate }: { onNavigate: (path: string) => void }) {
                 <article className={`message ${message.role}`} key={message.id}>
                   {message.role === "assistant" && <div className="avatar"><Scale size={16} /></div>}
                   <div className="bubble">
-                    <div dangerouslySetInnerHTML={{ __html: markdown(message.content) }} />
+                    {message.role === "assistant" ? (
+                      <TypewriterMarkdown
+                        text={message.content}
+                        active={Boolean(message.typing)}
+                        onProgress={scrollToLatest}
+                        onComplete={() =>
+                          setMessages((current) =>
+                            current.map((item) =>
+                              item.id === message.id && item.typing
+                                ? { ...item, typing: false }
+                                : item,
+                            ),
+                          )
+                        }
+                      />
+                    ) : (
+                      <div dangerouslySetInnerHTML={{ __html: markdown(message.content) }} />
+                    )}
                     {message.pending && <div className="loading-line" />}
-                    <VerificationBadge report={message.verification} />
-                    <SourcePanel sources={message.sources} />
+                    {!message.typing && <VerificationBadge report={message.verification} />}
+                    {!message.typing && <SourcePanel sources={message.sources} />}
                   </div>
                 </article>
               ))}

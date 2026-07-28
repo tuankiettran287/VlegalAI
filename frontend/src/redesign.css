@@ -920,6 +920,57 @@ summary:focus-visible {
   line-height: 1.78;
 }
 
+.assistant-answer {
+  position: relative;
+}
+
+.assistant-answer.is-typing {
+  min-height: 1.78em;
+}
+
+.typing-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 6px;
+}
+
+.typing-cursor {
+  width: 2px;
+  height: 1.05em;
+  border-radius: 999px;
+  background: var(--brand);
+  animation: typing-cursor-blink 800ms steps(1, end) infinite;
+}
+
+.typing-controls button {
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  transition: color var(--motion-quick) var(--ease-standard);
+}
+
+.typing-controls button:hover,
+.typing-controls button:focus-visible {
+  color: var(--brand);
+}
+
+@keyframes typing-cursor-blink {
+  0%,
+  48% {
+    opacity: 1;
+  }
+
+  49%,
+  100% {
+    opacity: 0;
+  }
+}
+
 .verification,
 .source-panel {
   border-color: var(--line);

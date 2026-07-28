@@ -46,6 +46,7 @@ export type ChatMessage = {
   sources?: Source[];
   verification?: VerificationReport;
   pending?: boolean;
+  typing?: boolean;
   created_at?: string;
 };
 
