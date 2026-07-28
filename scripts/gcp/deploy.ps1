@@ -227,7 +227,8 @@ function Deploy-Reindex {
         "--args=scripts/sync_external_graphrag.py,--reset-neo4j,--reset-postgres",
         "--tasks=1", "--parallelism=1", "--max-retries=0", "--task-timeout=24h",
         "--cpu=4", "--memory=8Gi",
-        "--add-volume=mount-path=/app/legal-data,type=cloud-storage,bucket=$CorpusBucket,readonly=true,mount-options=uid=10001;gid=10001",
+        "--add-volume=name=legal-data,type=cloud-storage,bucket=$CorpusBucket,readonly=true,mount-options=uid=10001;gid=10001",
+        "--add-volume-mount=volume=legal-data,mount-path=/app/legal-data",
         "--set-env-vars=$envVars",
         "--set-secrets=DATABASE_URL=vlegal-database-url:latest,NEO4J_PASSWORD=vlegal-neo4j-password:latest",
         "--quiet"
