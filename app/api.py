@@ -78,6 +78,7 @@ from app.services.freshness import (
     FreshnessUnavailable,
     LegalFreshnessService,
 )
+from app.services.greetings import greeting_response
 from app.services.query_rewrite import rewrite_query_if_needed
 from app.services.retrieval import (
     RetrievalService,
@@ -1367,11 +1368,17 @@ async def chat(
     cache_scope = f"user:{authenticated_user_id}"
     summary_context = ""
     history_turns: list[tuple[str, str]] = []
+    greeting_answer = greeting_response(payload.message, preferred_name)
     if payload.conversation_id:
         conversation = await _owned_conversation(db, payload.conversation_id, user)
         conversation_id = conversation.id
-        summary_context = await memory.get_summary(db, conversation_id)
-        history_turns = await _load_postgres_chat_history(db, conversation_id, settings)
+        if greeting_answer is None:
+            summary_context = await memory.get_summary(db, conversation_id)
+            history_turns = await _load_postgres_chat_history(
+                db,
+                conversation_id,
+                settings,
+            )
     # Authentication and history reads must not retain a PostgreSQL
     # transaction while cache/search/Gemini network calls are in flight.
     await db.rollback()
@@ -1385,37 +1392,56 @@ async def chat(
         history_turn_count=len(history_turns),
         summary_available=bool(summary_context),
     )
-    rewrite_started = time.perf_counter()
-    log_progress(logger, "chat", "query_rewrite_started", operation_started)
-    query_rewrite = await rewrite_query_if_needed(
-        ai,
-        payload.message,
-        history=history_turns,
-        settings=settings,
-    )
-    retrieval_query = query_rewrite.retrieval_query
-    answer_plan = build_answer_plan(retrieval_query)
-    log_progress(
-        logger,
-        "chat",
-        "query_rewrite_completed",
-        operation_started,
-        attempted=query_rewrite.attempted,
-        phase_ms=round((time.perf_counter() - rewrite_started) * 1000),
-        rewritten=query_rewrite.rewritten,
-    )
+    if greeting_answer is not None:
+        retrieval_query = payload.message
+        answer_plan: dict[str, Any] = {}
+        log_progress(
+            logger,
+            "chat",
+            "greeting_completed",
+            operation_started,
+            outcome="deterministic_response",
+        )
+    else:
+        rewrite_started = time.perf_counter()
+        log_progress(logger, "chat", "query_rewrite_started", operation_started)
+        query_rewrite = await rewrite_query_if_needed(
+            ai,
+            payload.message,
+            history=history_turns,
+            settings=settings,
+        )
+        retrieval_query = query_rewrite.retrieval_query
+        answer_plan = build_answer_plan(retrieval_query)
+        log_progress(
+            logger,
+            "chat",
+            "query_rewrite_completed",
+            operation_started,
+            attempted=query_rewrite.attempted,
+            phase_ms=round((time.perf_counter() - rewrite_started) * 1000),
+            rewritten=query_rewrite.rewritten,
+        )
 
     cache_lookup: CacheLookup | None = None
     cache_hit = False
     cache_similarity: float | None = None
     cache_mode = "miss"
     cached_draft = ""
-    answer = ""
+    answer = greeting_answer or ""
     sources: list[dict[str, Any]] = []
-    verification: dict[str, Any] = {}
-    cache_eligible = answer_cache.eligible(
-        payload.message,
-        has_conversation_context=bool(history_turns or summary_context),
+    verification: dict[str, Any] = (
+        VerificationReport().model_dump(mode="json")
+        if greeting_answer is not None
+        else {}
+    )
+    answer_ready = greeting_answer is not None
+    cache_eligible = (
+        not answer_ready
+        and answer_cache.eligible(
+            payload.message,
+            has_conversation_context=bool(history_turns or summary_context),
+        )
     )
     cache_lookup_started = time.perf_counter()
     log_progress(
@@ -1479,6 +1505,7 @@ async def chat(
                 if cached.exact_match:
                     answer = cached.answer
                     cache_hit = True
+                    answer_ready = True
                     cache_mode = "exact"
                 else:
                     cached_draft = cached.answer
@@ -1507,7 +1534,7 @@ async def chat(
             except Exception:
                 logger.exception("Cannot invalidate semantic answer cache entry %s", cached.id)
 
-    if not cache_hit:
+    if not answer_ready:
         data_unavailable = (
             not sources
             and verification.get("note") == LEGAL_DATA_UNAVAILABLE_MESSAGE
@@ -1602,7 +1629,7 @@ async def chat(
                 except Exception:
                     logger.exception("Cannot store semantic answer cache entry")
 
-    if is_new_conversation:
+    if is_new_conversation and greeting_answer is None:
         answer = f"Chào {preferred_name},\n\n{answer}"
 
     message_id = uuid.uuid4()
@@ -1670,12 +1697,16 @@ async def chat(
     await db.commit()
     await db.refresh(assistant_message)
     message_id = assistant_message.id
-    try:
-        await memory.refresh(conversation_id)
-    except Exception:
-        # The full encrypted transcript is already durable. A later turn
-        # retries every message after last_message_sequence automatically.
-        logger.exception("Cannot refresh conversation summary for %s", conversation_id)
+    if greeting_answer is None:
+        try:
+            await memory.refresh(conversation_id)
+        except Exception:
+            # The full encrypted transcript is already durable. A later turn
+            # retries every message after last_message_sequence automatically.
+            logger.exception(
+                "Cannot refresh conversation summary for %s",
+                conversation_id,
+            )
     log_progress(
         logger,
         "chat",
@@ -1690,6 +1721,7 @@ async def chat(
         operation_started,
         cache_mode=cache_mode,
         source_count=len(sources),
+        greeting=greeting_answer is not None,
         temporary=False,
     )
     return ChatResponse(

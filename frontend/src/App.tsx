@@ -272,7 +272,11 @@ function VerificationBadge({ report }: { report?: VerificationReport | null }) {
   if (!report) return null;
   const current = report.checked && report.all_current;
   const items = Array.isArray(report.items) ? report.items : [];
-  if (!report.checked && !items.length && report.note === "Dữ liệu không có sẵn") {
+  if (
+    !report.checked
+    && !items.length
+    && (!report.note || report.note === "Dữ liệu không có sẵn")
+  ) {
     return null;
   }
   return (
