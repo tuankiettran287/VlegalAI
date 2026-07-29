@@ -315,19 +315,21 @@ class _GraphDriver:
         return self.recording_session
 
 
-def test_postgres_embedding_validation_checks_one_representative_row() -> None:
+def test_postgres_embedding_validation_uses_trusted_metadata_row() -> None:
     cursor = _RecordingCursor(
-        fetchall_results=[
-            [
-                {
-                    "embedding_model": "gemini-embedding-001",
-                    "embedding_revision": "vertex-ai-v1:redact",
-                    "dimensions": 1024,
-                },
-            ]
+        fetchone_results=[
+            {
+                "embedding_provider": "vertex",
+                "embedding_model": "gemini-embedding-001",
+                "embedding_revision": "vertex-ai-v1:redact",
+                "embedding_dimensions": 1024,
+                "status": "ready",
+                "chunk_count": 27220,
+            }
         ]
     )
     config = SimpleNamespace(
+        embedding_provider="vertex",
         embedding_model="gemini-embedding-001",
         postgres_vector_size=1024,
         embedding_config=SimpleNamespace(
@@ -338,23 +340,26 @@ def test_postgres_embedding_validation_checks_one_representative_row() -> None:
     validate_postgres_embeddings(_RecordingConnection(cursor), config)
 
     query = cursor.queries[0][0]
-    assert "LIMIT 1" in query
+    assert "graphrag_index_metadata" in query
     assert "GROUP BY" not in query
+    assert "graphrag_chunk" not in query
 
 
 def test_postgres_embedding_validation_rejects_mismatched_vector_space() -> None:
     cursor = _RecordingCursor(
-        fetchall_results=[
-            [
-                {
-                    "embedding_model": "BAAI/bge-m3",
-                    "embedding_revision": "main",
-                    "dimensions": 1024,
-                },
-            ]
+        fetchone_results=[
+            {
+                "embedding_provider": "gemini-api",
+                "embedding_model": "BAAI/bge-m3",
+                "embedding_revision": "main",
+                "embedding_dimensions": 1024,
+                "status": "ready",
+                "chunk_count": 27220,
+            }
         ]
     )
     config = SimpleNamespace(
+        embedding_provider="vertex",
         embedding_model="gemini-embedding-001",
         postgres_vector_size=1024,
         embedding_config=SimpleNamespace(
@@ -363,6 +368,49 @@ def test_postgres_embedding_validation_rejects_mismatched_vector_space() -> None
     )
 
     with pytest.raises(RuntimeError, match="re-embed"):
+        validate_postgres_embeddings(_RecordingConnection(cursor), config)
+
+
+def test_postgres_embedding_validation_rejects_incomplete_reindex() -> None:
+    cursor = _RecordingCursor(
+        fetchone_results=[
+            {
+                "embedding_provider": "vertex",
+                "embedding_model": "gemini-embedding-001",
+                "embedding_revision": "vertex-ai-v1:redact",
+                "embedding_dimensions": 1024,
+                "status": "building",
+                "chunk_count": 0,
+            }
+        ]
+    )
+    config = SimpleNamespace(
+        embedding_provider="vertex",
+        embedding_model="gemini-embedding-001",
+        postgres_vector_size=1024,
+        embedding_config=SimpleNamespace(
+            model_revision="vertex-ai-v1:redact"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="not ready"):
+        validate_postgres_embeddings(_RecordingConnection(cursor), config)
+
+
+def test_postgres_embedding_validation_rejects_untracked_existing_vectors() -> None:
+    cursor = _RecordingCursor(
+        fetchone_results=[None, {"present": 1}]
+    )
+    config = SimpleNamespace(
+        embedding_provider="vertex",
+        embedding_model="gemini-embedding-001",
+        postgres_vector_size=1024,
+        embedding_config=SimpleNamespace(
+            model_revision="vertex-ai-v1:redact"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="no trusted embedding contract"):
         validate_postgres_embeddings(_RecordingConnection(cursor), config)
 
 

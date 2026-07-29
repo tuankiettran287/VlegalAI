@@ -74,6 +74,9 @@ POSTGRES_LEXICAL_STOP_WORDS = {
     "nhung", "gì", "gi", "các", "cac", "một", "mot", "số", "so",
 }
 CURRENT_LAW_STATUSES = ("IN_FORCE", "PARTIALLY_IN_FORCE", "AMENDED")
+POSTGRES_EMBEDDING_CONTRACT_ID = "active"
+POSTGRES_EMBEDDING_CONTRACT_READY = "ready"
+POSTGRES_EMBEDDING_CONTRACT_BUILDING = "building"
 SETTLED_LAW_STATUSES = (
     *CURRENT_LAW_STATUSES,
     "EXPIRED",
@@ -726,6 +729,20 @@ def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) 
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS graphrag_index_metadata (
+                    index_name VARCHAR(32) PRIMARY KEY,
+                    embedding_provider VARCHAR(32) NOT NULL,
+                    embedding_model VARCHAR(255) NOT NULL,
+                    embedding_revision VARCHAR(255) NOT NULL,
+                    embedding_dimensions INTEGER NOT NULL,
+                    status VARCHAR(32) NOT NULL,
+                    chunk_count BIGINT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cursor.execute(
+                """
                 INSERT INTO graphrag_law_version (
                     law_code_normalized,
                     latest_version,
@@ -789,6 +806,36 @@ def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) 
             )
             if reset:
                 cursor.execute(
+                    """
+                    INSERT INTO graphrag_index_metadata (
+                        index_name,
+                        embedding_provider,
+                        embedding_model,
+                        embedding_revision,
+                        embedding_dimensions,
+                        status,
+                        chunk_count,
+                        updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 0, now())
+                    ON CONFLICT (index_name) DO UPDATE SET
+                        embedding_provider = EXCLUDED.embedding_provider,
+                        embedding_model = EXCLUDED.embedding_model,
+                        embedding_revision = EXCLUDED.embedding_revision,
+                        embedding_dimensions = EXCLUDED.embedding_dimensions,
+                        status = EXCLUDED.status,
+                        chunk_count = 0,
+                        updated_at = now()
+                    """,
+                    (
+                        POSTGRES_EMBEDDING_CONTRACT_ID,
+                        config.embedding_provider,
+                        config.embedding_model,
+                        config.embedding_config.model_revision,
+                        config.postgres_vector_size,
+                        POSTGRES_EMBEDDING_CONTRACT_BUILDING,
+                    ),
+                )
+                cursor.execute(
                     "TRUNCATE TABLE graphrag_chunk, graphrag_law_version"
                 )
 
@@ -805,47 +852,107 @@ def drop_postgres_bulk_load_indexes(config: ExternalGraphRAGConfig) -> None:
 
 
 def validate_postgres_embeddings(connection, config: ExternalGraphRAGConfig) -> None:
-    """Validate the runtime embedding contract using one representative row.
+    """Validate the trusted, single-row PostgreSQL embedding contract.
 
-    Full reindexing replaces the corpus with a single embedding contract.  A
-    runtime readiness check must therefore stay O(1); grouping every stored
-    vector here makes each newly started Cloud Run instance scan the corpus
-    before it can answer its first request.
+    A full-corpus ``GROUP BY`` detects mixed vector spaces but makes every new
+    Cloud Run instance scan the complete corpus before serving its first
+    request.  The sync path owns this metadata row and only marks it ``ready``
+    after a complete write, so runtime validation remains O(1) without trusting
+    an arbitrary representative vector.
     """
 
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT embedding_model, embedding_revision, vector_dims(embedding) AS dimensions
-            FROM graphrag_chunk
-            LIMIT 1
-            """
+            SELECT embedding_provider, embedding_model, embedding_revision,
+                   embedding_dimensions, status, chunk_count
+            FROM graphrag_index_metadata
+            WHERE index_name = %s
+            """,
+            (POSTGRES_EMBEDDING_CONTRACT_ID,),
         )
-        rows = cursor.fetchall()
-    if not rows:
-        return
-    actual = {
-        (
-            row["embedding_model"],
-            row["embedding_revision"],
-            int(row["dimensions"]),
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute("SELECT 1 AS present FROM graphrag_chunk LIMIT 1")
+            if cursor.fetchone() is None:
+                return
+            raise RuntimeError(
+                "PostgreSQL GraphRAG has vectors but no trusted embedding "
+                "contract metadata; run the latest migration and reindex."
+            )
+
+    if row["status"] != POSTGRES_EMBEDDING_CONTRACT_READY:
+        raise RuntimeError(
+            "PostgreSQL GraphRAG embedding contract is "
+            f"{row['status']!r}, not ready; finish or resume the reindex."
         )
-        for row in rows
-    }
+
+    actual = (
+        row["embedding_provider"],
+        row["embedding_model"],
+        row["embedding_revision"],
+        int(row["embedding_dimensions"]),
+    )
     expected = (
+        config.embedding_provider,
         config.embedding_model,
         config.embedding_config.model_revision,
         config.postgres_vector_size,
     )
-    if actual != {expected}:
+    if actual != expected:
         raise RuntimeError(
             f"PostgreSQL embeddings {actual!r} do not match configured model {expected!r}; re-embed the corpus."
+        )
+
+
+def set_postgres_embedding_contract(
+    connection,
+    config: ExternalGraphRAGConfig,
+    *,
+    status: str,
+    chunk_count: int,
+) -> None:
+    """Persist the authoritative contract used by the PostgreSQL vector index."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO graphrag_index_metadata (
+                index_name,
+                embedding_provider,
+                embedding_model,
+                embedding_revision,
+                embedding_dimensions,
+                status,
+                chunk_count,
+                updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (index_name) DO UPDATE SET
+                embedding_provider = EXCLUDED.embedding_provider,
+                embedding_model = EXCLUDED.embedding_model,
+                embedding_revision = EXCLUDED.embedding_revision,
+                embedding_dimensions = EXCLUDED.embedding_dimensions,
+                status = EXCLUDED.status,
+                chunk_count = EXCLUDED.chunk_count,
+                updated_at = now()
+            """,
+            (
+                POSTGRES_EMBEDDING_CONTRACT_ID,
+                config.embedding_provider,
+                config.embedding_model,
+                config.embedding_config.model_revision,
+                config.postgres_vector_size,
+                status,
+                max(int(chunk_count), 0),
+            ),
         )
 
 
 def upsert_postgres_chunks(
     rows: Iterable[dict[str, Any]],
     config: ExternalGraphRAGConfig,
+    *,
+    validate_contract: bool = True,
 ) -> int:
     sources = [dict(source) for source in rows]
     if not sources:
@@ -915,6 +1022,12 @@ def upsert_postgres_chunks(
         # Use an explicit transaction here so a failed batch cannot expose
         # only a prefix of a new legal-document version.
         with connection.transaction():
+            if validate_contract:
+                # Incremental indexing must never introduce a different vector
+                # space into an already published corpus. Full sync validates
+                # once before its batch loop and publishes metadata only after
+                # every batch succeeds.
+                validate_postgres_embeddings(connection, config)
             with connection.cursor() as cursor:
                 cursor.executemany(statement, prepared)
                 latest_versions: dict[str, int] = {}
@@ -954,6 +1067,13 @@ def upsert_postgres_chunks(
                             for code, version in latest_versions.items()
                         ],
                     )
+            if validate_contract:
+                set_postgres_embedding_contract(
+                    connection,
+                    config,
+                    status=POSTGRES_EMBEDDING_CONTRACT_READY,
+                    chunk_count=0,
+                )
     return len(prepared)
 
 
@@ -1090,10 +1210,14 @@ def sync_postgres(
     chunks = sqlite_rows(db_path, "chunks")
     document_metadata = load_bootstrap_document_metadata(db_path)
     ensure_postgres_schema(config, reset=reset)
+    with postgres_connection(config) as connection:
+        if not reset:
+            validate_postgres_embeddings(connection, config)
     if reset:
         drop_postgres_bulk_load_indexes(config)
 
     total = 0
+    completed = False
     try:
         for batch in batched(chunks, config.batch_size):
             rows = []
@@ -1119,10 +1243,27 @@ def sync_postgres(
                     "law_version": provenance["law_version"],
                     "vector": row["vector"],
                 })
-            total += upsert_postgres_chunks(rows, config)
+            total += upsert_postgres_chunks(
+                rows,
+                config,
+                validate_contract=False,
+            )
+        completed = True
     finally:
         if reset:
             ensure_postgres_schema(config)
+
+    if completed:
+        with postgres_connection(config) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) AS chunks FROM graphrag_chunk")
+                row = cursor.fetchone() or {"chunks": 0}
+            set_postgres_embedding_contract(
+                connection,
+                config,
+                status=POSTGRES_EMBEDDING_CONTRACT_READY,
+                chunk_count=int(row["chunks"]),
+            )
 
     return {"chunks": total}
 
