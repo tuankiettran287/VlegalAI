@@ -2339,7 +2339,11 @@ async def list_articles(
         statement = statement.where(Article.status == "PUBLISHED")
     if q.strip():
         like = f"%{q.strip()}%"
-        statement = statement.where((Article.title.ilike(like)) | (Article.excerpt.ilike(like)))
+        statement = statement.where(
+            (Article.title.ilike(like))
+            | (Article.excerpt.ilike(like))
+            | (Article.content.ilike(like))
+        )
     return {"items": [_article_dict(row) for row in (await db.scalars(statement)).all()]}
 
 

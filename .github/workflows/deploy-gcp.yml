@@ -350,6 +350,7 @@ jobs:
             Neo4jDatabase = $env:NEO4J_DATABASE
             Component = "all"
             ExecuteMigrate = $true
+            ExecuteArticlePublish = $true
           }
 
           if (

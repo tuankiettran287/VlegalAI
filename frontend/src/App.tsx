@@ -36,7 +36,6 @@ import {
   Plus,
   RefreshCw,
   Scale,
-  Search,
   SendHorizontal,
   ShieldCheck,
   Sparkles,
@@ -48,7 +47,6 @@ import {
 } from "lucide-react";
 import {
   ApiError,
-  articleApi,
   artifactApi,
   askLegalQuestion,
   authApi,
@@ -66,10 +64,10 @@ import {
   type SignatureResponse,
 } from "./api";
 import { sampleQuestions, templateFallback } from "./data";
+import ArticlesPage from "./ArticlesPage";
 import LandingPage from "./LandingPage";
 import OnboardingPage from "./OnboardingPage";
 import type {
-  Article,
   Artifact,
   ChatEffort,
   ChatMessage,
@@ -79,7 +77,6 @@ import type {
   Template,
   User,
   VerificationReport,
-  WebSource,
 } from "./types";
 
 const routes = [
@@ -1277,83 +1274,6 @@ function SignaturePage() {
   );
 }
 
-function ArticlesPage() {
-  const [query, setQuery] = useState("");
-  const [articles, setArticles] = useState<Article[]>([]);
-  const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
-  const [webSummary, setWebSummary] = useState("");
-  const [webSources, setWebSources] = useState<WebSource[]>([]);
-  const [webProviders, setWebProviders] = useState<string[]>([]);
-  const [webWarnings, setWebWarnings] = useState<string[]>([]);
-  const [googleSearchEntryPoint, setGoogleSearchEntryPoint] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const load = useCallback((value = "") => articleApi.list(value).then((data) => setArticles(data.items)).catch((reason) => setError((reason as Error).message)), []);
-  useEffect(() => {
-    void load();
-  }, [load]);
-  return (
-    <section className="tool-page articles-page">
-      <PageHeader title="Bài viết & nghiên cứu" subtitle="Theo dõi bài viết pháp lý được cập nhật mỗi ngày hoặc chủ động nghiên cứu một chủ đề từ các nguồn công khai có dẫn chứng rõ ràng." />
-      {error && <ErrorNotice error={error} onClose={() => setError("")} />}
-      <form className="web-search-card" onSubmit={async (event) => {
-        event.preventDefault(); if (!query.trim()) return; setLoading(true); setError("");
-        try { const data = await articleApi.webSearch(query); setWebSummary(data.summary); setWebSources(data.sources); setWebProviders(data.providers_used); setWebWarnings(data.search_warnings); setGoogleSearchEntryPoint(data.google_search_entry_point || ""); load(); }
-        catch (reason) { setError((reason as Error).message); }
-        finally { setLoading(false); }
-      }}>
-        <Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm chủ đề pháp lý trên web…" />
-        <button className="primary-button" type="submit" disabled={loading || query.length < 2}>{loading ? "Đang tìm…" : "Tìm trên web"}</button>
-      </form>
-      {webSummary && <section className="research-result"><div className="research-heading"><span className="eyebrow">Tổng hợp từ internet</span><div className="provider-pills">{webProviders.map((provider) => <span key={provider}>{provider === "google" ? "Google Search" : "Tavily"}</span>)}</div></div>{webWarnings.length > 0 && <p className="search-warning">{webWarnings.join(" · ")}</p>}<div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(webSummary) }} />{googleSearchEntryPoint && <iframe className="google-search-entry" title="Thông tin đối chiếu từ Google Search" sandbox="allow-popups" referrerPolicy="no-referrer" srcDoc={googleSearchEntryPoint} />}<div className="web-source-grid">{webSources.map((source) => <a key={source.id} href={source.url} target="_blank" rel="noreferrer"><span>{source.id}</span><strong>{source.title}<small>{(source.providers || []).map((provider) => provider === "google" ? "Google" : "Tavily").join(" + ")}</small></strong><ExternalLink size={14} /></a>)}</div></section>}
-      {selectedArticle && (
-        <ResultPanel
-          title={selectedArticle.title}
-          text={selectedArticle.content}
-        >
-          <div className="article-detail-meta">
-            <span>{selectedArticle.category}</span>
-            <small>{formatDate(selectedArticle.published_at || selectedArticle.created_at)} · {selectedArticle.views} lượt xem</small>
-            <button type="button" className="ghost-button" onClick={() => setSelectedArticle(null)}><X size={14} /> Đóng bài viết</button>
-          </div>
-          {selectedArticle.web_sources?.length ? (
-            <div className="web-source-grid">
-              {selectedArticle.web_sources.map((source) => (
-                <a key={source.id} href={source.url} target="_blank" rel="noreferrer">
-                  <span>{source.id}</span>
-                  <strong>{source.title}</strong>
-                  <ExternalLink size={14} />
-                </a>
-              ))}
-            </div>
-          ) : null}
-        </ResultPanel>
-      )}
-      <div className="article-list">{articles.map((article) => (
-        <article className="article-card" key={article.id}>
-          <div className="article-icon"><BookOpen size={23} /><span>{article.category}</span></div>
-          <div>
-            <small>{formatDate(article.published_at || article.created_at)} · {article.views} lượt xem</small>
-            <h2>{article.title}</h2>
-            <p>{article.excerpt}</p>
-            <button
-              type="button"
-              className="article-read-button"
-              onClick={async () => {
-                setError("");
-                try { setSelectedArticle(await articleApi.get(article.slug)); }
-                catch (reason) { setError((reason as Error).message); }
-              }}
-            >
-              Đọc bài viết <ExternalLink size={13} />
-            </button>
-          </div>
-        </article>
-      ))}{!articles.length && <div className="empty-state"><BookOpen size={28} /><h3>Chưa có bài viết</h3><p>Bài viết pháp lý đầu tiên sẽ xuất hiện sau lịch cập nhật hằng ngày.</p></div>}</div>
-    </section>
-  );
-}
-
 function LibraryPage() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -1444,13 +1364,20 @@ function App() {
     );
   }
 
-  const activeRoute = routes.find((route) => route.path === path) || routes[0];
+  const activeRoute = routes.find(
+    (route) => route.path === path || (route.path !== "/" && path.startsWith(`${route.path}/`)),
+  ) || routes[0];
   let page: ReactNode;
   if (path === "/tao-hop-dong") page = <ContractPage />;
   else if (path === "/review-hop-dong" || path === "/phan-tich-hop-dong") page = <ReviewPage />;
   else if (path === "/so-sanh-hop-dong") page = <ComparePage />;
   else if (path === "/ky-van-ban") page = <SignaturePage />;
-  else if (path === "/bai-viet") page = <ArticlesPage />;
+  else if (path === "/bai-viet" || path.startsWith("/bai-viet/")) {
+    const articleSlug = path.startsWith("/bai-viet/")
+      ? decodeURIComponent(path.slice("/bai-viet/".length))
+      : undefined;
+    page = <ArticlesPage slug={articleSlug} onNavigate={navigate} />;
+  }
   else if (path === "/thu-vien") page = <LibraryPage />;
   else page = (
     <ChatPage

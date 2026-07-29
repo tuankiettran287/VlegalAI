@@ -16,10 +16,11 @@ param(
     [string]$Neo4jUser = $env:NEO4J_USER,
     [string]$Neo4jDatabase = $env:NEO4J_DATABASE,
     [string]$ExternalUrl = "",
-    [ValidateSet("all", "migrate", "reindex", "web", "api", "worker", "beat")]
+    [ValidateSet("all", "migrate", "reindex", "article", "web", "api", "worker", "beat")]
     [string]$Component = "all",
     [switch]$ExecuteMigrate,
     [switch]$ExecuteReindex,
+    [switch]$ExecuteArticlePublish,
     [switch]$ExecuteJobs
 )
 
@@ -99,6 +100,7 @@ $workerPool = "vlegal-worker"
 $beatPool = "vlegal-beat"
 $migrateJob = "vlegal-migrate"
 $reindexJob = "vlegal-reindex"
+$articleJob = "vlegal-publish-article"
 
 $apiSecrets = @(
     "DATABASE_URL=vlegal-database-url:latest",
@@ -242,6 +244,42 @@ function Deploy-Reindex {
     }
 }
 
+function Deploy-ArticlePublisher {
+    $envVars = @(
+        "APP_ENV=production",
+        "LOG_LEVEL=INFO",
+        "GEMINI_USE_ADC=true",
+        "GEMINI_PROJECT_ID=$ProjectId",
+        "GEMINI_LOCATION=global",
+        "GEMINI_MODEL=gemini-2.5-flash",
+        "GEMINI_MAX_CONCURRENT_GENERATIONS=2",
+        "GEMINI_DATA_POLICY=redact",
+        "DATABASE_POOL_SIZE=2",
+        "DATABASE_MAX_OVERFLOW=2"
+    ) -join ","
+
+    $arguments = @(
+        "run", "jobs", "deploy", $articleJob,
+        "--project=$ProjectId", "--region=$Region",
+        "--image=$appImage",
+        "--service-account=$RunServiceAccount",
+        "--command=python",
+        "--args=scripts/publish_daily_article.py",
+        "--tasks=1", "--parallelism=1", "--max-retries=1", "--task-timeout=15m",
+        "--cpu=2", "--memory=2Gi",
+        "--set-env-vars=$envVars",
+        "--set-secrets=DATABASE_URL=vlegal-database-url:latest,GEMINI_API_KEY=vlegal-gemini-api-key:latest,TAVILY_API_KEY=vlegal-tavily-key:latest",
+        "--quiet"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($CloudSqlInstance)) {
+        $arguments += "--set-cloudsql-instances=$CloudSqlInstance"
+    }
+    Invoke-Gcloud $arguments
+    if ($ExecuteJobs -or $ExecuteArticlePublish) {
+        Invoke-Gcloud @("run", "jobs", "execute", $articleJob, "--project=$ProjectId", "--region=$Region", "--wait")
+    }
+}
+
 function Deploy-Web {
     $envVars = @(
         "APP_ENV=production",
@@ -371,6 +409,7 @@ function Deploy-Beat {
 switch ($Component) {
     "migrate" { Deploy-Migrate }
     "reindex" { Deploy-Reindex }
+    "article" { Deploy-ArticlePublisher }
     { $_ -in @("web", "api") } {
         Deploy-Web
         $resolvedExternalUrl = if ($ExternalUrl) { $ExternalUrl } else { Get-ServiceUrl $webService }
@@ -382,6 +421,7 @@ switch ($Component) {
     "all" {
         Deploy-Migrate
         Deploy-Reindex
+        Deploy-ArticlePublisher
         Deploy-Web
         $url = Get-ServiceUrl $webService
         Set-WebExternalUrl $url
