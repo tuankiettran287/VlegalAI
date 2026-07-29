@@ -228,7 +228,7 @@ function Deploy-Api {
         "--execution-environment=gen2", "--service-account=$RunServiceAccount", "--port=8080",
         "--cpu=2", "--memory=4Gi", "--concurrency=16",
         "--min=0", "--max=5",
-        "--min-instances=default", "--max-instances=default",
+        "--min-instances=default", "--max-instances=100",
         "--timeout=3600",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
         "--allow-unauthenticated",
@@ -242,6 +242,8 @@ function Set-ApiExternalUrl {
     Invoke-Gcloud @(
         "run", "services", "update", $apiService,
         "--project=$ProjectId", "--region=$Region",
+        "--min=0", "--max=5",
+        "--min-instances=default", "--max-instances=100",
         "--update-env-vars=PUBLIC_URL=$Url,FRONTEND_URL=$Url,CORS_ORIGINS=$Url,OIDC_REDIRECT_URI=$Url/api/auth/google/callback,COOKIE_SECURE=true",
         "--quiet"
     )
@@ -256,7 +258,7 @@ function Deploy-Frontend {
         "--execution-environment=gen2", "--service-account=$RunServiceAccount", "--port=8080",
         "--cpu=1", "--memory=512Mi", "--concurrency=80",
         "--min=0", "--max=5",
-        "--min-instances=default", "--max-instances=default",
+        "--min-instances=default", "--max-instances=100",
         "--allow-unauthenticated", "--set-env-vars=API_UPSTREAM=$apiUrl",
         "--quiet"
     )
