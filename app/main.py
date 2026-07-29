@@ -26,9 +26,16 @@ from app.services.tavily import TavilyError, TavilyService
 
 
 settings = get_settings()
-logging.getLogger("app").setLevel(
-    getattr(logging, settings.log_level.upper(), logging.INFO)
+app_log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
+# Gunicorn captures stdout/stderr but does not install a root Python logging
+# handler for application loggers. Without this fallback, WARNING/ERROR
+# records reach Python's last-resort handler while INFO telemetry is silently
+# dropped, which makes production latency measurements disappear.
+logging.basicConfig(
+    level=app_log_level,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+logging.getLogger("app").setLevel(app_log_level)
 logger = logging.getLogger(__name__)
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
