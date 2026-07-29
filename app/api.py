@@ -89,6 +89,7 @@ from app.services.freshness import (
     FreshnessUnavailable,
     LegalFreshnessService,
 )
+from app.services.greetings import greeting_response
 from app.services.guest_limit import GuestRateLimitExceeded, GuestRateLimitUnavailable, GuestRateLimiter
 from app.services.legal_catalog import (
     CATALOG_TYPES,
@@ -1434,9 +1435,19 @@ async def chat(
     authenticated_user_id = user.id if user else None
     cache_scope = f"user:{authenticated_user_id}" if authenticated_user_id else ""
     summary_context = ""
+    preferred_name = (
+        str(getattr(user, "display_name", "") or "").strip()
+        if user is not None
+        else "bạn"
+    ) or "bạn"
+    greeting_answer = greeting_response(payload.message, preferred_name)
     # Client-provided history is only for an anonymous, temporary browser
     # session. Authenticated history always comes from PostgreSQL below.
-    history_turns = [] if user else [(turn.role, turn.content) for turn in payload.history]
+    history_turns = (
+        []
+        if user or greeting_answer is not None
+        else [(turn.role, turn.content) for turn in payload.history]
+    )
     if not user:
         guest_subject = _guest_rate_subject(request, response, settings)
         cache_scope = f"guest:{guest_subject}"
@@ -1450,8 +1461,13 @@ async def chat(
         if payload.conversation_id:
             conversation = await _owned_conversation(db, payload.conversation_id, user)
             conversation_id = conversation.id
-            summary_context = await memory.get_summary(db, conversation_id)
-            history_turns = await _load_postgres_chat_history(db, conversation_id, settings)
+            if greeting_answer is None:
+                summary_context = await memory.get_summary(db, conversation_id)
+                history_turns = await _load_postgres_chat_history(
+                    db,
+                    conversation_id,
+                    settings,
+                )
         # Authentication and history reads must not retain a PostgreSQL
         # transaction while cache/search/Gemini network calls are in flight.
         await db.rollback()
@@ -1465,17 +1481,25 @@ async def chat(
     cache_lookup: CacheLookup | None = None
     cache_hit = False
     cache_similarity: float | None = None
-    cache_mode = "miss"
+    cache_mode = "greeting" if greeting_answer is not None else "miss"
     cached_draft = ""
-    answer = ""
+    answer = greeting_answer or ""
     sources: list[dict[str, Any]] = []
-    verification: dict[str, Any] = {}
+    verification: dict[str, Any] = (
+        VerificationReport().model_dump(mode="json")
+        if greeting_answer is not None
+        else {}
+    )
     generation_metrics: dict[str, int | bool] = {
         "initial_generation_ms": 0,
         "citation_repair_attempted": False,
         "citation_repair_ms": 0,
     }
-    catalog_request = parse_catalog_request(payload.message)
+    catalog_request = (
+        None
+        if greeting_answer is not None
+        else parse_catalog_request(payload.message)
+    )
     if catalog_request is not None:
         catalog_started = time.monotonic()
         try:
@@ -1786,11 +1810,12 @@ async def chat(
         await db.commit()
         await db.refresh(assistant_message)
         message_id = assistant_message.id
-        background_tasks.add_task(
-            _refresh_conversation_memory_safely,
-            memory,
-            conversation_id,
-        )
+        if greeting_answer is None:
+            background_tasks.add_task(
+                _refresh_conversation_memory_safely,
+                memory,
+                conversation_id,
+            )
     persistence_ms += round(
         (time.monotonic() - persistence_started) * 1000
     )
@@ -1799,7 +1824,8 @@ async def chat(
         "Legal chat completed cache_mode=%s cache_lookup_ms=%d retrieval_ms=%d "
         "generation_ms=%d initial_generation_ms=%d "
         "citation_repair_attempted=%s citation_repair_ms=%d "
-        "persistence_ms=%d total_ms=%d source_count=%d answer_chars=%d",
+        "persistence_ms=%d total_ms=%d source_count=%d answer_chars=%d "
+        "greeting=%s",
         cache_mode,
         cache_lookup_ms,
         retrieval_ms,
@@ -1811,6 +1837,7 @@ async def chat(
         total_ms,
         len(sources),
         len(answer),
+        str(greeting_answer is not None).lower(),
     )
     response.headers["Server-Timing"] = (
         f"cache;dur={cache_lookup_ms}, "

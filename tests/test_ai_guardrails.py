@@ -564,6 +564,60 @@ def test_explicit_vlegal_catalogue_question_uses_direct_sql_route(
     assert "12 nghị định" in result.answer
 
 
+def test_standalone_greeting_bypasses_cache_retrieval_and_gemini() -> None:
+    class _NeverRetrieval:
+        async def retrieve(self, _: str) -> list[dict]:
+            raise AssertionError("A greeting must not run legal retrieval")
+
+    class _NeverAI:
+        async def complete(self, *_: object, **__: object) -> str:
+            raise AssertionError("A greeting must not call Gemini")
+
+    class _Cache:
+        @staticmethod
+        def eligible(*_: object, **__: object) -> bool:
+            raise AssertionError("A greeting must not query answer cache")
+
+    class _Limiter:
+        async def check(self, _: str) -> None:
+            return None
+
+    settings = Settings(
+        _env_file=None,
+        session_secret="greeting-test-key-at-least-32-bytes",
+        require_freshness_check=False,
+    )
+    request = SimpleNamespace(
+        cookies={},
+        headers={},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    result = asyncio.run(
+        chat(
+            ChatRequest(message="xin chào"),
+            request,
+            Response(),
+            BackgroundTasks(),
+            SimpleNamespace(),
+            None,
+            settings,
+            _NeverRetrieval(),
+            SimpleNamespace(),
+            _NeverAI(),
+            _Limiter(),
+            SimpleNamespace(),
+            _Cache(),
+        )
+    )
+
+    assert result.temporary
+    assert result.cache_mode == "greeting"
+    assert result.sources == []
+    assert result.answer.startswith("Chào bạn!")
+    assert result.verification.checked is False
+
+
 def test_chat_generation_deadline_returns_grounded_fallback() -> None:
     source = {
         "source_id": "S1",

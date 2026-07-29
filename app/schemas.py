@@ -154,6 +154,7 @@ class ChatResponse(BaseModel):
         "semantic_draft",
         "scope_clarification",
         "catalog",
+        "greeting",
     ] = "miss"
 
 

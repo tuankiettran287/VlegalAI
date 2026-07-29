@@ -197,7 +197,8 @@ export type ChatResponse = {
     | "exact"
     | "semantic_draft"
     | "scope_clarification"
-    | "catalog";
+    | "catalog"
+    | "greeting";
 };
 
 export function askLegalQuestion(
