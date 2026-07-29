@@ -33,7 +33,8 @@ MAX_FALLBACK_SOURCES = 6
 logger = logging.getLogger(__name__)
 EDITORIAL_LEAD_RE = re.compile(
     r"(?im)^\s*(?:dưới đây|sau đây) là "
-    r"(?:bản )?(?:tổng hợp|phân tích|tóm tắt|các nội dung|những nội dung)"
+    r"(?:bản )?(?:tổng hợp|phân tích|tóm tắt|nghiên cứu|"
+    r"các nội dung|những nội dung)"
     r"[^.!?]*[.!?]\s*"
 )
 WEB_CITATION_RE = re.compile(r"\[(W\d+)\]", re.IGNORECASE)
@@ -94,7 +95,10 @@ def _inherit_followup_citations(value: str) -> str:
             ).strip()
             if (
                 stripped
-                and FOLLOWUP_SENTENCE_RE.match(stripped)
+                and (
+                    FOLLOWUP_SENTENCE_RE.match(stripped)
+                    or unit.rstrip().endswith(";")
+                )
                 and not WEB_CITATION_RE.search(stripped)
             ):
                 punctuation = ""

@@ -82,24 +82,25 @@ def test_plain_source_text_removes_markdown_links_and_images() -> None:
 
 def test_article_summary_removes_only_uncited_editorial_lead() -> None:
     summary = (
-        "Dưới đây là tổng hợp các cập nhật pháp luật mới nhất.\n\n"
+        "Dưới đây là bản nghiên cứu các cập nhật pháp luật mới nhất.\n\n"
         "Quy định mới có nội dung được nguồn xác nhận [W1]."
     )
 
     result = _strip_uncited_editorial_leads(summary)
 
-    assert "Dưới đây là tổng hợp" not in result
+    assert "Dưới đây là bản nghiên cứu" not in result
     assert result == "Quy định mới có nội dung được nguồn xác nhận [W1]."
 
 
 def test_article_summary_inherits_citations_for_source_followup_only() -> None:
     summary = (
-        "Nguồn công khai đề cập đến quy định mới [W1]. "
+        "Quyền được trả lương; quyền làm việc an toàn [W1]. "
         "Tuy nhiên, nguồn này không nêu ngày có hiệu lực cụ thể."
     )
 
     result = _validated_article_summary(summary, ["W1"])
 
+    assert result.startswith("Quyền được trả lương [W1];")
     assert result.endswith("cụ thể [W1].")
     assert _inherit_followup_citations(
         "Luận điểm thứ nhất có nguồn [W1]. Luận điểm thứ hai không có nguồn."

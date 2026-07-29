@@ -28,6 +28,7 @@ settings = get_settings()
 ARTICLE_TIMEZONE = ZoneInfo("Asia/Bangkok")
 ARTICLE_PUBLISH_HOURS = (7, 12, 15, 18, 22)
 ARTICLE_BATCH_SIZE = 10
+ARTICLE_BATCH_DELAY_SECONDS = 30.0
 broker_url, result_backend = postgres_celery_urls(settings.database_url)
 celery_app = Celery(
     "vlegal",
@@ -309,7 +310,7 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
         tavily = TavilyService(settings)
         google_search = GoogleSearchService(settings, ai)
         research = ArticleResearchService(tavily, google_search, ai)
-        for item in pending:
+        for pending_index, item in enumerate(pending):
             topic = str(item["topic"])
             slug = str(item["slug"])
             try:
@@ -405,6 +406,12 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     topic,
                     type(exc).__name__,
                 )
+            finally:
+                if (
+                    pending_index + 1 < len(pending)
+                    and ARTICLE_BATCH_DELAY_SECONDS > 0
+                ):
+                    await asyncio.sleep(ARTICLE_BATCH_DELAY_SECONDS)
     finally:
         await ai.close()
 

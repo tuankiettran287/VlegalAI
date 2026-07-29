@@ -149,6 +149,7 @@ def test_scheduled_article_batch_publishes_ten_unique_items(monkeypatch) -> None
 
     monkeypatch.setattr(worker, "SessionFactory", _Session)
     monkeypatch.setattr(worker, "ARTICLE_BATCH_SIZE", 10)
+    monkeypatch.setattr(worker, "ARTICLE_BATCH_DELAY_SECONDS", 0)
     monkeypatch.setattr(
         worker,
         "settings",
