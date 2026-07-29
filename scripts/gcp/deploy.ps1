@@ -227,7 +227,9 @@ function Deploy-Api {
         "--image=$backendImage",
         "--execution-environment=gen2", "--service-account=$RunServiceAccount", "--port=8080",
         "--cpu=2", "--memory=4Gi", "--concurrency=16",
-        "--min=0", "--max=5", "--timeout=3600",
+        "--min=0", "--max=5",
+        "--min-instances=default", "--max-instances=default",
+        "--timeout=3600",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
         "--allow-unauthenticated",
         "--set-env-vars=$envVars", "--set-secrets=$apiSecrets",
@@ -252,7 +254,9 @@ function Deploy-Frontend {
         "--project=$ProjectId", "--region=$Region",
         "--image=$frontendImage",
         "--execution-environment=gen2", "--service-account=$RunServiceAccount", "--port=8080",
-        "--cpu=1", "--memory=512Mi", "--concurrency=80", "--min=0", "--max=5",
+        "--cpu=1", "--memory=512Mi", "--concurrency=80",
+        "--min=0", "--max=5",
+        "--min-instances=default", "--max-instances=default",
         "--allow-unauthenticated", "--set-env-vars=API_UPSTREAM=$apiUrl",
         "--quiet"
     )
