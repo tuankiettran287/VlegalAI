@@ -1493,7 +1493,7 @@ async def chat(
         )
         cache_mode = "catalog"
         verification = {
-            "checked": True,
+            "checked": False,
             "all_current": False,
             "items": [],
             "note": "indexed_catalog_direct_sql",

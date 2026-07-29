@@ -188,18 +188,27 @@ function ErrorNotice({ error, onClose }: { error: string; onClose?: () => void }
 
 function VerificationBadge({ report }: { report?: VerificationReport | null }) {
   if (!report) return null;
-  const current = report.checked && report.all_current;
+  const catalogSnapshot = report.note === "indexed_catalog_direct_sql";
+  const current = catalogSnapshot || (report.checked && report.all_current);
   const items = Array.isArray(report.items) ? report.items : [];
+  const label = catalogSnapshot
+    ? "Thống kê trực tiếp từ kho VLegal"
+    : current
+      ? "Đã kiểm tra hiệu lực"
+      : "Có văn bản cần lưu ý";
+  const note = catalogSnapshot
+    ? "Số liệu được truy vấn trực tiếp từ catalog của corpus VLegal đã index."
+    : report.note;
   return (
     <details className={`verification ${current ? "verified" : "attention"}`}>
       <summary>
         {current ? <CheckCircle2 size={15} /> : <RefreshCw size={15} />}
-        <span>{current ? "Đã kiểm tra hiệu lực" : "Có văn bản cần lưu ý"}</span>
+        <span>{label}</span>
         {report.checked_at && <time>{formatDate(report.checked_at)}</time>}
         <ChevronDown size={14} />
       </summary>
       <div className="verification-body">
-        <p>{report.note}</p>
+        <p>{note}</p>
         {items.map((item) => (
           <div className="law-status-row" key={`${item.code}-${item.checked_at}`}>
             <div>
