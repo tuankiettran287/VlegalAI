@@ -366,6 +366,34 @@ def test_article_research_uses_tavily_and_google_search() -> None:
     assert result["google_search_entry_point"] == "<div>Google Search</div>"
 
 
+def test_article_research_caps_evidence_sent_to_generation() -> None:
+    class _ManyTavily(_FakeTavily):
+        async def search(self, *_: object, **__: object) -> list[dict]:
+            return [
+                {
+                    "url": f"https://example.com/source-{index}",
+                    "title": f"Source {index}",
+                    "raw_content": f"SOURCE_MARKER_{index:02d} " + ("evidence " * 800),
+                    "score": 20 - index,
+                }
+                for index in range(1, 13)
+            ]
+
+    class _EmptyGoogle:
+        async def search(self, *_: object, **__: object) -> dict:
+            return {"results": [], "queries": [], "search_entry_point": None}
+
+    ai = _FakeCompletionAI()
+    service = ArticleResearchService(_ManyTavily(), _EmptyGoogle(), ai)
+
+    result = asyncio.run(service.search("employment law"))
+
+    assert len(result["sources"]) == 12
+    assert "SOURCE_MARKER_08" in ai.user_prompt
+    assert "SOURCE_MARKER_09" not in ai.user_prompt
+    assert len(ai.user_prompt) < 40_000
+
+
 def test_article_research_attributes_tavily_extraction_and_caps_google_html() -> None:
     class _ExtractingTavily(_FakeTavily):
         async def search(self, *_: object, **__: object) -> list[dict]:
@@ -404,7 +432,7 @@ def test_article_research_attributes_tavily_extraction_and_caps_google_html() ->
     assert len(result["google_search_entry_point"]) == 50_000
 
 
-def test_article_research_rejects_unknown_web_citation() -> None:
+def test_article_research_replaces_unknown_web_citation_with_source_digest() -> None:
     ai = _FakeCompletionAI()
 
     async def invalid_complete(*_: object, **__: object) -> str:
@@ -413,8 +441,12 @@ def test_article_research_rejects_unknown_web_citation() -> None:
     ai.complete = invalid_complete
     service = ArticleResearchService(_FakeTavily(), _FakeGoogleSearch(), ai)
 
-    with pytest.raises(GeminiError, match="không thuộc"):
-        asyncio.run(service.search("hợp đồng điện tử"))
+    result = asyncio.run(service.search("hợp đồng điện tử"))
+
+    assert "[W99]" not in result["summary"]
+    assert "[W1]" in result["summary"]
+    assert "[W2]" in result["summary"]
+    assert any("tóm lược trực tiếp" in warning for warning in result["search_warnings"])
 
 
 def test_article_search_redacts_identifiers_before_both_search_providers() -> None:
@@ -544,7 +576,7 @@ def test_article_search_filters_unsafe_urls_and_empty_content() -> None:
     assert result["google_search_entry_point"] is None
 
 
-def test_article_summary_requires_citation_for_each_claim() -> None:
+def test_article_summary_falls_back_when_claim_citations_cannot_be_repaired() -> None:
     ai = _FakeCompletionAI()
 
     async def incomplete_citations(*_: object, **__: object) -> str:
@@ -556,8 +588,55 @@ def test_article_summary_requires_citation_for_each_claim() -> None:
     ai.complete = incomplete_citations
     service = ArticleResearchService(_FakeTavily(), _FakeGoogleSearch(), ai)
 
-    with pytest.raises(GeminiError):
-        asyncio.run(service.search("electronic contracts"))
+    result = asyncio.run(service.search("electronic contracts"))
+
+    assert "Kết quả tìm kiếm có dẫn nguồn" in result["summary"]
+    assert "[W1]" in result["summary"]
+    assert "[W2]" in result["summary"]
+    assert "has no citation" not in result["summary"]
+
+
+def test_article_summary_repairs_claim_citations_before_falling_back() -> None:
+    ai = _FakeCompletionAI()
+    completions = 0
+
+    async def repairable_complete(*_: object, **__: object) -> str:
+        nonlocal completions
+        completions += 1
+        if completions == 1:
+            return (
+                "The first factual statement is supported [W1]. "
+                "The second factual statement is missing a citation."
+            )
+        return (
+            "The first factual statement is supported [W1]. "
+            "The second factual statement is supported [W2]."
+        )
+
+    ai.complete = repairable_complete
+    service = ArticleResearchService(_FakeTavily(), _FakeGoogleSearch(), ai)
+
+    result = asyncio.run(service.search("electronic contracts"))
+
+    assert completions == 2
+    assert result["summary"].endswith("[W2].")
+    assert not any("tóm lược trực tiếp" in warning for warning in result["search_warnings"])
+
+
+def test_article_summary_uses_source_digest_when_generation_is_unavailable() -> None:
+    ai = _FakeCompletionAI()
+
+    async def unavailable_complete(*_: object, **__: object) -> str:
+        raise GeminiError("provider unavailable")
+
+    ai.complete = unavailable_complete
+    service = ArticleResearchService(_FakeTavily(), _FakeGoogleSearch(), ai)
+
+    result = asyncio.run(service.search("employment law"))
+
+    assert "Kết quả tìm kiếm có dẫn nguồn" in result["summary"]
+    assert "[W1]" in result["summary"]
+    assert any("AI tạm thời không khả dụng" in warning for warning in result["search_warnings"])
 
 
 class _FakeFreshnessTavily:
