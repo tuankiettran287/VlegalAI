@@ -80,6 +80,7 @@ def test_chat_answer_repairs_missing_claim_citations_once() -> None:
             }
 
     ai = _AI()
+    metrics: dict[str, int | bool] = {}
     answer = asyncio.run(
         _complete_with_citation_repair(
             ai,
@@ -87,12 +88,16 @@ def test_chat_answer_repairs_missing_claim_citations_once() -> None:
             "prompt",
             allowed_ids=["S1"],
             max_tokens=200,
+            metrics=metrics,
         )
     )
 
     assert answer == "- Luật này còn hiệu lực [S1]."
     assert len(ai.prompts) == 2
     assert "DRAFT_WITH_INVALID_CITATIONS" in ai.prompts[1]
+    assert metrics["citation_repair_attempted"] is True
+    assert isinstance(metrics["initial_generation_ms"], int)
+    assert isinstance(metrics["citation_repair_ms"], int)
 
 
 def test_chat_answer_closes_allowed_citation_without_second_model_call() -> None:
@@ -110,6 +115,7 @@ def test_chat_answer_closes_allowed_citation_without_second_model_call() -> None
             raise AssertionError("A punctuation-only citation fix must stay local")
 
     ai = _AI()
+    metrics: dict[str, int | bool] = {}
     answer = asyncio.run(
         _complete_with_citation_repair(
             ai,
@@ -117,12 +123,16 @@ def test_chat_answer_closes_allowed_citation_without_second_model_call() -> None
             "prompt",
             allowed_ids=["S1"],
             max_tokens=200,
+            metrics=metrics,
         )
     )
 
     assert answer == "Quy định này đang có hiệu lực [S1]."
     assert ai.complete_calls == 1
     assert ai.repair_calls == 0
+    assert metrics["citation_repair_attempted"] is False
+    assert isinstance(metrics["initial_generation_ms"], int)
+    assert metrics["citation_repair_ms"] == 0
 
 
 def test_citation_normalization_never_admits_an_unknown_source() -> None:

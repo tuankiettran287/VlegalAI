@@ -839,14 +839,28 @@ async def _complete_with_citation_repair(
     max_tokens: int,
     temperature: float = 0.1,
     thinking_level: str | None = None,
+    metrics: dict[str, int | bool] | None = None,
 ) -> str:
-    answer = await ai.complete(
-        system,
-        prompt,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        thinking_level=thinking_level,
-    )
+    if metrics is not None:
+        metrics.update(
+            initial_generation_ms=0,
+            citation_repair_attempted=False,
+            citation_repair_ms=0,
+        )
+    initial_generation_started = time.monotonic()
+    try:
+        answer = await ai.complete(
+            system,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking_level=thinking_level,
+        )
+    finally:
+        if metrics is not None:
+            metrics["initial_generation_ms"] = round(
+                (time.monotonic() - initial_generation_started) * 1000
+            )
     normalized_answer = _normalize_allowed_citation_syntax(
         answer,
         allowed_ids,
@@ -867,6 +881,8 @@ async def _complete_with_citation_repair(
             _validate_professional_legal_opening(answer)
         return answer
     except GeminiError as exc:
+        if metrics is not None:
+            metrics["citation_repair_attempted"] = True
         logger.warning(
             "Initial legal answer validation failed reason=%s",
             " ".join(str(exc).split())[:500],
@@ -912,13 +928,20 @@ async def _complete_with_citation_repair(
                 }
             },
         }
-        structured = await ai.complete_json(
-            system,
-            repair_prompt,
-            schema=repair_schema,
-            max_tokens=max_tokens,
-            temperature=0,
-        )
+        repair_started = time.monotonic()
+        try:
+            structured = await ai.complete_json(
+                system,
+                repair_prompt,
+                schema=repair_schema,
+                max_tokens=max_tokens,
+                temperature=0,
+            )
+        finally:
+            if metrics is not None:
+                metrics["citation_repair_ms"] = round(
+                    (time.monotonic() - repair_started) * 1000
+                )
         validate_citations(structured, allowed_ids)
         repaired_units: list[str] = []
         for statement in structured["statements"]:
@@ -1275,6 +1298,11 @@ async def chat(
     answer = ""
     sources: list[dict[str, Any]] = []
     verification: dict[str, Any] = {}
+    generation_metrics: dict[str, int | bool] = {
+        "initial_generation_ms": 0,
+        "citation_repair_attempted": False,
+        "citation_repair_ms": 0,
+    }
     cache_eligible = answer_cache.eligible(
         payload.message,
         has_conversation_context=bool(history_turns or summary_context),
@@ -1443,11 +1471,12 @@ async def chat(
                 allowed_ids=[source["source_id"] for source in model_sources],
                 sources=model_sources,
                 max_tokens=max_tokens,
-                thinking_level=(
-                    "minimal"
-                    if answer_plan.get("mode") == "single_hop"
-                    else None
-                ),
+                    thinking_level=(
+                        "minimal"
+                        if answer_plan.get("mode") == "single_hop"
+                        else None
+                    ),
+                    metrics=generation_metrics,
                 ),
                 timeout=generation_timeout_seconds,
             )
@@ -1560,12 +1589,16 @@ async def chat(
     total_ms = round((time.monotonic() - request_started) * 1000)
     logger.info(
         "Legal chat completed cache_mode=%s cache_lookup_ms=%d retrieval_ms=%d "
-        "generation_ms=%d persistence_ms=%d total_ms=%d source_count=%d "
-        "answer_chars=%d",
+        "generation_ms=%d initial_generation_ms=%d "
+        "citation_repair_attempted=%s citation_repair_ms=%d "
+        "persistence_ms=%d total_ms=%d source_count=%d answer_chars=%d",
         cache_mode,
         cache_lookup_ms,
         retrieval_ms,
         generation_ms,
+        int(generation_metrics["initial_generation_ms"]),
+        str(generation_metrics["citation_repair_attempted"]).lower(),
+        int(generation_metrics["citation_repair_ms"]),
         persistence_ms,
         total_ms,
         len(sources),
@@ -1575,6 +1608,8 @@ async def chat(
         f"cache;dur={cache_lookup_ms}, "
         f"retrieval;dur={retrieval_ms}, "
         f"generation;dur={generation_ms}, "
+        f"model_initial;dur={int(generation_metrics['initial_generation_ms'])}, "
+        f"citation_repair;dur={int(generation_metrics['citation_repair_ms'])}, "
         f"persistence;dur={persistence_ms}, "
         f"total;dur={total_ms}"
     )
