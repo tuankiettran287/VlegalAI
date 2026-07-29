@@ -3720,7 +3720,7 @@ summary:focus-visible {
   }
 }
 
-/* Keep one composer mounted and move it on the compositor thread. */
+/* Keep the empty state in-flow and dock the conversation composer separately. */
 .chat-main,
 .chat-main.empty-chat,
 .chat-main.has-conversation {
@@ -3766,13 +3766,6 @@ summary:focus-visible {
     visibility 0s linear 480ms;
 }
 
-.composer-home-slot {
-  width: 100%;
-  min-height: 142px;
-  flex: 0 0 auto;
-  pointer-events: none;
-}
-
 .messages {
   align-self: start;
   padding-bottom: 170px;
@@ -3796,8 +3789,7 @@ summary:focus-visible {
     visibility 0s linear 260ms;
 }
 
-.composer,
-.composer-home {
+.composer:not(.composer-home) {
   position: absolute;
   right: auto;
   bottom: 0;
@@ -3814,9 +3806,13 @@ summary:focus-visible {
 }
 
 .composer-home {
-  width: var(--composer-home-width, min(732px, calc(100% - 48px)));
+  position: static;
+  width: min(732px, calc(100% - 48px));
   padding: 0;
-  transform: translate3d(-50%, var(--composer-home-offset, 0px), 0);
+  margin: 0 auto;
+  transform: none;
+  transition: none;
+  will-change: auto;
 }
 
 .input-wrap textarea,
@@ -3927,7 +3923,7 @@ summary:focus-visible {
 
 @media (max-width: 760px) {
   .composer-home {
-    width: var(--composer-home-width, calc(100% - 28px));
+    width: calc(100% - 28px);
   }
 
   .messages {
