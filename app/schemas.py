@@ -111,7 +111,12 @@ class ChatResponse(BaseModel):
     temporary: bool = False
     cache_hit: bool = False
     cache_similarity: float | None = None
-    cache_mode: Literal["miss", "exact", "semantic_draft"] = "miss"
+    cache_mode: Literal[
+        "miss",
+        "exact",
+        "semantic_draft",
+        "scope_clarification",
+    ] = "miss"
 
 
 class DraftContractRequest(BaseModel):

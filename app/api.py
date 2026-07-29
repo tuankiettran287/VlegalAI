@@ -737,7 +737,11 @@ def _grounded_source_fallback(
         if not re.fullmatch(r"S\d+", source_id) or not text:
             continue
         text = re.sub(r"\[(?:S\d+)\]", "", text, flags=re.IGNORECASE).strip()
-        text = re.sub(r"[.!?]+(?:\s+|$)", ", ", text).strip(" ,")
+        # The citation validator treats semicolons as claim boundaries. Keep
+        # each deterministic excerpt as one claim so the source ID appended
+        # below covers the entire excerpt instead of leaving an intermediate
+        # semicolon-delimited clause uncited.
+        text = re.sub(r"[.!?;]+(?:\s+|$)", ", ", text).strip(" ,")
         if len(text) > excerpt_chars:
             shortened = text[:excerpt_chars].rsplit(" ", 1)[0].rstrip(" ,;:")
             text = f"{shortened}…"
@@ -748,6 +752,30 @@ def _grounded_source_fallback(
             f"nguồn pháp lý truy hồi ghi nhận: {text} [{source_id}]."
         )
     return "\n".join(statements)
+
+
+_DOCUMENT_COUNT_QUERY_RE = re.compile(
+    r"\b(?:co\s+)?bao\s+nhieu\s+"
+    r"(?:nghi\s+dinh|thong\s+tu|bo\s+luat|luat|van\s+ban)\b"
+    r"|\btong\s+so\s+"
+    r"(?:nghi\s+dinh|thong\s+tu|bo\s+luat|luat|van\s+ban)\b",
+    re.IGNORECASE,
+)
+
+
+def _document_count_scope_clarification(query: str) -> str:
+    """Avoid presenting top-k retrieval as an exhaustive legal catalogue."""
+
+    normalized = _normalized_legal_reference(query)
+    if not _DOCUMENT_COUNT_QUERY_RE.search(normalized):
+        return ""
+    return (
+        "Mình chưa thể đưa ra một con số chính xác cho toàn bộ hệ thống văn bản "
+        "chỉ từ các kết quả truy hồi, vì phạm vi có thể gồm văn bản còn hiệu lực, "
+        "hết hiệu lực, sửa đổi và văn bản chỉ liên quan gián tiếp. Hãy chọn rõ một "
+        "phạm vi: “thống kê các nghị định hiện có trong kho VLegal” hoặc “thống kê "
+        "các nghị định đang còn hiệu lực theo cơ sở dữ liệu pháp luật chính thức”."
+    )
 
 
 def _legal_answer_generation_policy(
@@ -1332,10 +1360,20 @@ async def chat(
         "citation_repair_attempted": False,
         "citation_repair_ms": 0,
     }
+    scope_clarification = _document_count_scope_clarification(payload.message)
+    if scope_clarification:
+        answer = scope_clarification
+        cache_mode = "scope_clarification"
+        verification = {
+            "checked": False,
+            "all_current": False,
+            "items": [],
+            "note": "document_count_scope_required",
+        }
     cache_eligible = answer_cache.eligible(
         payload.message,
         has_conversation_context=bool(history_turns or summary_context),
-    )
+    ) and not scope_clarification
     if cache_eligible:
         # Only context-free public-law questions pass the privacy gate, so
         # their exact answers can be reused across authenticated and guest
@@ -1444,7 +1482,7 @@ async def chat(
             except Exception:
                 logger.exception("Cannot invalidate semantic answer cache entry %s", cached.id)
 
-    if not cache_hit:
+    if not cache_hit and not answer:
         if not sources:
             retrieval_started = time.monotonic()
             sources, verification = await _legal_sources(

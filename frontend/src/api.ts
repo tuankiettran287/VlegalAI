@@ -192,7 +192,7 @@ export type ChatResponse = {
   temporary: boolean;
   cache_hit: boolean;
   cache_similarity: number | null;
-  cache_mode: "miss" | "exact" | "semantic_draft";
+  cache_mode: "miss" | "exact" | "semantic_draft" | "scope_clarification";
 };
 
 export function askLegalQuestion(

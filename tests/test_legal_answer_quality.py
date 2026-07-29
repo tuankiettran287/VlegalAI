@@ -163,7 +163,11 @@ def test_retrieval_runs_each_compound_facet_and_merges_results() -> None:
 
 def test_general_wage_query_prefers_newest_equivalent_legal_version() -> None:
     class _Store:
-        def retrieve(self, _: str, __: int) -> list[dict]:
+        def __init__(self) -> None:
+            self.limit = 0
+
+        def retrieve(self, _: str, limit: int) -> list[dict]:
+            self.limit = limit
             return [
                 {
                     **_source(
@@ -191,8 +195,9 @@ def test_general_wage_query_prefers_newest_equivalent_legal_version() -> None:
                 },
             ]
 
+    store = _Store()
     service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
-    service._store = _Store()
+    service._store = store
 
     rows = asyncio.run(
         service.retrieve("Mức lương cơ bản của người lao động là bao nhiêu?")
@@ -200,6 +205,7 @@ def test_general_wage_query_prefers_newest_equivalent_legal_version() -> None:
 
     assert {row["node_id"] for row in rows} == {"node-new"}
     assert "5.310.000" in rows[0]["text"]
+    assert store.limit == 24
     assert any(
         "Điều 3 Điều 4" in query
         for query in plan_retrieval_queries(

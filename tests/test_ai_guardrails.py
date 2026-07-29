@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from app.api import (
     _cache_verification_is_reusable,
     _complete_with_citation_repair,
+    _document_count_scope_clarification,
     _grounded_source_fallback,
     _legal_answer_generation_policy,
     _legal_sources,
@@ -400,6 +401,100 @@ def test_grounded_fallback_is_cited_and_passes_claim_validation() -> None:
         ["S1"],
         require_claim_coverage=True,
     ) == {"S1"}
+
+
+def test_grounded_fallback_normalizes_semicolon_claim_boundaries() -> None:
+    sources = [
+        {
+            "source_id": "S1",
+            "title": "Điều 3 Nghị định thử nghiệm",
+            "citation": "Nghị định (01/2026/NĐ-CP) > Điều 3",
+            "text": (
+                "Vùng I áp dụng mức thứ nhất; Vùng II áp dụng mức thứ hai; "
+                "Vùng III áp dụng mức thứ ba."
+            ),
+        }
+    ]
+
+    answer = _grounded_source_fallback(sources)
+
+    assert ";" not in answer
+    assert validate_citations(
+        answer,
+        ["S1"],
+        require_claim_coverage=True,
+    ) == {"S1"}
+
+
+def test_document_count_query_requires_an_explicit_catalogue_scope() -> None:
+    clarification = _document_count_scope_clarification(
+        "Có bao nhiêu nghị định về luật lao động cho đến hiện nay?"
+    )
+
+    assert "kho VLegal" in clarification
+    assert "cơ sở dữ liệu pháp luật chính thức" in clarification
+    assert _document_count_scope_clarification(
+        "Mức lương tối thiểu hiện nay là bao nhiêu?"
+    ) == ""
+
+
+def test_document_count_chat_returns_scope_clarification_without_ai() -> None:
+    class _NeverRetrieval:
+        async def retrieve(self, _: str) -> list[dict]:
+            raise AssertionError("A catalogue-scope question must not run top-k retrieval")
+
+    class _NeverAI:
+        async def complete(self, *_: object, **__: object) -> str:
+            raise AssertionError("A catalogue-scope question must not call Gemini")
+
+    class _Cache:
+        @staticmethod
+        def eligible(*_: object, **__: object) -> bool:
+            return True
+
+        async def lookup(self, *_: object, **__: object) -> None:
+            raise AssertionError("A catalogue-scope question must not query answer cache")
+
+    class _Limiter:
+        async def check(self, _: str) -> None:
+            return None
+
+    settings = Settings(
+        _env_file=None,
+        session_secret="document-count-scope-test-key-at-least-32-bytes",
+        require_freshness_check=False,
+    )
+    request = SimpleNamespace(
+        cookies={},
+        headers={},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    result = asyncio.run(
+        chat(
+            ChatRequest(
+                message="Có bao nhiêu nghị định về luật lao động cho đến hiện nay?"
+            ),
+            request,
+            Response(),
+            BackgroundTasks(),
+            SimpleNamespace(),
+            None,
+            settings,
+            _NeverRetrieval(),
+            SimpleNamespace(),
+            _NeverAI(),
+            _Limiter(),
+            SimpleNamespace(),
+            _Cache(),
+        )
+    )
+
+    assert result.temporary
+    assert result.cache_mode == "scope_clarification"
+    assert result.sources == []
+    assert result.verification.note == "document_count_scope_required"
+    assert "kho VLegal" in result.answer
 
 
 def test_chat_generation_deadline_returns_grounded_fallback() -> None:

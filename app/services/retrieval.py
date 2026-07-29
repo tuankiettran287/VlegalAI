@@ -668,10 +668,28 @@ class RetrievalService:
             base_top_k = top_k or self.settings.retrieval_top_k
             planned_queries = plan_retrieval_queries(query)
             result_limit = adaptive_retrieval_top_k(query, base_top_k)
-            per_query_limit = max(
-                base_top_k,
-                min(18, max(10, (result_limit + len(planned_queries) - 1) // len(planned_queries))),
-            )
+            if len(planned_queries) == 1:
+                # Keep a wider local candidate window before version
+                # deduplication. Equivalent older provisions can otherwise
+                # occupy the entire top-k and hide their current replacement
+                # (for example NĐ 38/2022 ahead of NĐ 293/2025).
+                per_query_limit = max(base_top_k, 24)
+            else:
+                per_query_limit = max(
+                    base_top_k,
+                    min(
+                        18,
+                        max(
+                            10,
+                            (
+                                result_limit
+                                + len(planned_queries)
+                                - 1
+                            )
+                            // len(planned_queries),
+                        ),
+                    ),
+                )
             result_sets = []
             for planned_query in planned_queries:
                 result_sets.append(
