@@ -333,9 +333,15 @@ export function prepareSignature(payload: { title: string; document_text: string
 }
 
 export const articleApi = {
-  list: (query = "", limit = 30) =>
-    requestJson<{ items: Article[] }>(
-      `/api/articles?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(String(limit))}`,
+  list: (query = "", limit = 30, offset = 0) =>
+    requestJson<{
+      items: Article[];
+      total: number;
+      offset: number;
+      limit: number;
+      has_more: boolean;
+    }>(
+      `/api/articles?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
     ),
   get: (slug: string) => requestJson<Article>(`/api/articles/${encodeURIComponent(slug)}`),
   webSearch: (query: string, save = false) =>

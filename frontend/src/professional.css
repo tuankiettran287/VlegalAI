@@ -2585,6 +2585,25 @@ main:focus-visible {
   font-size: 9px;
 }
 
+.article-card-copy footer > a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--brand);
+  font-size: 9px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.article-card-copy footer > a:hover {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
 .article-card-copy footer > button {
   display: inline-flex;
   min-height: 32px;
@@ -2817,6 +2836,35 @@ main:focus-visible {
 .article-feed-empty > button {
   margin-top: 17px;
   padding: 0 15px;
+}
+
+.article-load-more {
+  display: flex;
+  min-width: 190px;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 18px auto 0;
+  padding: 0 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--brand);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.article-load-more:hover {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.article-load-more:disabled {
+  cursor: wait;
+  opacity: .6;
 }
 
 .article-list-loading > span {
@@ -3122,6 +3170,28 @@ main:focus-visible {
   border: 1px dashed var(--line);
   border-radius: 9px;
   background: var(--surface-soft);
+}
+
+.article-primary-source {
+  display: inline-flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 12px;
+  border: 1px solid var(--brand);
+  border-radius: 9px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.article-primary-source:hover {
+  background: var(--brand-strong);
+  color: #fff;
 }
 
 .article-question-card {

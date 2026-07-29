@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from celery import Celery
+from celery.schedules import crontab
 from sqlalchemy import select
 
 from app.core.celery import postgres_celery_urls
@@ -22,6 +24,9 @@ from app.services.tavily import TavilyService
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+ARTICLE_TIMEZONE = ZoneInfo("Asia/Bangkok")
+ARTICLE_PUBLISH_HOURS = (7, 12, 15, 18, 22)
+ARTICLE_BATCH_SIZE = 10
 broker_url, result_backend = postgres_celery_urls(settings.database_url)
 celery_app = Celery(
     "vlegal",
@@ -42,9 +47,12 @@ celery_app.conf.update(
             "task": "vlegal.verify_legal_corpus",
             "schedule": 24 * 60 * 60,
         },
-        "publish-daily-legal-article": {
+        "publish-legal-articles-five-times-daily": {
             "task": "vlegal.publish_daily_legal_article",
-            "schedule": 24 * 60 * 60,
+            "schedule": crontab(
+                hour=",".join(str(hour) for hour in ARTICLE_PUBLISH_HOURS),
+                minute=0,
+            ),
         }
     },
 )
@@ -104,7 +112,25 @@ def _article_excerpt(value: str) -> str:
     return re.sub(r"\s+", " ", plain).strip()[:500]
 
 
-async def _publish_daily_article(now: datetime | None = None) -> dict[str, str | bool]:
+def _article_publication_slot(value: datetime) -> tuple[date, int, int]:
+    checked_at = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    local_time = checked_at.astimezone(ARTICLE_TIMEZONE)
+    eligible_hours = [
+        (index, hour)
+        for index, hour in enumerate(ARTICLE_PUBLISH_HOURS)
+        if hour <= local_time.hour
+    ]
+    if eligible_hours:
+        slot_index, slot_hour = eligible_hours[-1]
+        return local_time.date(), slot_hour, slot_index
+    return (
+        local_time.date() - timedelta(days=1),
+        ARTICLE_PUBLISH_HOURS[-1],
+        len(ARTICLE_PUBLISH_HOURS) - 1,
+    )
+
+
+async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
     if not settings.daily_article_enabled:
         return {"published": False, "reason": "disabled"}
     topics = [topic.strip() for topic in settings.daily_article_topics if topic.strip()]
@@ -112,69 +138,140 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, str |
         return {"published": False, "reason": "no_topics"}
 
     checked_at = now or datetime.now(UTC)
-    local_date = checked_at.astimezone(ZoneInfo("Asia/Bangkok")).date()
-    slug = f"cap-nhat-phap-ly-{local_date.isoformat()}"
-    async with SessionFactory() as db:
-        existing_id = await db.scalar(select(Article.id).where(Article.slug == slug))
-        if existing_id is not None:
-            return {
-                "published": False,
-                "reason": "already_published",
-                "article_id": str(existing_id),
-            }
+    slot_date, slot_hour, slot_index = _article_publication_slot(checked_at)
+    slot_label = f"{slot_hour:02d}:00"
+    batch_position = (
+        slot_date.toordinal() * len(ARTICLE_PUBLISH_HOURS) + slot_index
+    ) * ARTICLE_BATCH_SIZE
+    batch = [
+        {
+            "number": number + 1,
+            "topic": topics[(batch_position + number) % len(topics)],
+            "slug": (
+                f"cap-nhat-phap-ly-{slot_date.isoformat()}-"
+                f"{slot_hour:02d}00-{number + 1:02d}"
+            ),
+        }
+        for number in range(ARTICLE_BATCH_SIZE)
+    ]
+    pending: list[dict[str, Any]] = []
+    skipped_ids: list[str] = []
+    for item in batch:
+        async with SessionFactory() as db:
+            existing_id = await db.scalar(
+                select(Article.id).where(Article.slug == item["slug"])
+            )
+        if existing_id is None:
+            pending.append(item)
+        else:
+            skipped_ids.append(str(existing_id))
 
-    topic = topics[local_date.toordinal() % len(topics)]
+    if not pending:
+        return {
+            "published": False,
+            "reason": "already_published",
+            "published_count": 0,
+            "skipped_count": len(batch),
+            "slot": slot_label,
+            "article_ids": skipped_ids,
+            "slugs": [str(item["slug"]) for item in batch],
+        }
+
+    published_ids: list[str] = []
+    failures: list[str] = []
     ai = GeminiService(settings)
     try:
         tavily = TavilyService(settings)
         google_search = GoogleSearchService(settings, ai)
-        result = await ArticleResearchService(tavily, google_search, ai).search(
-            f"{topic}; cập nhật quy định, chính sách và vấn đề thực tiễn mới nhất"
-        )
+        research = ArticleResearchService(tavily, google_search, ai)
+        for item in pending:
+            topic = str(item["topic"])
+            slug = str(item["slug"])
+            try:
+                result = await research.search(
+                    f"{topic}; bản tin số {item['number']} lúc {slot_label} "
+                    f"ngày {slot_date:%d/%m/%Y}; cập nhật quy định, chính sách "
+                    "và vấn đề thực tiễn mới nhất"
+                )
+                sources = (
+                    result.get("sources")
+                    if isinstance(result.get("sources"), list)
+                    else []
+                )
+                summary = str(result.get("summary") or "").strip()
+                if not summary:
+                    raise RuntimeError("Article research returned empty content")
+                primary_source = (
+                    sources[0]
+                    if sources and isinstance(sources[0], dict)
+                    else {}
+                )
+                source_url = str(primary_source.get("url") or "").strip() or None
+                source_title = re.sub(
+                    r"\s+",
+                    " ",
+                    str(primary_source.get("title") or "").strip(),
+                )[:500]
+                source_excerpt = _article_excerpt(
+                    str(primary_source.get("excerpt") or "")
+                )
+                async with SessionFactory() as db:
+                    existing_id = await db.scalar(
+                        select(Article.id).where(Article.slug == slug)
+                    )
+                    if existing_id is not None:
+                        skipped_ids.append(str(existing_id))
+                        continue
+                    article = Article(
+                        author_id=None,
+                        slug=slug,
+                        title=source_title or f"Bản tin pháp lý {slot_label}: {topic}",
+                        excerpt=source_excerpt or _article_excerpt(summary),
+                        content=summary,
+                        category="Cập nhật pháp luật",
+                        status="PUBLISHED",
+                        source_url=source_url,
+                        web_sources=sources,
+                        published_at=checked_at,
+                    )
+                    db.add(article)
+                    await db.commit()
+                    await db.refresh(article)
+                published_ids.append(str(article.id))
+                logger.info(
+                    "Published scheduled legal article article_id=%s "
+                    "slot=%s item=%s topic=%s",
+                    article.id,
+                    slot_label,
+                    item["number"],
+                    topic,
+                )
+            except Exception as exc:
+                failures.append(slug)
+                logger.exception(
+                    "Scheduled legal article failed slot=%s item=%s "
+                    "topic=%s error_type=%s",
+                    slot_label,
+                    item["number"],
+                    topic,
+                    type(exc).__name__,
+                )
     finally:
         await ai.close()
 
-    sources = result.get("sources") if isinstance(result.get("sources"), list) else []
-    summary = str(result.get("summary") or "").strip()
-    if not summary:
-        raise RuntimeError("Daily article research returned empty content")
-    source_url = (
-        str(sources[0].get("url") or "").strip()
-        if sources and isinstance(sources[0], dict)
-        else None
-    )
-    async with SessionFactory() as db:
-        existing_id = await db.scalar(select(Article.id).where(Article.slug == slug))
-        if existing_id is not None:
-            return {
-                "published": False,
-                "reason": "already_published",
-                "article_id": str(existing_id),
-            }
-        article = Article(
-            author_id=None,
-            slug=slug,
-            title=f"Cập nhật pháp lý: {topic}",
-            excerpt=_article_excerpt(summary),
-            content=summary,
-            category="Cập nhật pháp luật",
-            status="PUBLISHED",
-            source_url=source_url,
-            web_sources=sources,
-            published_at=checked_at,
+    if failures:
+        raise RuntimeError(
+            f"{len(failures)} of {len(batch)} scheduled articles failed "
+            f"for slot {slot_date.isoformat()} {slot_label}: {', '.join(failures)}"
         )
-        db.add(article)
-        await db.commit()
-        await db.refresh(article)
-    logger.info(
-        "Published daily legal article article_id=%s topic=%s",
-        article.id,
-        topic,
-    )
+
     return {
-        "published": True,
-        "article_id": str(article.id),
-        "slug": slug,
+        "published": bool(published_ids),
+        "published_count": len(published_ids),
+        "skipped_count": len(skipped_ids),
+        "slot": slot_label,
+        "article_ids": [*skipped_ids, *published_ids],
+        "slugs": [str(item["slug"]) for item in batch],
     }
 
 
@@ -183,7 +280,7 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, str |
     name="vlegal.publish_daily_legal_article",
     max_retries=3,
 )
-def publish_daily_legal_article(task: object) -> dict[str, str | bool]:
+def publish_daily_legal_article(task: object) -> dict[str, Any]:
     try:
         return asyncio.run(_publish_daily_article())
     except Exception as exc:

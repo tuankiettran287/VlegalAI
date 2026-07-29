@@ -41,6 +41,7 @@ type ResearchResult = {
 };
 
 const ALL_CATEGORIES = "Tất cả";
+const ARTICLE_PAGE_SIZE = 30;
 const coverTones = ["emerald", "navy", "gold", "clay"] as const;
 
 function escapeHtml(value: string) {
@@ -205,6 +206,16 @@ function ArticleDetail({
             ) : (
               <p className="article-no-sources">Bài viết này chưa đính kèm nguồn web.</p>
             )}
+            {article.source_url && (
+              <a
+                className="article-primary-source"
+                href={article.source_url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Mở bài viết gốc <ExternalLink size={14} />
+              </a>
+            )}
           </section>
           <section className="article-aside-card article-question-card">
             <MessageSquareText size={21} />
@@ -225,25 +236,45 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
   const [activeQuery, setActiveQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState(ALL_CATEGORIES);
   const [articles, setArticles] = useState<Article[]>([]);
+  const [totalArticles, setTotalArticles] = useState(0);
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
   const [research, setResearch] = useState<ResearchResult | null>(null);
   const [listLoading, setListLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [detailLoading, setDetailLoading] = useState(Boolean(slug));
   const [researchLoading, setResearchLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const loadArticles = useCallback(async (value = "") => {
-    setListLoading(true);
+  const loadArticles = useCallback(async (
+    value = "",
+    options: { append?: boolean; offset?: number } = {},
+  ) => {
+    const append = Boolean(options.append);
+    if (append) setLoadingMore(true);
+    else setListLoading(true);
     setError("");
     try {
-      const data = await articleApi.list(value, 100);
-      setArticles(data.items);
+      const data = await articleApi.list(
+        value,
+        ARTICLE_PAGE_SIZE,
+        options.offset || 0,
+      );
+      setArticles((current) => {
+        if (!append) return data.items;
+        const knownIds = new Set(current.map((article) => article.id));
+        return [
+          ...current,
+          ...data.items.filter((article) => !knownIds.has(article.id)),
+        ];
+      });
+      setTotalArticles(data.total);
       setActiveQuery(value.trim());
-      setActiveCategory(ALL_CATEGORIES);
+      if (!append) setActiveCategory(ALL_CATEGORIES);
     } catch (reason) {
       setError((reason as Error).message);
     } finally {
-      setListLoading(false);
+      if (append) setLoadingMore(false);
+      else setListLoading(false);
     }
   }, []);
 
@@ -343,7 +374,7 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
           <p>Cập nhật kiến thức, hướng dẫn thực tiễn và những thay đổi pháp lý đáng chú ý với nguồn dẫn có thể kiểm tra.</p>
         </div>
         <div className="articles-hero-stat">
-          <strong>{articles.length}</strong>
+          <strong>{totalArticles}</strong>
           <span>bài viết đang có</span>
           <small>Cập nhật hằng ngày</small>
         </div>
@@ -413,7 +444,10 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
               <span>Bài viết mới nhất</span>
               <h2>{activeQuery ? `Kết quả cho “${activeQuery}”` : "Kiến thức pháp lý dành cho bạn"}</h2>
             </div>
-            <small>{visibleArticles.length} kết quả</small>
+            <small>
+              {visibleArticles.length}
+              {articles.length < totalArticles ? ` / ${totalArticles}` : ""} kết quả
+            </small>
           </header>
 
           {listLoading ? (
@@ -445,6 +479,11 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
                     <footer>
                       <span><CalendarDays size={14} /> {formatArticleDate(article.published_at || article.created_at)}</span>
                       <span><Eye size={14} /> {article.views.toLocaleString("vi-VN")} lượt xem</span>
+                      {article.source_url && (
+                        <a href={article.source_url} target="_blank" rel="noreferrer">
+                          Bài viết gốc <ExternalLink size={13} />
+                        </a>
+                      )}
                       <button type="button" onClick={() => onNavigate(`/bai-viet/${encodeURIComponent(article.slug)}`)}>
                         Đọc bài <ArrowRight size={14} />
                       </button>
@@ -468,6 +507,20 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
                 </button>
               )}
             </div>
+          )}
+          {articles.length < totalArticles && (
+            <button
+              className="article-load-more"
+              type="button"
+              disabled={loadingMore}
+              onClick={() => void loadArticles(activeQuery, {
+                append: true,
+                offset: articles.length,
+              })}
+            >
+              {loadingMore ? "Đang tải thêm…" : "Xem thêm bài viết"}
+              {!loadingMore && <ArrowRight size={15} />}
+            </button>
           )}
         </main>
 

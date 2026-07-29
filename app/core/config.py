@@ -127,6 +127,18 @@ class Settings(BaseSettings):
             "thuế và nghĩa vụ tài chính của cá nhân, doanh nghiệp",
             "bảo vệ người tiêu dùng trong giao dịch số",
             "thành lập và quản trị doanh nghiệp",
+            "hôn nhân, gia đình và phân chia di sản thừa kế",
+            "sở hữu trí tuệ, bản quyền và chuyển giao công nghệ",
+            "bảo vệ dữ liệu cá nhân và an ninh mạng",
+            "thương mại điện tử và hợp đồng điện tử",
+            "giải quyết tranh chấp, tố tụng và trọng tài thương mại",
+            "thủ tục hành chính và khiếu nại quyết định hành chính",
+            "trách nhiệm hình sự của cá nhân và pháp nhân thương mại",
+            "ngân hàng, tín dụng và giao dịch bảo đảm",
+            "xây dựng, đấu thầu và quản lý dự án",
+            "môi trường và trách nhiệm tuân thủ của doanh nghiệp",
+            "y tế, giáo dục và các quyền lợi xã hội",
+            "lao động nước ngoài, xuất nhập cảnh và cư trú",
         ]
     )
     official_legal_domains: Annotated[list[str], NoDecode] = Field(

@@ -2331,20 +2331,44 @@ def _slugify(value: str) -> str:
 async def list_articles(
     q: str = "",
     limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=100_000),
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(optional_user),
 ) -> dict[str, Any]:
-    statement = select(Article).order_by(Article.published_at.desc().nullslast(), Article.created_at.desc()).limit(limit)
+    filters: list[Any] = []
     if not user or user.role not in {"ADMIN", "REVIEWER"}:
-        statement = statement.where(Article.status == "PUBLISHED")
+        filters.append(Article.status == "PUBLISHED")
     if q.strip():
         like = f"%{q.strip()}%"
-        statement = statement.where(
+        filters.append(
             (Article.title.ilike(like))
             | (Article.excerpt.ilike(like))
             | (Article.content.ilike(like))
         )
-    return {"items": [_article_dict(row) for row in (await db.scalars(statement)).all()]}
+    total = int(
+        await db.scalar(
+            select(func.count()).select_from(Article).where(*filters)
+        )
+        or 0
+    )
+    statement = (
+        select(Article)
+        .where(*filters)
+        .order_by(
+            Article.published_at.desc().nullslast(),
+            Article.created_at.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+    items = [_article_dict(row) for row in (await db.scalars(statement)).all()]
+    return {
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(items) < total,
+    }
 
 
 @router.get("/articles/{slug}")

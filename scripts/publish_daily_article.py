@@ -17,7 +17,10 @@ from app.worker import _publish_daily_article
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Publish one dated VLegal daily article when it does not already exist.",
+        description=(
+            "Publish the 10-article VLegal batch for the applicable scheduled "
+            "time when individual articles do not already exist."
+        ),
     )
     parser.add_argument(
         "--date",

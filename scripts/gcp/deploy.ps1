@@ -265,7 +265,7 @@ function Deploy-ArticlePublisher {
         "--service-account=$RunServiceAccount",
         "--command=python",
         "--args=scripts/publish_daily_article.py",
-        "--tasks=1", "--parallelism=1", "--max-retries=1", "--task-timeout=15m",
+        "--tasks=1", "--parallelism=1", "--max-retries=1", "--task-timeout=45m",
         "--cpu=2", "--memory=2Gi",
         "--set-env-vars=$envVars",
         "--set-secrets=DATABASE_URL=vlegal-database-url:latest,GEMINI_API_KEY=vlegal-gemini-api-key:latest,TAVILY_API_KEY=vlegal-tavily-key:latest",

@@ -7,6 +7,8 @@ from celery.schedules import crontab
 
 from app.core.celery import postgres_celery_urls
 
+ARTICLE_PUBLISH_HOURS = (7, 12, 15, 18, 22)
+
 database_url = os.getenv(
     "DATABASE_URL",
     "postgresql+asyncpg://vlegal:vlegal@postgres:5432/vlegal",
@@ -29,9 +31,12 @@ celery_app.conf.update(
             "task": "vlegal.verify_legal_corpus",
             "schedule": 24 * 60 * 60,
         },
-        "publish-daily-legal-article": {
+        "publish-legal-articles-five-times-daily": {
             "task": "vlegal.publish_daily_legal_article",
-            "schedule": crontab(hour=7, minute=0),
+            "schedule": crontab(
+                hour=",".join(str(hour) for hour in ARTICLE_PUBLISH_HOURS),
+                minute=0,
+            ),
         }
     },
 )
