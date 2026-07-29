@@ -87,8 +87,23 @@ def test_daily_article_publisher_is_idempotent_and_publishes_research(
     assert article.category == "Cập nhật pháp luật"
     assert article.web_sources[0]["id"] == "W1"
     assert article.title == "Nguồn kiểm thử"
-    assert article.excerpt == "Nội dung gốc của bài viết kiểm thử."
+    assert article.excerpt == "Nội dung cập nhật có căn cứ rõ ràng."
     assert article.source_url == "https://example.com/legal-update"
+
+
+def test_source_title_rejects_provider_domain() -> None:
+    from app.worker import _article_source_title
+
+    assert _article_source_title(
+        "luatvietnam.vn",
+        "https://luatvietnam.vn/lao-dong/bo-luat-lao-dong.html",
+        fallback="Cập nhật pháp lý: pháp luật lao động",
+    ) == "Cập nhật pháp lý: pháp luật lao động"
+    assert _article_source_title(
+        "Quy định mới về hợp đồng lao động",
+        "https://example.com/legal-update",
+        fallback="fallback",
+    ) == "Quy định mới về hợp đồng lao động"
 
 
 def test_scheduled_article_batch_publishes_ten_unique_items(monkeypatch) -> None:

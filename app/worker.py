@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from celery import Celery
@@ -108,8 +109,48 @@ def verify_legal_corpus() -> dict[str, int]:
 
 def _article_excerpt(value: str) -> str:
     plain = re.sub(r"\[W\d+\]", "", value)
+    plain = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", plain)
+    plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", plain)
     plain = re.sub(r"[*_`#>-]+", " ", plain)
-    return re.sub(r"\s+", " ", plain).strip()[:500]
+    plain = re.sub(r"\s+", " ", plain).strip()
+    return re.sub(r"\s+([,.;:!?])", r"\1", plain)[:500]
+
+
+def _article_source_title(
+    value: str,
+    source_url: str | None,
+    *,
+    fallback: str,
+) -> str:
+    title = re.sub(r"\s+", " ", value or "").strip()[:500]
+    normalized = title.casefold().removeprefix("www.")
+    generic_titles = {
+        "",
+        "web source",
+        "google search source",
+        "nguồn web",
+        "nguồn google search",
+    }
+    try:
+        hostname = (
+            (urlparse(source_url or "").hostname or "")
+            .casefold()
+            .removeprefix("www.")
+        )
+    except ValueError:
+        hostname = ""
+    is_domain_title = bool(
+        hostname
+        and normalized
+        and (
+            hostname == normalized
+            or hostname.endswith(f".{normalized}")
+            or normalized.endswith(f".{hostname}")
+        )
+    )
+    if normalized in generic_titles or is_domain_title:
+        return fallback
+    return title or fallback
 
 
 def _article_publication_slot(value: datetime) -> tuple[date, int, int]:
@@ -158,13 +199,31 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
     skipped_ids: list[str] = []
     for item in batch:
         async with SessionFactory() as db:
-            existing_id = await db.scalar(
-                select(Article.id).where(Article.slug == item["slug"])
+            existing = await db.scalar(
+                select(Article).where(Article.slug == item["slug"])
             )
-        if existing_id is None:
+            if isinstance(existing, Article):
+                repaired_title = _article_source_title(
+                    existing.title,
+                    existing.source_url,
+                    fallback=f"Cập nhật pháp lý: {item['topic']}",
+                )
+                repaired_excerpt = _article_excerpt(existing.content)
+                if (
+                    repaired_title != existing.title
+                    or (
+                        repaired_excerpt
+                        and repaired_excerpt != existing.excerpt
+                    )
+                ):
+                    existing.title = repaired_title
+                    if repaired_excerpt:
+                        existing.excerpt = repaired_excerpt
+                    await db.commit()
+        if existing is None:
             pending.append(item)
         else:
-            skipped_ids.append(str(existing_id))
+            skipped_ids.append(str(getattr(existing, "id", existing)))
 
     if not pending:
         return {
@@ -225,8 +284,12 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     article = Article(
                         author_id=None,
                         slug=slug,
-                        title=source_title or f"Bản tin pháp lý {slot_label}: {topic}",
-                        excerpt=source_excerpt or _article_excerpt(summary),
+                        title=_article_source_title(
+                            source_title,
+                            source_url,
+                            fallback=f"Cập nhật pháp lý: {topic}",
+                        ),
+                        excerpt=_article_excerpt(summary) or source_excerpt,
                         content=summary,
                         category="Cập nhật pháp luật",
                         status="PUBLISHED",
