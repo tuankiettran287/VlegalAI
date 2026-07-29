@@ -149,6 +149,7 @@ def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() ->
     conversation = Conversation(id=conversation_id, user_id=user_id)
     db = _ChatSession(conversation)
     memory = _Memory(db)
+    background_tasks = BackgroundTasks()
 
     result = asyncio.run(
         chat(
@@ -158,7 +159,7 @@ def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() ->
             ),
             SimpleNamespace(),
             Response(),
-            BackgroundTasks(),
+            background_tasks,
             db,
             SimpleNamespace(id=user_id),
             settings,
@@ -177,4 +178,8 @@ def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() ->
     assert db.committed
     assert [message.message_sequence for message in messages] == [5, 6]
     assert result.conversation_id == conversation_id
+    assert memory.refreshed == []
+
+    asyncio.run(background_tasks())
+
     assert memory.refreshed == [conversation_id]

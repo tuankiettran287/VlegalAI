@@ -801,6 +801,35 @@ async def _store_answer_cache_safely(
         logger.exception("Cannot store semantic answer cache entry")
 
 
+async def _refresh_conversation_memory_safely(
+    memory: ConversationMemoryService,
+    conversation_id: uuid.UUID,
+) -> None:
+    """Refresh the derived summary after the HTTP response is available.
+
+    The encrypted transcript is committed before this task is scheduled.
+    ConversationMemoryService reads through its own short-lived sessions and
+    already retries every message after the last persisted sequence, so a
+    delayed or failed refresh cannot lose the durable conversation.
+    """
+
+    started = time.monotonic()
+    try:
+        await memory.refresh(conversation_id)
+    except Exception:
+        logger.exception(
+            "Cannot refresh conversation summary for %s",
+            conversation_id,
+        )
+    finally:
+        logger.info(
+            "Conversation summary refresh completed conversation_id=%s "
+            "duration_ms=%d",
+            conversation_id,
+            round((time.monotonic() - started) * 1000),
+        )
+
+
 def _normalize_allowed_citation_syntax(
     value: str,
     allowed_ids: list[str],
@@ -1577,12 +1606,11 @@ async def chat(
         await db.commit()
         await db.refresh(assistant_message)
         message_id = assistant_message.id
-        try:
-            await memory.refresh(conversation_id)
-        except Exception:
-            # The full encrypted transcript is already durable. A later turn
-            # retries every message after last_message_sequence automatically.
-            logger.exception("Cannot refresh conversation summary for %s", conversation_id)
+        background_tasks.add_task(
+            _refresh_conversation_memory_safely,
+            memory,
+            conversation_id,
+        )
     persistence_ms += round(
         (time.monotonic() - persistence_started) * 1000
     )

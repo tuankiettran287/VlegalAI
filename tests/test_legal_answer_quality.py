@@ -206,6 +206,14 @@ def test_general_wage_query_prefers_newest_equivalent_legal_version() -> None:
             "Mức lương vùng I hiện nay là bao nhiêu?"
         )
     )
+    assert (
+        len(
+            plan_retrieval_queries(
+                "Mức lương vùng I hiện nay là bao nhiêu?"
+            )
+        )
+        == 1
+    )
 
 
 def test_explicit_historical_wage_query_keeps_requested_version() -> None:

@@ -277,9 +277,16 @@ def plan_retrieval_queries(query: str) -> list[str]:
             if expanded.casefold() != normalized.casefold():
                 planned.append(expanded)
     query_ascii = _ascii(normalized)
+    matched_expansions = []
     for markers, expansion in _LEGAL_QUERY_EXPANSIONS:
         if any(marker in query_ascii for marker in markers):
-            planned.append(expansion)
+            matched_expansions.append(expansion)
+    if matched_expansions and len(facets) < 2:
+        # One expanded search preserves the user's wording while avoiding a
+        # second sequential vector + BM25 round trip for simple questions.
+        planned[0] = " ".join([normalized, *matched_expansions])
+    else:
+        planned.extend(matched_expansions)
     return list(dict.fromkeys(planned))[:5]
 
 
