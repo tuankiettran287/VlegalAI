@@ -805,14 +805,20 @@ def drop_postgres_bulk_load_indexes(config: ExternalGraphRAGConfig) -> None:
 
 
 def validate_postgres_embeddings(connection, config: ExternalGraphRAGConfig) -> None:
+    """Validate the runtime embedding contract using one representative row.
+
+    Full reindexing replaces the corpus with a single embedding contract.  A
+    runtime readiness check must therefore stay O(1); grouping every stored
+    vector here makes each newly started Cloud Run instance scan the corpus
+    before it can answer its first request.
+    """
+
     with connection.cursor() as cursor:
         cursor.execute(
             """
             SELECT embedding_model, embedding_revision, vector_dims(embedding) AS dimensions
             FROM graphrag_chunk
-            GROUP BY embedding_model, embedding_revision, vector_dims(embedding)
-            ORDER BY embedding_model, embedding_revision, dimensions
-            LIMIT 2
+            LIMIT 1
             """
         )
         rows = cursor.fetchall()

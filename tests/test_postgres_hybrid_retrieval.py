@@ -315,7 +315,7 @@ class _GraphDriver:
         return self.recording_session
 
 
-def test_postgres_embedding_validation_rejects_mixed_vector_spaces() -> None:
+def test_postgres_embedding_validation_checks_one_representative_row() -> None:
     cursor = _RecordingCursor(
         fetchall_results=[
             [
@@ -324,6 +324,28 @@ def test_postgres_embedding_validation_rejects_mixed_vector_spaces() -> None:
                     "embedding_revision": "vertex-ai-v1:redact",
                     "dimensions": 1024,
                 },
+            ]
+        ]
+    )
+    config = SimpleNamespace(
+        embedding_model="gemini-embedding-001",
+        postgres_vector_size=1024,
+        embedding_config=SimpleNamespace(
+            model_revision="vertex-ai-v1:redact"
+        ),
+    )
+
+    validate_postgres_embeddings(_RecordingConnection(cursor), config)
+
+    query = cursor.queries[0][0]
+    assert "LIMIT 1" in query
+    assert "GROUP BY" not in query
+
+
+def test_postgres_embedding_validation_rejects_mismatched_vector_space() -> None:
+    cursor = _RecordingCursor(
+        fetchall_results=[
+            [
                 {
                     "embedding_model": "BAAI/bge-m3",
                     "embedding_revision": "main",
