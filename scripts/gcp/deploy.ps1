@@ -81,6 +81,9 @@ $workerPool = "vlegal-worker"
 $beatPool = "vlegal-beat"
 $migrateJob = "vlegal-migrate"
 $reindexJob = "vlegal-reindex"
+# Direct VPC revisions allow at most 10 instances. The service-level max of 5
+# remains the effective production cap; this value only avoids inheriting 3.
+$revisionMaxInstances = 10
 
 $apiSecrets = @(
     "DATABASE_URL=vlegal-database-url:latest",
@@ -228,7 +231,7 @@ function Deploy-Api {
         "--execution-environment=gen2", "--service-account=$RunServiceAccount", "--port=8080",
         "--cpu=2", "--memory=4Gi", "--concurrency=16",
         "--min=0", "--max=5",
-        "--min-instances=default", "--max-instances=100",
+        "--min-instances=default", "--max-instances=$revisionMaxInstances",
         "--timeout=3600",
         "--network=$Network", "--subnet=$Subnet", "--vpc-egress=private-ranges-only",
         "--allow-unauthenticated",
@@ -243,7 +246,7 @@ function Set-ApiExternalUrl {
         "run", "services", "update", $apiService,
         "--project=$ProjectId", "--region=$Region",
         "--min=0", "--max=5",
-        "--min-instances=default", "--max-instances=100",
+        "--min-instances=default", "--max-instances=$revisionMaxInstances",
         "--update-env-vars=PUBLIC_URL=$Url,FRONTEND_URL=$Url,CORS_ORIGINS=$Url,OIDC_REDIRECT_URI=$Url/api/auth/google/callback,COOKIE_SECURE=true",
         "--quiet"
     )
@@ -258,7 +261,7 @@ function Deploy-Frontend {
         "--execution-environment=gen2", "--service-account=$RunServiceAccount", "--port=8080",
         "--cpu=1", "--memory=512Mi", "--concurrency=80",
         "--min=0", "--max=5",
-        "--min-instances=default", "--max-instances=100",
+        "--min-instances=default", "--max-instances=$revisionMaxInstances",
         "--allow-unauthenticated", "--set-env-vars=API_UPSTREAM=$apiUrl",
         "--quiet"
     )
