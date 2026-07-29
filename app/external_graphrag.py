@@ -2046,7 +2046,14 @@ class Neo4jPostgresGraphRAGStore:
             for index, row in enumerate(selected, start=1):
                 row["source_id"] = f"S{index}"
             return selected
-        candidate_limit = max(32, top_k * 5)
+        # Graph expansion needs a wider seed set than the final top-k, but
+        # multiplying it by five made a 24-source abstract request ask the
+        # PostgreSQL hybrid retriever for 120 rows. That retriever widens each
+        # SQL branch by another 8x, so a single chat scanned 960 vector and 960
+        # lexical candidates before graph expansion. A bounded 2x seed window
+        # preserves diversity without turning broad questions into a database
+        # latency cliff.
+        candidate_limit = max(32, min(48, top_k * 2))
         candidates = self._postgres_candidates(query, candidate_limit)
         if not candidates:
             return []

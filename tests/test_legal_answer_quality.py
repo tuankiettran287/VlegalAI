@@ -78,6 +78,20 @@ def test_retrieval_route_distinguishes_direct_and_graph_questions() -> None:
         )
         == "multi_abstract"
     )
+    assert (
+        classify_retrieval_route(
+            "Người sử dụng lao động phải thanh toán các khoản liên quan "
+            "đến quyền lợi trong bao nhiêu ngày?"
+        )
+        == "single_hop"
+    )
+    assert (
+        classify_retrieval_route(
+            "Doanh nghiệp được đơn phương chấm dứt hợp đồng lao động "
+            "trong những trường hợp nào?"
+        )
+        == "single_hop"
+    )
 
 
 def test_single_hop_never_initializes_graph_store(monkeypatch) -> None:

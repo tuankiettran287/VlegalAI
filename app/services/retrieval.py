@@ -45,16 +45,6 @@ _AGGREGATIVE_MARKERS = (
     "tat ca",
     "so sanh",
     "phan biet",
-    "cac khoan",
-    "nhung khoan",
-    "cac nghia vu",
-    "nhung nghia vu",
-    "cac quyen",
-    "nhung quyen",
-    "cac buoc",
-    "nhung truong hop",
-    "cac che do",
-    "cac hanh vi",
     "ho so rui ro",
 )
 _MULTI_ABSTRACT_MARKERS = (

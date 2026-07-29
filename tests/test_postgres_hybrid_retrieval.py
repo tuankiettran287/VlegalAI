@@ -159,7 +159,13 @@ def test_neo4j_hybrid_expands_postgres_rag_seeds() -> None:
         "reasons": ["postgres_vector_cosine", "postgres_bm25"],
     }
     related = {**_row("related"), "node_id": "related-node", "chunk_type": "clause"}
-    store._postgres_candidates = lambda query, limit: [seed]
+    recorded_limits: list[int] = []
+
+    def postgres_candidates(_: str, limit: int) -> list[dict]:
+        recorded_limits.append(limit)
+        return [seed]
+
+    store._postgres_candidates = postgres_candidates
     store._expand_node_scores = lambda node_scores: {
         "seed-node": node_scores["seed-node"],
         "related-node": 1.7,
@@ -172,6 +178,21 @@ def test_neo4j_hybrid_expands_postgres_rag_seeds() -> None:
     assert rows[0]["reasons"] == ["postgres_vector_cosine", "postgres_bm25"]
     assert rows[1]["chunk_id"] == "related"
     assert rows[1]["reasons"] == ["neo4j_graph"]
+    assert recorded_limits == [32]
+
+
+def test_neo4j_hybrid_caps_wide_graph_seed_window() -> None:
+    store = object.__new__(Neo4jPostgresGraphRAGStore)
+    recorded_limits: list[int] = []
+
+    def postgres_candidates(_: str, limit: int) -> list[dict]:
+        recorded_limits.append(limit)
+        return []
+
+    store._postgres_candidates = postgres_candidates
+
+    assert store.retrieve("tong hop quyen loi", top_k=24) == []
+    assert recorded_limits == [48]
 
 
 def test_neo4j_hybrid_falls_back_to_postgres_when_graph_is_unavailable() -> None:
