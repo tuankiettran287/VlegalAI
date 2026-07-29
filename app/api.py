@@ -2354,6 +2354,7 @@ async def get_article(slug: str, db: AsyncSession = Depends(get_db)) -> dict[str
         raise HTTPException(status_code=404, detail="Không tìm thấy bài viết")
     article.view_count += 1
     await db.commit()
+    await db.refresh(article)
     return _article_dict(article)
 
 
