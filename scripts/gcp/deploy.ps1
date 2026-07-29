@@ -216,6 +216,7 @@ function Deploy-Api {
         "WEB_CONCURRENCY=1",
         "DATABASE_POOL_SIZE=5",
         "DATABASE_MAX_OVERFLOW=5",
+        "RETRIEVAL_POSTGRES_POOL_SIZE=3",
         "RETRIEVER_BACKEND=hybrid_rag",
         "REQUIRE_FRESHNESS_CHECK=false",
         "POSTGRES_VECTOR_SIZE=1024",

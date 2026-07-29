@@ -65,6 +65,8 @@ from app.schemas import (
     ReviewContractRequest,
     SourceOut,
     VerificationReport,
+    LegalCatalogList,
+    LegalCatalogStats,
 )
 from app.services.ai import (
     CONTRACT_SYSTEM_PROMPT,
@@ -88,6 +90,13 @@ from app.services.freshness import (
     LegalFreshnessService,
 )
 from app.services.guest_limit import GuestRateLimitExceeded, GuestRateLimitUnavailable, GuestRateLimiter
+from app.services.legal_catalog import (
+    CATALOG_TYPES,
+    STATUS_LABELS,
+    LegalCatalogService,
+    LegalCatalogUnavailable,
+    parse_catalog_request,
+)
 from app.services.retrieval import (
     RetrievalService,
     append_detailed_citations,
@@ -365,6 +374,11 @@ async def _legal_sources(
     retrieval: RetrievalService,
     freshness: LegalFreshnessService,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    sources_started = time.perf_counter()
+    query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
+    retrieval_core_ms = 0
+    source_filter_ms = 0
+    freshness_ms = 0
     configured_limit = getattr(
         getattr(freshness, "settings", None),
         "max_laws_verified_per_request",
@@ -407,7 +421,16 @@ async def _legal_sources(
         return ""
 
     try:
-        sources = usable_sources(await retrieval.retrieve(query))
+        retrieval_started = time.perf_counter()
+        retrieved_rows = await retrieval.retrieve(query)
+        retrieval_core_ms += round(
+            (time.perf_counter() - retrieval_started) * 1000
+        )
+        filter_started = time.perf_counter()
+        sources = usable_sources(retrieved_rows)
+        source_filter_ms += round(
+            (time.perf_counter() - filter_started) * 1000
+        )
     except Exception as exc:
         logger.warning("Retrieval failed: %s", exc)
         sources = []
@@ -433,6 +456,16 @@ async def _legal_sources(
     if not require_freshness:
         for index, source in enumerate(sources, start=1):
             source["source_id"] = f"S{index}"
+        logger.info(
+            "Legal sources completed query_sha256=%s "
+            "retrieval_core_ms=%d source_filter_ms=%d freshness_ms=0 "
+            "sources=%d total_ms=%d",
+            query_hash,
+            retrieval_core_ms,
+            source_filter_ms,
+            len(sources),
+            round((time.perf_counter() - sources_started) * 1000),
+        )
         return sources, {
             "checked": False,
             "all_current": False,
@@ -442,7 +475,11 @@ async def _legal_sources(
 
     for _ in range(3):
         try:
+            freshness_started = time.perf_counter()
             verification, updated = await freshness.verify_sources(sources)
+            freshness_ms += round(
+                (time.perf_counter() - freshness_started) * 1000
+            )
         except FreshnessUnavailable as exc:
             logger.warning(
                 "Freshness verification unavailable error_type=%s",
@@ -496,7 +533,16 @@ async def _legal_sources(
         if updated or replacement_codes:
             followed_replacements.update(replacement_codes)
             retrieval_query = " ".join([query, *sorted(followed_replacements)])
-            sources = usable_sources(await retrieval.retrieve(retrieval_query))
+            retrieval_started = time.perf_counter()
+            retrieved_rows = await retrieval.retrieve(retrieval_query)
+            retrieval_core_ms += round(
+                (time.perf_counter() - retrieval_started) * 1000
+            )
+            filter_started = time.perf_counter()
+            sources = usable_sources(retrieved_rows)
+            source_filter_ms += round(
+                (time.perf_counter() - filter_started) * 1000
+            )
             if not sources:
                 raise HTTPException(
                     status_code=409,
@@ -577,6 +623,16 @@ async def _legal_sources(
             "all_current": False,
             "items": [],
         }
+    )
+    logger.info(
+        "Legal sources completed query_sha256=%s retrieval_core_ms=%d "
+        "source_filter_ms=%d freshness_ms=%d sources=%d total_ms=%d",
+        query_hash,
+        retrieval_core_ms,
+        source_filter_ms,
+        freshness_ms,
+        len(sources),
+        round((time.perf_counter() - sources_started) * 1000),
     )
     return sources, verification_payload
 
@@ -1209,6 +1265,65 @@ async def laws(
     }
 
 
+@router.get(
+    "/legal/catalog/stats",
+    response_model=LegalCatalogStats,
+)
+async def legal_catalog_stats(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(current_user),
+) -> LegalCatalogStats:
+    try:
+        result = await LegalCatalogService(db).stats()
+    except LegalCatalogUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Catalog văn bản chưa sẵn sàng; cần chạy migration và reindex.",
+        ) from exc
+    return LegalCatalogStats.model_validate(result)
+
+
+@router.get(
+    "/legal/catalog/documents",
+    response_model=LegalCatalogList,
+)
+async def legal_catalog_documents(
+    document_type: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    q: str = Query(default="", max_length=220),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(current_user),
+) -> LegalCatalogList:
+    normalized_type = document_type.upper() if document_type else None
+    normalized_status = status_filter.upper() if status_filter else None
+    if normalized_type and normalized_type not in CATALOG_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"document_type không hợp lệ: {normalized_type}",
+        )
+    if normalized_status and normalized_status not in STATUS_LABELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"status không hợp lệ: {normalized_status}",
+        )
+    try:
+        result = await LegalCatalogService(db).documents(
+            document_type=normalized_type,
+            status=normalized_status,
+            q=q,
+            page=page,
+            page_size=page_size,
+        )
+    except LegalCatalogUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Catalog văn bản chưa sẵn sàng; cần chạy migration và reindex.",
+        ) from exc
+    return LegalCatalogList.model_validate(result)
+
+
 @router.post("/conversations", response_model=ConversationOut, status_code=201)
 async def create_conversation(
     payload: ConversationCreate,
@@ -1360,7 +1475,34 @@ async def chat(
         "citation_repair_attempted": False,
         "citation_repair_ms": 0,
     }
-    scope_clarification = _document_count_scope_clarification(payload.message)
+    catalog_request = parse_catalog_request(payload.message)
+    if catalog_request is not None:
+        catalog_started = time.monotonic()
+        try:
+            answer = await LegalCatalogService(db).answer(catalog_request)
+        except LegalCatalogUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Catalog văn bản VLegal chưa sẵn sàng; "
+                    "cần hoàn tất migration và reindex."
+                ),
+            ) from exc
+        retrieval_ms += round(
+            (time.monotonic() - catalog_started) * 1000
+        )
+        cache_mode = "catalog"
+        verification = {
+            "checked": True,
+            "all_current": False,
+            "items": [],
+            "note": "indexed_catalog_direct_sql",
+        }
+    scope_clarification = (
+        ""
+        if catalog_request is not None
+        else _document_count_scope_clarification(payload.message)
+    )
     if scope_clarification:
         answer = scope_clarification
         cache_mode = "scope_clarification"
@@ -1370,10 +1512,10 @@ async def chat(
             "items": [],
             "note": "document_count_scope_required",
         }
-    cache_eligible = answer_cache.eligible(
+    cache_eligible = not answer and answer_cache.eligible(
         payload.message,
         has_conversation_context=bool(history_turns or summary_context),
-    ) and not scope_clarification
+    )
     if cache_eligible:
         # Only context-free public-law questions pass the privacy gate, so
         # their exact answers can be reused across authenticated and guest

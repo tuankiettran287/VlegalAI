@@ -497,6 +497,73 @@ def test_document_count_chat_returns_scope_clarification_without_ai() -> None:
     assert "kho VLegal" in result.answer
 
 
+def test_explicit_vlegal_catalogue_question_uses_direct_sql_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Catalog:
+        def __init__(self, _: object):
+            pass
+
+        async def answer(self, request: object) -> str:
+            assert getattr(request, "document_type") == "DECREE"
+            return (
+                "Kho VLegal hiện có 12 nghị định. "
+                "Con số này chỉ phản ánh corpus VLegal đã index."
+            )
+
+    class _NeverRetrieval:
+        async def retrieve(self, _: str) -> list[dict]:
+            raise AssertionError("Direct catalogue SQL must bypass RAG")
+
+    class _NeverAI:
+        async def complete(self, *_: object, **__: object) -> str:
+            raise AssertionError("Direct catalogue SQL must bypass Gemini")
+
+    class _Cache:
+        @staticmethod
+        def eligible(*_: object, **__: object) -> bool:
+            raise AssertionError("Direct catalogue SQL must bypass answer cache")
+
+    class _Limiter:
+        async def check(self, _: str) -> None:
+            return None
+
+    monkeypatch.setattr("app.api.LegalCatalogService", _Catalog)
+    settings = Settings(
+        _env_file=None,
+        session_secret="catalogue-route-test-key-at-least-32-bytes",
+        require_freshness_check=False,
+    )
+    request = SimpleNamespace(
+        cookies={},
+        headers={},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    result = asyncio.run(
+        chat(
+            ChatRequest(message="Có bao nhiêu nghị định trong kho VLegal?"),
+            request,
+            Response(),
+            BackgroundTasks(),
+            SimpleNamespace(),
+            None,
+            settings,
+            _NeverRetrieval(),
+            SimpleNamespace(),
+            _NeverAI(),
+            _Limiter(),
+            SimpleNamespace(),
+            _Cache(),
+        )
+    )
+
+    assert result.cache_mode == "catalog"
+    assert result.sources == []
+    assert result.verification.note == "indexed_catalog_direct_sql"
+    assert "12 nghị định" in result.answer
+
+
 def test_chat_generation_deadline_returns_grounded_fallback() -> None:
     source = {
         "source_id": "S1",

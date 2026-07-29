@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
+import time
 import unicodedata
 from datetime import date, datetime
 from typing import Any, Literal
@@ -583,6 +585,7 @@ def _external_config(settings: Settings) -> ExternalGraphRAGConfig:
         embedding_vertex_max_queue_wait_seconds=(
             settings.embedding_vertex_max_queue_wait_seconds
         ),
+        retrieval_postgres_pool_size=settings.retrieval_postgres_pool_size,
         hybrid_vector_weight=settings.hybrid_vector_weight,
         hybrid_bm25_weight=settings.hybrid_bm25_weight,
         hybrid_rrf_k=settings.hybrid_rrf_k,
@@ -657,9 +660,15 @@ class RetrievalService:
         return store
 
     async def retrieve(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
+        retrieval_started = time.perf_counter()
+        query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
         try:
             route = classify_retrieval_route(query)
+            store_started = time.perf_counter()
             store = await self._get_store(route)
+            store_init_ms = round(
+                (time.perf_counter() - store_started) * 1000
+            )
             logger.info(
                 "Retrieval route=%s backend=%s",
                 route,
@@ -691,7 +700,9 @@ class RetrievalService:
                     ),
                 )
             result_sets = []
+            store_query_ms = 0
             for planned_query in planned_queries:
+                store_query_started = time.perf_counter()
                 result_sets.append(
                     await run_in_threadpool(
                         store.retrieve,
@@ -699,16 +710,48 @@ class RetrievalService:
                         per_query_limit,
                     )
                 )
+                store_query_ms += round(
+                    (time.perf_counter() - store_query_started) * 1000
+                )
+            merge_started = time.perf_counter()
             rows = _merge_retrieval_rows(
                 result_sets,
                 result_limit,
                 planned_queries,
             )
+            merge_filter_ms = round(
+                (time.perf_counter() - merge_started) * 1000
+            )
             if not _rows_have_query_evidence(query, rows):
+                logger.info(
+                    "Retrieval service completed query_sha256=%s route=%s "
+                    "planned_queries=%d store_init_ms=%d store_query_ms=%d "
+                    "merge_filter_ms=%d final_sources=0 total_ms=%d",
+                    query_hash,
+                    route,
+                    len(planned_queries),
+                    store_init_ms,
+                    store_query_ms,
+                    merge_filter_ms,
+                    round((time.perf_counter() - retrieval_started) * 1000),
+                )
                 return []
             serialized = [serialize_source(row) for row in rows]
             for index, source in enumerate(serialized, start=1):
                 source["source_id"] = f"S{index}"
+            logger.info(
+                "Retrieval service completed query_sha256=%s route=%s "
+                "planned_queries=%d store_init_ms=%d store_query_ms=%d "
+                "merge_filter_ms=%d final_sources=%d total_ms=%d",
+                query_hash,
+                route,
+                len(planned_queries),
+                store_init_ms,
+                store_query_ms,
+                merge_filter_ms,
+                len(serialized),
+                round((time.perf_counter() - retrieval_started) * 1000),
+            )
             return serialized
         except Exception as exc:
             logger.warning("Retrieve operation failed: %s", exc)

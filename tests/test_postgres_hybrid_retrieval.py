@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -119,6 +120,34 @@ def test_postgres_store_returns_fused_reasons() -> None:
     assert rows[0]["chunk_id"] == "both"
     assert rows[0]["reasons"] == ["postgres_vector_cosine", "postgres_bm25"]
     assert {row["chunk_id"] for row in rows} == {"vector-only", "both", "bm25-only"}
+
+
+def test_postgres_store_runs_vector_and_bm25_branches_in_parallel() -> None:
+    store = object.__new__(PostgresGraphRAGStore)
+    store.config = SimpleNamespace(
+        hybrid_vector_weight=0.55,
+        hybrid_bm25_weight=0.45,
+        hybrid_rrf_k=60,
+    )
+    bm25_started = threading.Event()
+    vector_finished = threading.Event()
+
+    def bm25(_: str, __: int) -> list[dict]:
+        bm25_started.set()
+        assert vector_finished.wait(timeout=1)
+        return [_row("both")]
+
+    def vector(_: str, __: int) -> list[dict]:
+        assert bm25_started.wait(timeout=1)
+        vector_finished.set()
+        return [_row("both")]
+
+    store._vector_candidates = vector
+    store._bm25_candidates = bm25
+
+    rows = store.retrieve("nghia vu thue", top_k=1)
+
+    assert [row["chunk_id"] for row in rows] == ["both"]
 
 
 def test_neo4j_hybrid_expands_postgres_rag_seeds() -> None:

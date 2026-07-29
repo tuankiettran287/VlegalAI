@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     database_pool_size: int = 20
     database_max_overflow: int = 40
     database_pool_timeout: int = 30
+    retrieval_postgres_pool_size: int = Field(default=3, ge=2, le=16)
     session_secret: str = "replace-with-at-least-32-random-characters"
     session_ttl_seconds: int = 8 * 60 * 60
     cookie_secure: bool = False

@@ -583,6 +583,13 @@ class VertexAIEmbeddingService:
     ) -> list[list[float]]:
         if not texts:
             return []
+        request_started = time.perf_counter()
+        auth_ms = 0
+        queue_ms = 0
+        http_ms = 0
+        parse_ms = 0
+        credential_refresh = False
+        selected_location = ""
         last_error: EmbeddingModelError | None = None
         force_refresh = False
         prepared_texts = [self._prepare_text(text) for text in texts]
@@ -608,10 +615,26 @@ class VertexAIEmbeddingService:
                 and self.config.vertex_requests_per_minute <= 0
             ):
                 self._throttle_items(1)
+            auth_started = time.perf_counter()
+            credentials = self._ensure_credentials()
+            credential_refresh = (
+                credential_refresh
+                or force_refresh
+                or not credentials.valid
+            )
             token = self._access_token(force_refresh=force_refresh)
+            auth_ms += round(
+                (time.perf_counter() - auth_started) * 1000
+            )
+            queue_started = time.perf_counter()
             location = self._reserve_vertex_location()
+            selected_location = location
+            queue_ms += round(
+                (time.perf_counter() - queue_started) * 1000
+            )
             force_refresh = False
             try:
+                http_started = time.perf_counter()
                 response = self._client.post(
                     self._predict_url_for_location(location),
                     headers={
@@ -619,6 +642,9 @@ class VertexAIEmbeddingService:
                         "Content-Type": "application/json; charset=utf-8",
                     },
                     json=payload,
+                )
+                http_ms += round(
+                    (time.perf_counter() - http_started) * 1000
                 )
             except httpx.HTTPError as exc:
                 last_error = EmbeddingModelError(
@@ -628,11 +654,36 @@ class VertexAIEmbeddingService:
                     raise last_error from exc
             else:
                 if response.status_code == 200:
-                    return self._parse_vertex_vectors(
+                    parse_started = time.perf_counter()
+                    vectors = self._parse_vertex_vectors(
                         response,
                         expected_count=len(texts),
                         texts=prepared_texts,
                     )
+                    parse_ms += round(
+                        (time.perf_counter() - parse_started) * 1000
+                    )
+                    if task_type == "RETRIEVAL_QUERY":
+                        LOGGER.info(
+                            "Vertex embedding completed task_type=%s "
+                            "location=%s input_count=%d attempts=%d "
+                            "credential_refresh=%s auth_ms=%d queue_ms=%d "
+                            "http_ms=%d parse_ms=%d total_ms=%d",
+                            task_type,
+                            selected_location,
+                            len(texts),
+                            attempt + 1,
+                            credential_refresh,
+                            auth_ms,
+                            queue_ms,
+                            http_ms,
+                            parse_ms,
+                            round(
+                                (time.perf_counter() - request_started)
+                                * 1000
+                            ),
+                        )
+                    return vectors
                 last_error = EmbeddingModelError(
                     f"Vertex AI embedding returned HTTP {response.status_code}: "
                     f"{self._response_detail(response)}"

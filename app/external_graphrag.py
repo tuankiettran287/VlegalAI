@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+import hashlib
 import json
 import logging
 import math
 import os
 import re
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -14,6 +18,7 @@ from urllib.parse import urlparse
 
 from neo4j import GraphDatabase
 import psycopg
+from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 from sqlalchemy.engine import make_url
 
@@ -315,6 +320,7 @@ class ExternalGraphRAGConfig:
     embedding_vertex_locations: tuple[str, ...] = ()
     embedding_vertex_requests_per_minute: float = 0.0
     embedding_vertex_max_queue_wait_seconds: float = 0.0
+    retrieval_postgres_pool_size: int = 3
     hybrid_vector_weight: float = 0.55
     hybrid_bm25_weight: float = 0.45
     hybrid_rrf_k: int = 60
@@ -376,6 +382,10 @@ class ExternalGraphRAGConfig:
             ),
             embedding_vertex_max_queue_wait_seconds=float(
                 os.getenv("EMBEDDING_VERTEX_MAX_QUEUE_WAIT_SECONDS", "0")
+            ),
+            retrieval_postgres_pool_size=max(
+                2,
+                int(os.getenv("RETRIEVAL_POSTGRES_POOL_SIZE", "3")),
             ),
             hybrid_vector_weight=float(os.getenv("HYBRID_VECTOR_WEIGHT", "0.55")),
             hybrid_bm25_weight=float(os.getenv("HYBRID_BM25_WEIGHT", "0.45")),
@@ -1264,8 +1274,40 @@ def sync_postgres(
                 status=POSTGRES_EMBEDDING_CONTRACT_READY,
                 chunk_count=int(row["chunks"]),
             )
+        refresh_legal_catalog(config)
 
     return {"chunks": total}
+
+
+def refresh_legal_catalog(
+    config: ExternalGraphRAGConfig | None = None,
+) -> bool:
+    """Publish the corpus catalogue after a complete PostgreSQL sync."""
+
+    config = config or ExternalGraphRAGConfig.from_env()
+    if not config.postgres_ready:
+        return False
+    with postgres_connection(config) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT to_regclass('public.legal_catalog_corpus') AS relation"
+            )
+            row = cursor.fetchone()
+            if not row or row["relation"] is None:
+                logger.info(
+                    "Legal catalogue materialized view is not installed; "
+                    "skipping refresh."
+                )
+                return False
+            refresh_started = time.perf_counter()
+            cursor.execute(
+                "REFRESH MATERIALIZED VIEW legal_catalog_corpus"
+            )
+            logger.info(
+                "Legal catalogue refreshed duration_ms=%d",
+                round((time.perf_counter() - refresh_started) * 1000),
+            )
+    return True
 
 
 def sync_external_graphrag(
@@ -1297,6 +1339,19 @@ class PostgresGraphRAGStore:
         if not self.config.postgres_ready:
             raise RuntimeError("PostgreSQL backend requires DATABASE_URL.")
         self.connection = postgres_connection(self.config)
+        self.pool = ConnectionPool(
+            conninfo=postgres_dsn(self.config.database_url),
+            min_size=1,
+            max_size=max(int(self.config.retrieval_postgres_pool_size), 2),
+            timeout=10,
+            kwargs={
+                "row_factory": dict_row,
+                "autocommit": True,
+            },
+            check=ConnectionPool.check_connection,
+            open=True,
+            name="vlegal-retrieval",
+        )
         self._bm25_corpus_statistics: tuple[int, float] | None = None
         self._is_ready = True
         try:
@@ -1308,7 +1363,28 @@ class PostgresGraphRAGStore:
             self._is_ready = False
 
     def close(self) -> None:
+        pool = getattr(self, "pool", None)
+        if pool is not None:
+            pool.close()
         self.connection.close()
+
+    @contextmanager
+    def _retrieval_connection(self):
+        """Return a dedicated read connection and its pool wait in ms.
+
+        Unit tests and older callers construct the store without running
+        ``__init__``. Keep their injected ``connection`` usable while
+        production retrieval uses the bounded pool.
+        """
+
+        pool = getattr(self, "pool", None)
+        if pool is None:
+            yield self.connection, 0
+            return
+        wait_started = time.perf_counter()
+        with pool.connection() as connection:
+            wait_ms = round((time.perf_counter() - wait_started) * 1000)
+            yield connection, wait_ms
 
     def stats(self) -> dict[str, Any]:
         current_chunk = postgres_latest_chunk_predicate("current_chunk")
@@ -1347,12 +1423,38 @@ class PostgresGraphRAGStore:
         query = normalize_space(query)
         if not query:
             return []
+        started = time.perf_counter()
+        query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
         candidate_limit = max(64, top_k * 8)
-        vector_candidates = self._vector_candidates(query, candidate_limit)
-        bm25_candidates = self._bm25_candidates(query, candidate_limit)
+        branch_started = time.perf_counter()
+        # BM25 has no dependency on the remote query embedding. Start it in
+        # parallel while the current worker performs embedding -> vector SQL.
+        # Both SQL branches acquire different bounded-pool connections.
+        with ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="vlegal-bm25",
+        ) as executor:
+            bm25_future = executor.submit(
+                self._bm25_candidates,
+                query,
+                candidate_limit,
+            )
+            vector_candidates = self._vector_candidates(query, candidate_limit)
+            bm25_candidates = bm25_future.result()
+        branches_ms = round((time.perf_counter() - branch_started) * 1000)
         if not vector_candidates and not bm25_candidates:
+            logger.info(
+                "Postgres retrieval completed query_sha256=%s "
+                "candidate_limit=%d vector_candidates=0 bm25_candidates=0 "
+                "branches_ms=%d fusion_ms=0 total_ms=%d",
+                query_hash,
+                candidate_limit,
+                branches_ms,
+                round((time.perf_counter() - started) * 1000),
+            )
             return []
 
+        fusion_started = time.perf_counter()
         vector_weight = max(float(self.config.hybrid_vector_weight), 0.0)
         bm25_weight = max(float(self.config.hybrid_bm25_weight), 0.0)
         total_weight = vector_weight + bm25_weight
@@ -1395,63 +1497,118 @@ class PostgresGraphRAGStore:
         for idx, row in enumerate(selected, start=1):
             row["source_id"] = f"S{idx}"
             row["score"] = round(float(row["score"]), 4)
+        fusion_ms = round((time.perf_counter() - fusion_started) * 1000)
+        logger.info(
+            "Postgres retrieval completed query_sha256=%s "
+            "candidate_limit=%d vector_candidates=%d bm25_candidates=%d "
+            "selected=%d branches_ms=%d fusion_ms=%d total_ms=%d",
+            query_hash,
+            candidate_limit,
+            len(vector_candidates),
+            len(bm25_candidates),
+            len(selected),
+            branches_ms,
+            fusion_ms,
+            round((time.perf_counter() - started) * 1000),
+        )
         return selected
 
     def _vector_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
+        query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
+        embedding_started = time.perf_counter()
         dense_vector = postgres_dense_vector(query, self.config)
+        embedding_ms = round((time.perf_counter() - embedding_started) * 1000)
         if dense_vector is None:
+            logger.info(
+                "Vector retrieval skipped query_sha256=%s embedding_ms=%d "
+                "reason=embedding_unavailable",
+                query_hash,
+                embedding_ms,
+            )
             return []
         query_vector = vector_literal(dense_vector)
         current_chunk = postgres_latest_chunk_predicate("current_chunk")
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                f"""
-                SELECT current_chunk.chunk_id, current_chunk.doc_id,
-                       current_chunk.node_id, current_chunk.chunk_type,
-                       current_chunk.title, current_chunk.path_label,
-                       current_chunk.citation, current_chunk.text,
-                       current_chunk.token_count, current_chunk.ordinal,
-                       current_chunk.source_url, current_chunk.law_code,
-                       current_chunk.law_status, current_chunk.law_version,
-                       1 - (current_chunk.embedding <=> %s::vector) AS _vector_score
-                FROM graphrag_chunk AS current_chunk
-                WHERE {current_chunk}
-                ORDER BY current_chunk.embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (query_vector, query_vector, limit),
-            )
-            return [dict(row) for row in cursor.fetchall()]
+        with self._retrieval_connection() as (connection, pool_wait_ms):
+            with connection.cursor() as cursor:
+                execute_started = time.perf_counter()
+                cursor.execute(
+                    f"""
+                    SELECT current_chunk.chunk_id, current_chunk.doc_id,
+                           current_chunk.node_id, current_chunk.chunk_type,
+                           current_chunk.title, current_chunk.path_label,
+                           current_chunk.citation, current_chunk.text,
+                           current_chunk.token_count, current_chunk.ordinal,
+                           current_chunk.source_url, current_chunk.law_code,
+                           current_chunk.law_status, current_chunk.law_version,
+                           1 - (current_chunk.embedding <=> %s::vector) AS _vector_score
+                    FROM graphrag_chunk AS current_chunk
+                    WHERE {current_chunk}
+                    ORDER BY current_chunk.embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (query_vector, query_vector, limit),
+                )
+                sql_execute_ms = round(
+                    (time.perf_counter() - execute_started) * 1000
+                )
+                materialize_started = time.perf_counter()
+                rows = [dict(row) for row in cursor.fetchall()]
+                materialize_ms = round(
+                    (time.perf_counter() - materialize_started) * 1000
+                )
+        logger.info(
+            "Vector retrieval completed query_sha256=%s embedding_ms=%d "
+            "pool_wait_ms=%d sql_execute_ms=%d materialize_ms=%d "
+            "candidates=%d",
+            query_hash,
+            embedding_ms,
+            pool_wait_ms,
+            sql_execute_ms,
+            materialize_ms,
+            len(rows),
+        )
+        return rows
 
     def _bm25_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
+        started = time.perf_counter()
+        query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
         terms = postgres_lexical_terms(query)
         tsquery = postgres_or_tsquery(terms)
         if not tsquery:
             return []
 
         current_chunk = postgres_latest_chunk_predicate("current_chunk")
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                f"""
-                WITH query AS (SELECT to_tsquery('simple', %s) AS value)
-                SELECT current_chunk.chunk_id, current_chunk.doc_id,
-                       current_chunk.node_id, current_chunk.chunk_type,
-                       current_chunk.title, current_chunk.path_label,
-                       current_chunk.citation, current_chunk.text,
-                       current_chunk.token_count, current_chunk.ordinal,
-                       current_chunk.source_url, current_chunk.law_code,
-                       current_chunk.law_status, current_chunk.law_version,
-                       ts_rank_cd({POSTGRES_TEXT_SEARCH_EXPRESSION}, query.value, 32) AS _fts_score
-                FROM graphrag_chunk AS current_chunk
-                CROSS JOIN query
-                WHERE {current_chunk}
-                  AND {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ query.value
-                ORDER BY _fts_score DESC, chunk_id
-                LIMIT %s
-                """,
-                (tsquery, limit),
-            )
-            rows = [dict(row) for row in cursor.fetchall()]
+        with self._retrieval_connection() as (connection, pool_wait_ms):
+            with connection.cursor() as cursor:
+                execute_started = time.perf_counter()
+                cursor.execute(
+                    f"""
+                    WITH query AS (SELECT to_tsquery('simple', %s) AS value)
+                    SELECT current_chunk.chunk_id, current_chunk.doc_id,
+                           current_chunk.node_id, current_chunk.chunk_type,
+                           current_chunk.title, current_chunk.path_label,
+                           current_chunk.citation, current_chunk.text,
+                           current_chunk.token_count, current_chunk.ordinal,
+                           current_chunk.source_url, current_chunk.law_code,
+                           current_chunk.law_status, current_chunk.law_version,
+                           ts_rank_cd({POSTGRES_TEXT_SEARCH_EXPRESSION}, query.value, 32) AS _fts_score
+                    FROM graphrag_chunk AS current_chunk
+                    CROSS JOIN query
+                    WHERE {current_chunk}
+                      AND {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ query.value
+                    ORDER BY _fts_score DESC, chunk_id
+                    LIMIT %s
+                    """,
+                    (tsquery, limit),
+                )
+                sql_execute_ms = round(
+                    (time.perf_counter() - execute_started) * 1000
+                )
+                materialize_started = time.perf_counter()
+                rows = [dict(row) for row in cursor.fetchall()]
+                materialize_ms = round(
+                    (time.perf_counter() - materialize_started) * 1000
+                )
 
         # PostgreSQL has already ordered this shortlist with its indexed
         # full-text rank. Recomputing BM25 here used one correlated corpus
@@ -1462,6 +1619,16 @@ class PostgresGraphRAGStore:
         # combines this ordering with dense-vector retrieval.
         for row in rows:
             row["_bm25_score"] = float(row.get("_fts_score", 0.0) or 0.0)
+        logger.info(
+            "BM25 retrieval completed query_sha256=%s pool_wait_ms=%d "
+            "sql_execute_ms=%d materialize_ms=%d candidates=%d total_ms=%d",
+            query_hash,
+            pool_wait_ms,
+            sql_execute_ms,
+            materialize_ms,
+            len(rows),
+            round((time.perf_counter() - started) * 1000),
+        )
         return rows
 
     def _corpus_statistics(self) -> tuple[int, float]:
