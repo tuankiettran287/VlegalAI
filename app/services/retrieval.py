@@ -157,8 +157,11 @@ _SHARED_TOPIC_TERMS = {
 }
 _LEGAL_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
     (
-        ("luong co ban",),
-        "tiền lương mức lương theo công việc mức lương tối thiểu Điều 90 Điều 91",
+        ("luong co ban", "luong vung", "muc luong vung"),
+        (
+            "tiền lương mức lương theo công việc mức lương tối thiểu vùng "
+            "hiện hành mới nhất Điều 3 Điều 4 Điều 90 Điều 91"
+        ),
     ),
     (
         ("lam le", "ngay le", "le tet"),
@@ -375,6 +378,84 @@ def _rows_have_query_evidence(query: str, rows: list[dict[str, Any]]) -> bool:
     return not anchors or any(anchor in evidence for anchor in anchors)
 
 
+_LEGAL_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+_EXPLICIT_LEGAL_VERSION_RE = re.compile(
+    r"(?:\b\d{1,4}/(?:19|20)\d{2}(?:/|-)|\bnam\s+(?:19|20)\d{2}\b)"
+)
+
+
+def _retrieved_legal_version(row: dict[str, Any]) -> tuple[str, str, int] | None:
+    """Return a comparable (instrument family, locator, year) tuple.
+
+    Corpus citations contain the instrument title and number in their first
+    segment, followed by the article/clause path.  Removing only the numbered
+    parenthetical lets us compare equivalent provisions across yearly
+    replacements without treating unrelated instruments as versions.
+    """
+
+    citation = str(row.get("citation") or row.get("title") or "").strip()
+    if not citation:
+        return None
+    label, separator, locator = citation.partition(">")
+    years = [int(match) for match in _LEGAL_YEAR_RE.findall(label)]
+    if not years:
+        return None
+    family = re.sub(
+        r"\([^)]*(?:19|20)\d{2}[^)]*\)",
+        " ",
+        _ascii(label),
+    )
+    family = re.sub(r"[^a-z0-9]+", " ", family).strip()
+    normalized_locator = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        _ascii(locator if separator else ""),
+    ).strip()
+    if not family:
+        return None
+    return family, normalized_locator, max(years)
+
+
+def _prefer_latest_retrieved_legal_versions(
+    query: str,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop stale duplicates only when an equivalent newer provision exists.
+
+    A query that explicitly names a legal version/year remains historical and
+    keeps every retrieved version.  This is deliberately not a replacement
+    for authoritative freshness metadata; it prevents contradictory versions
+    of the same titled provision from entering one current/general answer.
+    """
+
+    if _EXPLICIT_LEGAL_VERSION_RE.search(_ascii(query)):
+        return rows
+
+    versions: dict[tuple[str, str], int] = {}
+    parsed: list[tuple[dict[str, Any], tuple[str, str, int] | None]] = []
+    for row in rows:
+        version = _retrieved_legal_version(row)
+        parsed.append((row, version))
+        if version is None:
+            continue
+        family, locator, year = version
+        key = (family, locator)
+        versions[key] = max(versions.get(key, year), year)
+
+    selected: list[dict[str, Any]] = []
+    for row, version in parsed:
+        if version is None:
+            selected.append(row)
+            continue
+        family, locator, year = version
+        if year < versions[(family, locator)]:
+            continue
+        reasons = [*row.get("reasons", []), "newest_retrieved_legal_version"]
+        row["reasons"] = list(dict.fromkeys(str(item) for item in reasons))
+        selected.append(row)
+    return selected
+
+
 def _merge_retrieval_rows(
     result_sets: list[list[dict[str, Any]]],
     limit: int,
@@ -436,6 +517,10 @@ def _merge_retrieval_rows(
             -float(row.get("score") or 0),
             str(row.get("chunk_id") or row.get("citation") or ""),
         ),
+    )
+    ranked = _prefer_latest_retrieved_legal_versions(
+        queries[0] if queries else "",
+        ranked,
     )
     selected: list[dict[str, Any]] = []
     per_document: dict[str, int] = {}

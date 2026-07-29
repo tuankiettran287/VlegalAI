@@ -161,6 +161,93 @@ def test_retrieval_runs_each_compound_facet_and_merges_results() -> None:
     assert {row["node_id"] for row in rows} == {"node-S1", "node-S2"}
 
 
+def test_general_wage_query_prefers_newest_equivalent_legal_version() -> None:
+    class _Store:
+        def retrieve(self, _: str, __: int) -> list[dict]:
+            return [
+                {
+                    **_source(
+                        "old",
+                        citation=(
+                            "NGHỊ ĐỊNH Quy định mức lương tối thiểu đối với "
+                            "người lao động làm việc theo hợp đồng lao động "
+                            "(38/2022/NĐ-CP) > Điều 3. Mức lương tối thiểu"
+                        ),
+                        text="Vùng I | 4.680.000 | 22.500",
+                    ),
+                    "doc_id": "nghi-dinh-38-2022",
+                },
+                {
+                    **_source(
+                        "new",
+                        citation=(
+                            "NGHỊ ĐỊNH Quy định mức lương tối thiểu đối với "
+                            "người lao động làm việc theo hợp đồng lao động "
+                            "(293/2025/NĐ-CP) > Điều 3. Mức lương tối thiểu"
+                        ),
+                        text="Vùng I | 5.310.000 | 25.500",
+                    ),
+                    "doc_id": "nghi-dinh-293-2025",
+                },
+            ]
+
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    service._store = _Store()
+
+    rows = asyncio.run(
+        service.retrieve("Mức lương cơ bản của người lao động là bao nhiêu?")
+    )
+
+    assert {row["node_id"] for row in rows} == {"node-new"}
+    assert "5.310.000" in rows[0]["text"]
+    assert any(
+        "Điều 3 Điều 4" in query
+        for query in plan_retrieval_queries(
+            "Mức lương vùng I hiện nay là bao nhiêu?"
+        )
+    )
+
+
+def test_explicit_historical_wage_query_keeps_requested_version() -> None:
+    class _Store:
+        def retrieve(self, _: str, __: int) -> list[dict]:
+            return [
+                {
+                    **_source(
+                        "old",
+                        citation=(
+                            "NGHỊ ĐỊNH Quy định mức lương tối thiểu đối với "
+                            "người lao động làm việc theo hợp đồng lao động "
+                            "(38/2022/NĐ-CP) > Điều 3. Mức lương tối thiểu"
+                        ),
+                        text="Vùng I | 4.680.000 | 22.500",
+                    ),
+                    "doc_id": "nghi-dinh-38-2022",
+                },
+                {
+                    **_source(
+                        "new",
+                        citation=(
+                            "NGHỊ ĐỊNH Quy định mức lương tối thiểu đối với "
+                            "người lao động làm việc theo hợp đồng lao động "
+                            "(293/2025/NĐ-CP) > Điều 3. Mức lương tối thiểu"
+                        ),
+                        text="Vùng I | 5.310.000 | 25.500",
+                    ),
+                    "doc_id": "nghi-dinh-293-2025",
+                },
+            ]
+
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    service._store = _Store()
+
+    rows = asyncio.run(
+        service.retrieve("Theo Nghị định 38/2022/NĐ-CP, lương vùng I là bao nhiêu?")
+    )
+
+    assert {row["node_id"] for row in rows} == {"node-old", "node-new"}
+
+
 def test_out_of_scope_vector_results_are_rejected() -> None:
     class _Store:
         def retrieve(self, _: str, __: int) -> list[dict]:
