@@ -1266,6 +1266,25 @@ async def readiness(
     return {"status": "ready"}
 
 
+@router.get("/health/graph", tags=["health"])
+async def graph_readiness(
+    retrieval: RetrievalService = Depends(retrieval_service),
+) -> dict[str, str]:
+    result = await retrieval.graph_health()
+    if not bool(result.get("available")):
+        reason = str(result.get("reason") or "unexpected")
+        logger.warning("Neo4j readiness failed reason=%s", reason)
+        raise HTTPException(
+            status_code=503,
+            detail="Neo4j graph service is not ready",
+        )
+    reason = str(result.get("reason") or "ready")
+    return {
+        "status": "ready",
+        "neo4j": "not_required" if reason == "not_required" else "ready",
+    }
+
+
 @router.get("/stats")
 async def stats(
     db: AsyncSession = Depends(get_db),
@@ -1277,6 +1296,12 @@ async def stats(
         "nodes": int(raw.get("nodes", 0) or 0),
         "edges": int(raw.get("edges", 0) or 0),
         "chunks": int(raw.get("chunks", 0) or 0),
+        "retrieval_backend": str(raw.get("backend") or "unknown"),
+        "neo4j_available": bool(raw.get("neo4j_available", False)),
+        "neo4j_status": str(
+            raw.get("neo4j_status")
+            or ("ready" if raw.get("neo4j_available") else "not_required")
+        ),
         "conversations": int(await db.scalar(select(func.count(Conversation.id))) or 0),
         "artifacts": int(await db.scalar(select(func.count(Artifact.id))) or 0),
         "answer_cache_entries": int(

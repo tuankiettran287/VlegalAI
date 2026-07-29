@@ -43,9 +43,14 @@ _TYPE_PATTERNS = (
 )
 _COUNT_RE = re.compile(r"\b(?:co\s+)?bao\s+nhieu\b|\btong\s+so\b")
 _LIST_RE = re.compile(r"\bliet\s+ke\b|\bdanh\s+sach\b|\bgom\s+nhung\b")
+_SUMMARY_RE = re.compile(
+    r"\bthong\s+ke\b|\bphan\s+bo\b|\bthong\s+tin\s+tong\s+quan\b"
+)
 _CATALOG_SCOPE_RE = re.compile(
-    r"\b(?:kho|corpus|co\s+so\s+du\s+lieu)\s+(?:van\s+ban\s+)?vlegal\b"
-    r"|\btrong\s+vlegal\b"
+    r"\b(?:kho|corpus|co\s+so\s+du\s+lieu)\s+"
+    r"(?:(?:van\s+ban|luat|du\s+lieu)\s+)?vlegal\b"
+    r"|\b(?:trong|cua)\s+(?:kho\s+)?vlegal\b"
+    r"|\bdu\s+lieu\s+cua\s+vlegal\b"
 )
 _IN_FORCE_RE = re.compile(r"\b(?:dang|con)\s+(?:co\s+)?hieu\s+luc\b")
 _EXPIRED_RE = re.compile(r"\bhet\s+hieu\s+luc\b")
@@ -78,7 +83,11 @@ def parse_catalog_request(query: str) -> CatalogRequest | None:
     normalized = _ascii_text(query)
     if not _CATALOG_SCOPE_RE.search(normalized):
         return None
-    if not (_COUNT_RE.search(normalized) or _LIST_RE.search(normalized)):
+    if not (
+        _COUNT_RE.search(normalized)
+        or _LIST_RE.search(normalized)
+        or _SUMMARY_RE.search(normalized)
+    ):
         return None
 
     document_type = next(
@@ -94,8 +103,14 @@ def parse_catalog_request(query: str) -> CatalogRequest | None:
         status = "CURRENT"
     elif _EXPIRED_RE.search(normalized):
         status = "EXPIRED"
+    if _LIST_RE.search(normalized):
+        action = "list"
+    elif _SUMMARY_RE.search(normalized):
+        action = "summary"
+    else:
+        action = "count"
     return CatalogRequest(
-        action="list" if _LIST_RE.search(normalized) else "count",
+        action=action,
         document_type=document_type,
         status=status,
     )
@@ -241,7 +256,7 @@ class LegalCatalogService:
             if normalized_status == "CURRENT":
                 conditions.append(
                     "resolved_status IN "
-                    "('IN_FORCE', 'PARTIALLY_IN_FORCE', 'AMENDED')"
+                    "('CURRENT', 'IN_FORCE', 'PARTIALLY_IN_FORCE', 'AMENDED')"
                 )
             else:
                 conditions.append("resolved_status = :status")
@@ -282,6 +297,37 @@ class LegalCatalogService:
         }
 
     async def answer(self, request: CatalogRequest) -> str:
+        if (
+            request.action == "summary"
+            and request.document_type is None
+            and request.status is None
+        ):
+            stats = await self.stats()
+            type_lines = [
+                f"- {CATALOG_TYPES.get(key, key)}: {count}"
+                for key, count in sorted(stats["by_type"].items())
+                if count
+            ]
+            status_lines = [
+                f"- {STATUS_LABELS.get(key, key)}: {count}"
+                for key, count in sorted(stats["by_status"].items())
+                if count
+            ]
+            as_of = stats.get("as_of")
+            as_of_text = (
+                f" Dữ liệu catalog được làm mới lúc {as_of.isoformat()}."
+                if as_of
+                else ""
+            )
+            return (
+                f"Kho VLegal hiện có {int(stats['total'])} văn bản đã index."
+                " Con số này chỉ phản ánh corpus VLegal, không phải toàn bộ "
+                f"hệ thống văn bản pháp luật Việt Nam.{as_of_text}\n\n"
+                "Theo loại văn bản:\n"
+                + "\n".join(type_lines)
+                + "\n\nTheo trạng thái hiệu lực/kiểm chứng:\n"
+                + "\n".join(status_lines)
+            )
         result = await self.documents(
             document_type=request.document_type,
             status=request.status,

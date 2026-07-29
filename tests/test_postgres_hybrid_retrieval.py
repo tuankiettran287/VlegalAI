@@ -5,8 +5,10 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from neo4j.exceptions import AuthError
 
 from app import external_graphrag as graphrag_module
+from app.services import retrieval as retrieval_module
 from app.external_graphrag import (
     CURRENT_LAW_STATUSES,
     Neo4jGraphRAGStore,
@@ -20,6 +22,7 @@ from app.external_graphrag import (
     postgres_latest_chunk_predicate,
     postgres_lexical_terms,
     postgres_or_tsquery,
+    probe_neo4j,
     reciprocal_rank_fusion,
     validate_postgres_embeddings,
 )
@@ -373,6 +376,142 @@ class _GraphDriver:
 
     def session(self, **_: object) -> _GraphSession:
         return self.recording_session
+
+
+def test_probe_neo4j_reports_ready_without_leaking_configuration(
+    monkeypatch,
+) -> None:
+    class _ProbeResult:
+        def single(self) -> dict[str, int]:
+            return {"ok": 1}
+
+    class _ProbeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def run(self, query: str) -> _ProbeResult:
+            assert query == "RETURN 1 AS ok"
+            return _ProbeResult()
+
+    class _ProbeDriver:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def session(self, *, database: str) -> _ProbeSession:
+            assert database == "neo4j"
+            return _ProbeSession()
+
+        def close(self) -> None:
+            self.closed = True
+
+    driver = _ProbeDriver()
+    monkeypatch.setattr(graphrag_module, "neo4j_driver", lambda _: driver)
+
+    result = probe_neo4j(
+        SimpleNamespace(
+            neo4j_password="private",
+            neo4j_database="neo4j",
+        )
+    )
+
+    assert result == {
+        "available": True,
+        "reason": "ready",
+        "database": "neo4j",
+    }
+    assert driver.closed
+    assert "private" not in repr(result)
+
+
+def test_probe_neo4j_classifies_authentication_failure(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        graphrag_module,
+        "neo4j_driver",
+        lambda _: (_ for _ in ()).throw(AuthError("secret rejected")),
+    )
+
+    result = probe_neo4j(
+        SimpleNamespace(
+            neo4j_password="private",
+            neo4j_database="neo4j",
+        )
+    )
+
+    assert result == {
+        "available": False,
+        "reason": "authentication",
+        "database": "neo4j",
+    }
+    assert "secret" not in repr(result)
+    assert "private" not in repr(result)
+
+
+def test_retrieval_graph_health_skips_neo4j_when_not_required() -> None:
+    service = RetrievalService(
+        SimpleNamespace(retriever_backend="rag")
+    )
+
+    assert asyncio.run(service.graph_health()) == {
+        "available": True,
+        "reason": "not_required",
+        "database": "",
+    }
+
+
+def test_retrieval_graph_health_uses_safe_probe(monkeypatch) -> None:
+    observed = {}
+
+    def probe(config):
+        observed["database"] = config.neo4j_database
+        return {
+            "available": False,
+            "reason": "authentication",
+            "database": config.neo4j_database,
+        }
+
+    monkeypatch.setattr(retrieval_module, "probe_neo4j", probe)
+    settings = SimpleNamespace(
+        retriever_backend="hybrid_rag",
+        neo4j_uri="neo4j+s://example.test",
+        neo4j_user="neo4j",
+        neo4j_password="private",
+        neo4j_database="neo4j",
+        database_url="postgresql+asyncpg://user:pass@example.test/db",
+        postgres_vector_size=1024,
+        embedding_provider="vertex",
+        embedding_model="gemini-embedding-001",
+        gemini_project_id="project",
+        embedding_location="asia-southeast1",
+        gemini_credentials_path="",
+        gemini_use_adc=True,
+        gemini_api_key="",
+        embedding_max_concurrency=2,
+        embedding_batch_size=20,
+        embedding_max_items_per_minute=0,
+        embedding_timeout_seconds=60.0,
+        embedding_max_retries=3,
+        embedding_auto_truncate=True,
+        gemini_data_policy="redact",
+        embedding_vertex_locations="",
+        embedding_vertex_requests_per_minute=4.0,
+        embedding_vertex_max_queue_wait_seconds=60.0,
+        retrieval_postgres_pool_size=3,
+        hybrid_vector_weight=0.55,
+        hybrid_bm25_weight=0.45,
+        hybrid_rrf_k=60,
+        bm25_k1=1.5,
+        bm25_b=0.75,
+    )
+
+    result = asyncio.run(RetrievalService(settings).graph_health())
+
+    assert result["reason"] == "authentication"
+    assert observed == {"database": "neo4j"}
 
 
 def test_postgres_embedding_validation_uses_trusted_metadata_row() -> None:

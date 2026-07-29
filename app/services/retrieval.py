@@ -17,6 +17,7 @@ from app.external_graphrag import (
     Neo4jGraphRAGStore,
     Neo4jPostgresGraphRAGStore,
     PostgresGraphRAGStore,
+    probe_neo4j,
 )
 from app.legal_graphrag import GraphRAGStore
 from app.services.ai import untrusted_data_block
@@ -755,6 +756,19 @@ class RetrievalService:
         )
         store = await self._get_store(route)
         return await run_in_threadpool(store.stats)
+
+    async def graph_health(self) -> dict[str, Any]:
+        backend = getattr(self.settings, "retriever_backend", "rag")
+        if backend not in {"hybrid_rag", "graphrag"}:
+            return {
+                "available": True,
+                "reason": "not_required",
+                "database": "",
+            }
+        return await run_in_threadpool(
+            probe_neo4j,
+            _external_config(self.settings),
+        )
 
     async def close(self) -> None:
         closed: set[int] = set()

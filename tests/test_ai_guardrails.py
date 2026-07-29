@@ -22,6 +22,7 @@ from app.api import (
     _summary_prompt,
     _verification_prompt,
     chat,
+    graph_readiness,
     readiness,
 )
 from app.core.config import Settings
@@ -1410,3 +1411,39 @@ def test_readiness_sanitizes_embedding_endpoint_failure() -> None:
 
     assert error.value.status_code == 503
     assert internal not in str(error.value.detail)
+
+
+def test_graph_readiness_accepts_available_neo4j() -> None:
+    retrieval = SimpleNamespace(
+        graph_health=AsyncMock(
+            return_value={
+                "available": True,
+                "reason": "ready",
+                "database": "neo4j",
+            }
+        )
+    )
+
+    assert asyncio.run(graph_readiness(retrieval)) == {
+        "status": "ready",
+        "neo4j": "ready",
+    }
+
+
+def test_graph_readiness_sanitizes_authentication_failure() -> None:
+    retrieval = SimpleNamespace(
+        graph_health=AsyncMock(
+            return_value={
+                "available": False,
+                "reason": "authentication",
+                "database": "neo4j",
+            }
+        )
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(graph_readiness(retrieval))
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "Neo4j graph service is not ready"
+    assert "authentication" not in str(error.value.detail)

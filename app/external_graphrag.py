@@ -17,6 +17,12 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from neo4j import GraphDatabase
+from neo4j.exceptions import (
+    AuthError,
+    ClientError,
+    ServiceUnavailable,
+    SessionExpired,
+)
 import psycopg
 from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
@@ -33,6 +39,9 @@ from app.services.embeddings import (
 
 
 logger = logging.getLogger(__name__)
+
+NEO4J_CONNECTION_TIMEOUT_SECONDS = 5.0
+NEO4J_ACQUISITION_TIMEOUT_SECONDS = 8.0
 
 
 #: Accent-stripped Vietnamese relation -> Neo4j relationship type.
@@ -524,7 +533,57 @@ def neo4j_driver(config: ExternalGraphRAGConfig):
     return GraphDatabase.driver(
         config.neo4j_uri,
         auth=(config.neo4j_user, config.neo4j_password),
+        connection_timeout=NEO4J_CONNECTION_TIMEOUT_SECONDS,
+        connection_acquisition_timeout=NEO4J_ACQUISITION_TIMEOUT_SECONDS,
     )
+
+
+def neo4j_error_reason(exc: Exception) -> str:
+    """Return a stable, secret-safe failure category for operations/logs."""
+
+    if isinstance(exc, AuthError):
+        return "authentication"
+    if isinstance(exc, (ServiceUnavailable, SessionExpired)):
+        return "connectivity"
+    if isinstance(exc, ClientError):
+        return "database_or_query"
+    return "unexpected"
+
+
+def probe_neo4j(config: ExternalGraphRAGConfig) -> dict[str, Any]:
+    """Verify credentials and the configured database without exposing secrets."""
+
+    if not config.neo4j_password:
+        return {
+            "available": False,
+            "reason": "missing_credentials",
+            "database": config.neo4j_database,
+        }
+    driver = None
+    try:
+        driver = neo4j_driver(config)
+        with driver.session(database=config.neo4j_database) as session:
+            record = session.run("RETURN 1 AS ok").single()
+        if not record or int(record["ok"] or 0) != 1:
+            return {
+                "available": False,
+                "reason": "unexpected_response",
+                "database": config.neo4j_database,
+            }
+        return {
+            "available": True,
+            "reason": "ready",
+            "database": config.neo4j_database,
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": neo4j_error_reason(exc),
+            "database": config.neo4j_database,
+        }
+    finally:
+        if driver is not None:
+            driver.close()
 
 
 def ensure_neo4j_schema(driver, database: str) -> None:
@@ -2017,14 +2076,16 @@ class Neo4jPostgresGraphRAGStore:
         except Exception as exc:
             logger.warning(
                 "Neo4j stats unavailable; returning PostgreSQL stats "
-                "error_type=%s",
+                "error_type=%s reason=%s",
                 type(exc).__name__,
+                neo4j_error_reason(exc),
             )
             rag_stats = self.rag.stats()
             return {
                 **rag_stats,
                 "backend": "postgres_hybrid",
                 "neo4j_available": False,
+                "neo4j_status": neo4j_error_reason(exc),
                 "neo4j_uri": self.config.neo4j_uri,
             }
         rag_stats = self.rag.stats()
@@ -2039,6 +2100,7 @@ class Neo4jPostgresGraphRAGStore:
             "node_types": {item["node_type"]: item["count"] for item in node_type_rows},
             "neo4j_uri": self.config.neo4j_uri,
             "neo4j_available": True,
+            "neo4j_status": "ready",
             "retrieval": {
                 "dense": "cosine",
                 "lexical": "bm25",
@@ -2100,8 +2162,9 @@ class Neo4jPostgresGraphRAGStore:
         except Exception as exc:
             logger.warning(
                 "Neo4j graph expansion failed; using PostgreSQL retrieval "
-                "error_type=%s",
+                "error_type=%s reason=%s",
                 type(exc).__name__,
+                neo4j_error_reason(exc),
             )
             selected = [dict(row) for row in candidates[:top_k]]
             for index, row in enumerate(selected, start=1):

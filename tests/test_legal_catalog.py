@@ -89,6 +89,39 @@ class _CatalogDB:
         raise AssertionError(sql)
 
 
+class _StatsCatalogDB:
+    async def execute(self, statement, parameters):
+        sql = str(statement)
+        if "count(*)::bigint AS total" in sql:
+            return _Result(
+                [
+                    {
+                        "total": 3,
+                        "metadata_verified": 2,
+                        "metadata_unverified": 1,
+                        "missing_source_url": 1,
+                        "status_conflicts": 0,
+                        "as_of": datetime(2026, 7, 29, tzinfo=UTC),
+                    }
+                ]
+            )
+        if "GROUP BY document_type" in sql:
+            return _Result(
+                [
+                    {"key": "DECREE", "count": 2},
+                    {"key": "LAW", "count": 1},
+                ]
+            )
+        if "GROUP BY resolved_status" in sql:
+            return _Result(
+                [
+                    {"key": "IN_FORCE", "count": 2},
+                    {"key": "UNVERIFIED", "count": 1},
+                ]
+            )
+        raise AssertionError(sql)
+
+
 def test_catalog_intent_requires_explicit_vlegal_scope() -> None:
     assert parse_catalog_request(
         "Có bao nhiêu nghị định trong kho VLegal?"
@@ -105,6 +138,22 @@ def test_catalog_intent_requires_explicit_vlegal_scope() -> None:
     ) is None
     assert parse_catalog_request(
         "Nghị định 118 có bao nhiêu Điều?"
+    ) is None
+
+
+def test_catalog_intent_recognizes_vlegal_summary_wording() -> None:
+    assert parse_catalog_request(
+        "Thống kê văn bản theo loại và hiệu lực trong kho dữ liệu VLegal"
+    ) == CatalogRequest(action="summary")
+    assert parse_catalog_request(
+        "Thống kê nghị định đang có hiệu lực trong kho luật VLegal"
+    ) == CatalogRequest(
+        action="summary",
+        document_type="DECREE",
+        status="CURRENT",
+    )
+    assert parse_catalog_request(
+        "Thống kê nghị định đang có hiệu lực tại Việt Nam"
     ) is None
 
 
@@ -126,3 +175,28 @@ def test_catalog_answer_states_its_corpus_scope_and_preserves_unknown() -> None:
         and "document.verified_at IS NOT NULL" in statement
         for statement in db.statements
     )
+
+
+def test_current_status_filter_includes_literal_current_status() -> None:
+    db = _CatalogDB()
+    service = LegalCatalogService(db)  # type: ignore[arg-type]
+
+    asyncio.run(service.documents(status="CURRENT"))
+
+    assert any(
+        "'CURRENT', 'IN_FORCE', 'PARTIALLY_IN_FORCE', 'AMENDED'"
+        in statement
+        for statement in db.statements
+    )
+
+
+def test_catalog_summary_uses_direct_sql_group_counts() -> None:
+    service = LegalCatalogService(_StatsCatalogDB())  # type: ignore[arg-type]
+
+    answer = asyncio.run(service.answer(CatalogRequest(action="summary")))
+
+    assert "Kho VLegal hiện có 3 văn bản đã index" in answer
+    assert "nghị định: 2" in answer
+    assert "luật: 1" in answer
+    assert "đang có hiệu lực: 2" in answer
+    assert "chưa được kiểm chứng: 1" in answer

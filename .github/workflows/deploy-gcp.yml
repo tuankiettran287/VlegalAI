@@ -86,6 +86,8 @@ jobs:
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       NEO4J_URI: ${{ secrets.NEO4J_URI }}
+      NEO4J_USER: ${{ vars.NEO4J_USER || '21d22093' }}
+      NEO4J_DATABASE: ${{ vars.NEO4J_DATABASE || '21d22093' }}
       IMAGE_TAG: ${{ github.sha }}
 
     steps:
@@ -175,6 +177,8 @@ jobs:
             Network = $env:GCP_NETWORK
             Subnet = $env:GCP_SUBNET
             Neo4jUri = $env:NEO4J_URI
+            Neo4jUser = $env:NEO4J_USER
+            Neo4jDatabase = $env:NEO4J_DATABASE
             FrontendUrl = $env:GCP_PUBLIC_FRONTEND_URL
             WorkerInstances = [int]$env:GCP_WORKER_INSTANCES
             BeatInstances = [int]$env:GCP_BEAT_INSTANCES
@@ -202,18 +206,31 @@ jobs:
           )"
 
           for attempt in {1..12}; do
+            api_ready=false
+            graph_ready=false
             if curl --fail --silent --show-error \
               --max-time 15 \
               "${frontend_url}/api/health/ready"; then
+              api_ready=true
+            fi
+            echo
+            if curl --fail --silent --show-error \
+              --max-time 15 \
+              "${frontend_url}/api/health/graph"; then
+              graph_ready=true
+            fi
+            echo
+            if [[ "${api_ready}" == "true" && "${graph_ready}" == "true" ]]; then
               echo
               echo "Production is healthy: ${frontend_url}"
               echo "### Deployment completed" >> "${GITHUB_STEP_SUMMARY}"
               echo "- Commit: \`${IMAGE_TAG}\`" >> "${GITHUB_STEP_SUMMARY}"
               echo "- Frontend: ${frontend_url}" >> "${GITHUB_STEP_SUMMARY}"
+              echo "- Neo4j graph: ready" >> "${GITHUB_STEP_SUMMARY}"
               exit 0
             fi
             sleep 10
           done
 
-          echo "::error::Production readiness check failed: ${frontend_url}/api/health/ready"
+          echo "::error::Production readiness check failed for API or Neo4j graph"
           exit 1
