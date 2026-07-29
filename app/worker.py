@@ -164,6 +164,7 @@ def _article_card_excerpt(
     unavailable_markers = (
         "vlegal chưa thể hoàn tất phần diễn giải tự động",
         "ai tạm thời không khả dụng",
+        "kết quả tìm kiếm có dẫn nguồn",
     )
     if summary_excerpt and not any(
         marker in summary_excerpt.casefold()
@@ -184,6 +185,18 @@ def _article_card_excerpt(
         f"công khai “{source_title}”. Mở bài viết gốc để xem toàn bộ nội dung "
         "và đối chiếu thông tin."
     )[:500]
+
+
+def _article_content_needs_refresh(value: str) -> bool:
+    normalized = (value or "").casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "vlegal chưa thể hoàn tất phần diễn giải tự động",
+            "ai tạm thời không khả dụng",
+            "## kết quả tìm kiếm có dẫn nguồn",
+        )
+    )
 
 
 def _article_publication_slot(value: datetime) -> tuple[date, int, int]:
@@ -231,45 +244,48 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
     pending: list[dict[str, Any]] = []
     skipped_ids: list[str] = []
     for item in batch:
+        needs_refresh = False
         async with SessionFactory() as db:
             existing = await db.scalar(
                 select(Article).where(Article.slug == item["slug"])
             )
             if isinstance(existing, Article):
-                repaired_title = _article_source_title(
-                    existing.title,
-                    existing.source_url,
-                    fallback=f"Cập nhật pháp lý: {item['topic']}",
-                )
-                existing_sources = (
-                    existing.web_sources
-                    if isinstance(existing.web_sources, list)
-                    else []
-                )
-                existing_primary = (
-                    existing_sources[0]
-                    if existing_sources
-                    and isinstance(existing_sources[0], dict)
-                    else {}
-                )
-                repaired_excerpt = _article_card_excerpt(
-                    existing.content,
-                    str(existing_primary.get("excerpt") or ""),
-                    topic=str(item["topic"]),
-                    source_title=repaired_title,
-                )
-                if (
-                    repaired_title != existing.title
-                    or (
-                        repaired_excerpt
-                        and repaired_excerpt != existing.excerpt
+                needs_refresh = _article_content_needs_refresh(existing.content)
+                if not needs_refresh:
+                    repaired_title = _article_source_title(
+                        existing.title,
+                        existing.source_url,
+                        fallback=f"Cập nhật pháp lý: {item['topic']}",
                     )
-                ):
-                    existing.title = repaired_title
-                    if repaired_excerpt:
-                        existing.excerpt = repaired_excerpt
-                    await db.commit()
-        if existing is None:
+                    existing_sources = (
+                        existing.web_sources
+                        if isinstance(existing.web_sources, list)
+                        else []
+                    )
+                    existing_primary = (
+                        existing_sources[0]
+                        if existing_sources
+                        and isinstance(existing_sources[0], dict)
+                        else {}
+                    )
+                    repaired_excerpt = _article_card_excerpt(
+                        existing.content,
+                        str(existing_primary.get("excerpt") or ""),
+                        topic=str(item["topic"]),
+                        source_title=repaired_title,
+                    )
+                    if (
+                        repaired_title != existing.title
+                        or (
+                            repaired_excerpt
+                            and repaired_excerpt != existing.excerpt
+                        )
+                    ):
+                        existing.title = repaired_title
+                        if repaired_excerpt:
+                            existing.excerpt = repaired_excerpt
+                        await db.commit()
+        if existing is None or needs_refresh:
             pending.append(item)
         else:
             skipped_ids.append(str(getattr(existing, "id", existing)))
@@ -286,6 +302,7 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
         }
 
     published_ids: list[str] = []
+    refreshed_ids: list[str] = []
     failures: list[str] = []
     ai = GeminiService(settings)
     try:
@@ -326,40 +343,57 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     fallback=f"Cập nhật pháp lý: {topic}",
                 )
                 async with SessionFactory() as db:
-                    existing_id = await db.scalar(
-                        select(Article.id).where(Article.slug == slug)
+                    existing_article = await db.scalar(
+                        select(Article).where(Article.slug == slug)
                     )
-                    if existing_id is not None:
-                        skipped_ids.append(str(existing_id))
-                        continue
-                    article = Article(
-                        author_id=None,
-                        slug=slug,
-                        title=article_title,
-                        excerpt=_article_card_excerpt(
-                            summary,
-                            str(primary_source.get("excerpt") or ""),
-                            topic=topic,
-                            source_title=article_title,
-                        ),
-                        content=summary,
-                        category="Cập nhật pháp luật",
-                        status="PUBLISHED",
-                        source_url=source_url,
-                        web_sources=sources,
-                        published_at=checked_at,
+                    article_excerpt = _article_card_excerpt(
+                        summary,
+                        str(primary_source.get("excerpt") or ""),
+                        topic=topic,
+                        source_title=article_title,
                     )
-                    db.add(article)
+                    if isinstance(existing_article, Article):
+                        if not _article_content_needs_refresh(
+                            existing_article.content
+                        ):
+                            skipped_ids.append(str(existing_article.id))
+                            continue
+                        article = existing_article
+                        article.title = article_title
+                        article.excerpt = article_excerpt
+                        article.content = summary
+                        article.category = "Cập nhật pháp luật"
+                        article.status = "PUBLISHED"
+                        article.source_url = source_url
+                        article.web_sources = sources
+                    else:
+                        article = Article(
+                            author_id=None,
+                            slug=slug,
+                            title=article_title,
+                            excerpt=article_excerpt,
+                            content=summary,
+                            category="Cập nhật pháp luật",
+                            status="PUBLISHED",
+                            source_url=source_url,
+                            web_sources=sources,
+                            published_at=checked_at,
+                        )
+                        db.add(article)
                     await db.commit()
                     await db.refresh(article)
-                published_ids.append(str(article.id))
+                if isinstance(existing_article, Article):
+                    refreshed_ids.append(str(article.id))
+                else:
+                    published_ids.append(str(article.id))
                 logger.info(
-                    "Published scheduled legal article article_id=%s "
-                    "slot=%s item=%s topic=%s",
+                    "Saved scheduled legal article article_id=%s "
+                    "slot=%s item=%s topic=%s refreshed=%s",
                     article.id,
                     slot_label,
                     item["number"],
                     topic,
+                    isinstance(existing_article, Article),
                 )
             except Exception as exc:
                 failures.append(slug)
@@ -381,11 +415,12 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
         )
 
     return {
-        "published": bool(published_ids),
+        "published": bool(published_ids or refreshed_ids),
         "published_count": len(published_ids),
+        "refreshed_count": len(refreshed_ids),
         "skipped_count": len(skipped_ids),
         "slot": slot_label,
-        "article_ids": [*skipped_ids, *published_ids],
+        "article_ids": [*skipped_ids, *published_ids, *refreshed_ids],
         "slugs": [str(item["slug"]) for item in batch],
     }
 

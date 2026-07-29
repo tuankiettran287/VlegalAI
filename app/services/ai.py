@@ -238,6 +238,27 @@ def _citation_references(value: Any) -> set[str]:
     return references
 
 
+def _is_organizational_heading(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if (
+        re.match(r"^#{1,6}\s+\S", stripped)
+        and not re.search(r"[.!?;]\s*$", stripped)
+    ):
+        return True
+    heading_candidate = re.sub(
+        r"^\s*(?:[-+]|\*(?!\*)|\d+[.)])\s*",
+        "",
+        stripped,
+    ).strip()
+    bold_heading = re.fullmatch(r"\*{2}(.+?)\*{2}", heading_candidate)
+    return bool(
+        bold_heading is not None
+        and not re.search(r"[.!?;]\s*$", bold_heading.group(1))
+    )
+
+
 def validate_citations(
     value: Any,
     allowed_ids: Iterable[str],
@@ -270,26 +291,31 @@ def validate_citations(
         )
     if require_claim_coverage and isinstance(value, str):
         uncovered: list[str] = []
-        for raw_unit in CLAIM_BOUNDARY_RE.split(value):
-            unit = re.sub(
-                r"^\s*(?:[-*+]|\d+[.)])\s*",
-                "",
-                raw_unit,
-            ).strip()
-            unit = re.sub(r"[*_`#]", "", unit).strip()
-            if (
-                not unit
-                or unit.endswith(":")
-                or len(re.findall(r"\w+", unit, flags=re.UNICODE)) < 4
-            ):
+        for raw_line in value.splitlines():
+            if _is_organizational_heading(raw_line):
+                # Standalone Markdown headings organize the answer; they are
+                # not factual claims by themselves and need no citation.
                 continue
-            unit_references = {
-                item
-                for item in _citation_references(unit)
-                if item.startswith(normalized_prefix)
-            }
-            if not unit_references.intersection(allowed):
-                uncovered.append(unit[:160])
+            for raw_unit in CLAIM_BOUNDARY_RE.split(raw_line):
+                unit = re.sub(
+                    r"^\s*(?:[-+]|\*(?!\*)|\d+[.)])\s*",
+                    "",
+                    raw_unit,
+                ).strip()
+                unit = re.sub(r"[*_`#]", "", unit).strip()
+                if (
+                    not unit
+                    or unit.endswith(":")
+                    or len(re.findall(r"\w+", unit, flags=re.UNICODE)) < 4
+                ):
+                    continue
+                unit_references = {
+                    item
+                    for item in _citation_references(unit)
+                    if item.startswith(normalized_prefix)
+                }
+                if not unit_references.intersection(allowed):
+                    uncovered.append(unit[:160])
         if uncovered:
             raise GeminiError(
                 "Gemini trả về luận điểm chưa gắn trích dẫn nguồn hợp lệ: "

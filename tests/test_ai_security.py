@@ -85,6 +85,21 @@ def test_validate_citations_requires_each_substantive_claim_to_have_a_source() -
         )
 
 
+def test_validate_citations_allows_organizational_markdown_heading() -> None:
+    answer = (
+        "## Những thay đổi đáng chú ý\n\n"
+        "**I. Phạm vi điều chỉnh**\n\n"
+        "1. **Quy định trọng tâm**\n\n"
+        "Quy định mới được áp dụng theo nguồn đã cung cấp [S1]."
+    )
+
+    assert validate_citations(
+        answer,
+        ["S1"],
+        require_claim_coverage=True,
+    ) == {"S1"}
+
+
 @pytest.mark.parametrize(
     "claim",
     [

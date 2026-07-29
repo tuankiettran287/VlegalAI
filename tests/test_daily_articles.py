@@ -244,6 +244,103 @@ def test_scheduled_article_batch_skips_all_existing_items(monkeypatch) -> None:
     assert len(result["slugs"]) == 10
 
 
+def test_scheduled_article_refreshes_existing_fallback_content(monkeypatch) -> None:
+    from app import worker
+    from app.models import Article
+
+    existing = Article(
+        id=uuid.uuid4(),
+        author_id=None,
+        slug="cap-nhat-phap-ly-2026-07-29-0700-01",
+        title="example.com",
+        excerpt="Nội dung tạm",
+        content=(
+            "## Kết quả tìm kiếm có dẫn nguồn\n\n"
+            "VLegal chưa thể hoàn tất phần diễn giải tự động."
+        ),
+        category="Cập nhật pháp luật",
+        status="PUBLISHED",
+        source_url="https://example.com/old",
+        web_sources=[],
+        published_at=datetime(2026, 7, 29, 0, tzinfo=UTC),
+    )
+    commits = 0
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def scalar(self, _: object) -> object:
+            return existing
+
+        def add(self, _: object) -> None:
+            raise AssertionError("Refreshing an article must not insert a new row")
+
+        async def commit(self) -> None:
+            nonlocal commits
+            commits += 1
+
+        async def refresh(self, _: object) -> None:
+            return None
+
+    monkeypatch.setattr(worker, "SessionFactory", _Session)
+    monkeypatch.setattr(worker, "ARTICLE_BATCH_SIZE", 1)
+    monkeypatch.setattr(
+        worker,
+        "settings",
+        SimpleNamespace(
+            daily_article_enabled=True,
+            daily_article_topics=["pháp luật lao động"],
+        ),
+    )
+
+    class _Ai:
+        def __init__(self, _: object) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class _Research:
+        def __init__(self, *_: object) -> None:
+            return None
+
+        async def search(self, _: str) -> dict[str, object]:
+            return {
+                "summary": (
+                    "## Nội dung cập nhật\n\n"
+                    "Quy định mới có nội dung chi tiết và căn cứ rõ ràng [W1]."
+                ),
+                "sources": [{
+                    "id": "W1",
+                    "title": "Quy định mới về pháp luật lao động",
+                    "url": "https://example.com/new",
+                    "excerpt": "Nội dung nguồn đã được làm sạch.",
+                }],
+            }
+
+    monkeypatch.setattr(worker, "GeminiService", _Ai)
+    monkeypatch.setattr(worker, "TavilyService", lambda _: object())
+    monkeypatch.setattr(worker, "GoogleSearchService", lambda *_: object())
+    monkeypatch.setattr(worker, "ArticleResearchService", _Research)
+
+    result = asyncio.run(
+        worker._publish_daily_article(datetime(2026, 7, 29, 1, tzinfo=UTC))
+    )
+
+    assert result["published"] is True
+    assert result["published_count"] == 0
+    assert result["refreshed_count"] == 1
+    assert commits == 1
+    assert existing.title == "Quy định mới về pháp luật lao động"
+    assert existing.source_url == "https://example.com/new"
+    assert "chưa thể hoàn tất" not in existing.content
+    assert "Nội dung cập nhật" in existing.content
+
+
 @pytest.mark.parametrize(
     ("checked_at", "expected_date", "expected_hour"),
     [
