@@ -219,7 +219,7 @@ def test_general_wage_query_prefers_newest_equivalent_legal_version() -> None:
 
     assert {row["node_id"] for row in rows} == {"node-new"}
     assert "5.310.000" in rows[0]["text"]
-    assert store.limit == 24
+    assert store.limit == 12
     assert any(
         "Điều 3 Điều 4" in query
         for query in plan_retrieval_queries(

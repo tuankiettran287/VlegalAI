@@ -857,9 +857,9 @@ def _legal_answer_generation_policy(
             "gạch đầu dòng; không lặp lại cùng kết luận, tỷ lệ hoặc công thức.",
         )
     return (
-        900,
+        650,
         6,
-        "Từ 180 đến 300 từ, tối đa bốn đoạn hoặc gạch đầu dòng. Trả lời thẳng "
+        "Từ 120 đến 220 từ, tối đa bốn đoạn hoặc gạch đầu dòng. Trả lời thẳng "
         "một lần, chỉ giữ công thức/điều kiện cần thiết và dùng số nguồn tối "
         "thiểu đủ chứng minh; tuyệt đối không diễn giải lặp lại cùng tỷ lệ, "
         "công thức hoặc kết luận.",
@@ -944,6 +944,88 @@ def _normalize_allowed_citation_syntax(
     return _UNCLOSED_CITATION_RE.sub(close_bracket, str(value or ""))
 
 
+def _citation_response_schema(allowed_ids: list[str]) -> dict[str, Any]:
+    """Return the one-claim-per-item schema shared by generation and repair."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["statements"],
+        "properties": {
+            "statements": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["text", "citations"],
+                    "properties": {
+                        "text": {"type": "string"},
+                        "citations": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "string",
+                                "enum": allowed_ids,
+                            },
+                        },
+                    },
+                },
+            }
+        },
+    }
+
+
+def _render_citation_statements(
+    structured: dict[str, Any],
+    allowed_ids: list[str],
+    *,
+    sources: list[dict[str, Any]] | None = None,
+) -> str:
+    """Render structured claims so every sentence keeps its selected sources."""
+
+    validate_citations(structured, allowed_ids)
+    sources_by_id = {
+        str(source.get("source_id") or "").strip().upper(): source
+        for source in sources or []
+    }
+    rendered_units: list[str] = []
+    for statement in structured["statements"]:
+        citations = list(
+            dict.fromkeys(
+                str(item).strip().upper()
+                for item in statement["citations"]
+            )
+        )
+        suffix = " ".join(f"[{item}]" for item in citations)
+        text = re.sub(
+            r"(?:\s*,?\s*\[(?:S\d+)\])+",
+            "",
+            str(statement["text"]),
+            flags=re.IGNORECASE,
+        ).strip()
+        text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+        for unit in re.split(r"(?<=[.!?;])\s+|\n+", text):
+            unit = unit.strip()
+            if not unit:
+                continue
+            terminal = unit[-1] if unit[-1] in ".!?;" else ""
+            body = unit[:-1].rstrip() if terminal else unit
+            if sources is not None and not rendered_units:
+                if not body.lstrip().startswith("Theo "):
+                    source = sources_by_id.get(citations[0])
+                    if source is not None:
+                        body = f"Theo {format_source_locator(source)}, {body}"
+                prefix = ""
+            else:
+                prefix = "- "
+            rendered_units.append(f"{prefix}{body} {suffix}{terminal}")
+    if not rendered_units:
+        raise GeminiError("Gemini không trả về nhận định pháp lý có trích dẫn.")
+    return "\n".join(rendered_units)
+
+
 async def _complete_with_citation_repair(
     ai: GeminiService,
     system: str,
@@ -955,6 +1037,7 @@ async def _complete_with_citation_repair(
     temperature: float = 0.1,
     thinking_level: str | None = None,
     model: str | None = None,
+    structured_initial: bool = False,
     repair_timeout_seconds: float | None = None,
     metrics: dict[str, int | bool] | None = None,
 ) -> str:
@@ -966,14 +1049,30 @@ async def _complete_with_citation_repair(
         )
     initial_generation_started = time.monotonic()
     try:
-        answer = await ai.complete(
-            system,
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            thinking_level=thinking_level,
-            model=model,
-        )
+        if structured_initial:
+            structured = await ai.complete_json(
+                system,
+                prompt,
+                schema=_citation_response_schema(allowed_ids),
+                max_tokens=max_tokens,
+                temperature=temperature,
+                thinking_level=thinking_level,
+                model=model,
+            )
+            answer = _render_citation_statements(
+                structured,
+                allowed_ids,
+                sources=sources,
+            )
+        else:
+            answer = await ai.complete(
+                system,
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                thinking_level=thinking_level,
+                model=model,
+            )
     finally:
         if metrics is not None:
             metrics["initial_generation_ms"] = round(
@@ -1019,41 +1118,15 @@ async def _complete_with_citation_repair(
             "Không suy diễn từ kiến thức nền.\n"
             f"{untrusted_data_block('DRAFT_WITH_INVALID_CITATIONS', answer)}"
         )
-        repair_schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["statements"],
-            "properties": {
-                "statements": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["text", "citations"],
-                        "properties": {
-                            "text": {"type": "string"},
-                            "citations": {
-                                "type": "array",
-                                "minItems": 1,
-                                "items": {
-                                    "type": "string",
-                                    "enum": allowed_ids,
-                                },
-                            },
-                        },
-                    },
-                }
-            },
-        }
         repair_started = time.monotonic()
         try:
             repair_call = ai.complete_json(
                 system,
                 repair_prompt,
-                schema=repair_schema,
+                schema=_citation_response_schema(allowed_ids),
                 max_tokens=max_tokens,
                 temperature=0,
+                thinking_level=thinking_level,
                 model=model,
             )
             structured = (
@@ -1069,35 +1142,11 @@ async def _complete_with_citation_repair(
                 metrics["citation_repair_ms"] = round(
                     (time.monotonic() - repair_started) * 1000
                 )
-        validate_citations(structured, allowed_ids)
-        repaired_units: list[str] = []
-        for statement in structured["statements"]:
-            citations = list(dict.fromkeys(
-                str(item).strip().upper()
-                for item in statement["citations"]
-            ))
-            suffix = " ".join(f"[{item}]" for item in citations)
-            text = re.sub(
-                r"(?:\s*,?\s*\[(?:S\d+)\])+",
-                "",
-                str(statement["text"]),
-                flags=re.IGNORECASE,
-            ).strip()
-            text = re.sub(r"\s+([,.!?;:])", r"\1", text)
-            for unit in re.split(r"(?<=[.!?;])\s+|\n+", text):
-                unit = unit.strip()
-                if unit:
-                    terminal = unit[-1] if unit[-1] in ".!?;" else ""
-                    body = unit[:-1].rstrip() if terminal else unit
-                    prefix = (
-                        ""
-                        if sources is not None and not repaired_units
-                        else "- "
-                    )
-                    repaired_units.append(
-                        f"{prefix}{body} {suffix}{terminal}"
-                    )
-        repaired = "\n".join(repaired_units)
+        repaired = _render_citation_statements(
+            structured,
+            allowed_ids,
+            sources=sources,
+        )
         try:
             validate_citations(
                 repaired,
@@ -1703,8 +1752,8 @@ async def chat(
             compact_context_sources(
                 sources[:max_model_sources],
                 payload.message,
-                max_chars=14000,
-                per_source_chars=1800,
+                max_chars=9000,
+                per_source_chars=1200,
             )
             if answer_mode == "single_hop"
             else select_context_sources(
@@ -1717,29 +1766,33 @@ async def chat(
             answer = await asyncio.wait_for(
                 _complete_with_citation_repair(
                     ai,
-                LEGAL_SYSTEM_PROMPT,
-                "BỘ NHỚ TÓM TẮT:\n"
-                f"{_summary_prompt(summary_context)}\n\n"
-                f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
-                "KẾ HOẠCH PHỦ CÂU HỎI:\n"
-                f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
-                f"GIỚI HẠN ĐỘ DÀI:\n{length_instruction}\n\n"
-                f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-                f"NGUỒN:\n{build_context(model_sources)}\n\n"
-                f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
-                f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
-                f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
-                "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
-                "không được sao chép các kết luận không còn phù hợp.",
-                allowed_ids=[source["source_id"] for source in model_sources],
-                sources=model_sources,
-                max_tokens=max_tokens,
+                    LEGAL_SYSTEM_PROMPT,
+                    "BỘ NHỚ TÓM TẮT:\n"
+                    f"{_summary_prompt(summary_context)}\n\n"
+                    f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
+                    "KẾ HOẠCH PHỦ CÂU HỎI:\n"
+                    f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
+                    f"GIỚI HẠN ĐỘ DÀI:\n{length_instruction}\n\n"
+                    f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
+                    f"NGUỒN:\n{build_context(model_sources)}\n\n"
+                    f"CÂU HỎI HIỆN TẠI:\n"
+                    f"{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
+                    f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
+                    f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
+                    "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
+                    "không được sao chép các kết luận không còn phù hợp.",
+                    allowed_ids=[
+                        source["source_id"] for source in model_sources
+                    ],
+                    sources=model_sources,
+                    max_tokens=max_tokens,
                     thinking_level=(
                         "minimal"
                         if answer_plan.get("mode") == "single_hop"
                         else None
                     ),
                     model=generation_model,
+                    structured_initial=answer_mode == "single_hop",
                     repair_timeout_seconds=(
                         settings.legal_chat_citation_repair_timeout_seconds
                         if use_fast_model

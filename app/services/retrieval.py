@@ -668,11 +668,10 @@ class RetrievalService:
             planned_queries = plan_retrieval_queries(query)
             result_limit = adaptive_retrieval_top_k(query, base_top_k)
             if len(planned_queries) == 1:
-                # Keep a wider local candidate window before version
-                # deduplication. Equivalent older provisions can otherwise
-                # occupy the entire top-k and hide their current replacement
-                # (for example NĐ 38/2022 ahead of NĐ 293/2025).
-                per_query_limit = max(base_top_k, 24)
+                # SQL already filters each law to its latest indexed version.
+                # Keep a small fusion margin instead of materializing 24
+                # complete legal chunks for every simple question.
+                per_query_limit = max(base_top_k, 12)
             else:
                 per_query_limit = max(
                     base_top_k,

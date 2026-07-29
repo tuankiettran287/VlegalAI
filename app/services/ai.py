@@ -1024,6 +1024,7 @@ class GeminiService:
         schema: dict[str, Any],
         temperature: float = 0.05,
         max_tokens: int = 2600,
+        thinking_level: str | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
         content = await self.complete(
@@ -1032,6 +1033,7 @@ class GeminiService:
             temperature=temperature,
             max_tokens=max_tokens,
             json_schema=schema,
+            thinking_level=thinking_level,
             model=model,
         )
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)

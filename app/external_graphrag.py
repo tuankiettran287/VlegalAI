@@ -77,6 +77,10 @@ POSTGRES_LEXICAL_STOP_WORDS = {
     "như", "nhu", "nào", "nao", "về", "ve", "và", "va", "là", "la",
     "của", "cua", "được", "duoc", "không", "khong", "trong", "những",
     "nhung", "gì", "gi", "các", "cac", "một", "mot", "số", "so",
+    # Question scaffolding terms are frequent across the legal corpus and
+    # make a broad full-text query match almost every chunk. The lexical
+    # branch complements vector recall, so retain discriminative terms.
+    "bao", "nhieu", "khi", "nay", "hien", "dang", "co", "phap", "luat",
 }
 CURRENT_LAW_STATUSES = ("IN_FORCE", "PARTIALLY_IN_FORCE", "AMENDED")
 POSTGRES_EMBEDDING_CONTRACT_ID = "active"
@@ -1135,6 +1139,17 @@ def postgres_or_tsquery(terms: Iterable[str]) -> str:
     return " | ".join(f"'{term.replace(chr(39), chr(39) * 2)}'" for term in terms)
 
 
+def postgres_and_tsquery(terms: Iterable[str]) -> str:
+    """Build a precise lexical query for the hybrid retriever.
+
+    Dense-vector retrieval already provides semantic recall. Requiring every
+    remaining significant lexical term prevents PostgreSQL from ranking most
+    of the corpus for common legal words before applying ``LIMIT``.
+    """
+
+    return " & ".join(f"'{term.replace(chr(39), chr(39) * 2)}'" for term in terms)
+
+
 def bm25_score(
     row: dict[str, Any],
     terms: Iterable[str],
@@ -1425,7 +1440,10 @@ class PostgresGraphRAGStore:
             return []
         started = time.perf_counter()
         query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
-        candidate_limit = max(64, top_k * 8)
+        # The latest-version predicate already removes superseded duplicates.
+        # A four-times shortlist is sufficient for RRF while avoiding remote
+        # SQL work and materialization for 192 full legal chunks per branch.
+        candidate_limit = max(48, top_k * 4)
         branch_started = time.perf_counter()
         # BM25 has no dependency on the remote query embedding. Start it in
         # parallel while the current worker performs embedding -> vector SQL.
@@ -1573,7 +1591,9 @@ class PostgresGraphRAGStore:
         started = time.perf_counter()
         query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
         terms = postgres_lexical_terms(query)
-        tsquery = postgres_or_tsquery(terms)
+        # Vector search is the recall-oriented branch. Keep lexical search
+        # precise so the GIN index narrows the corpus before ts_rank_cd runs.
+        tsquery = postgres_and_tsquery(terms)
         if not tsquery:
             return []
 

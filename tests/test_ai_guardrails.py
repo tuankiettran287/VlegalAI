@@ -148,6 +148,65 @@ def test_chat_answer_closes_allowed_citation_without_second_model_call() -> None
     assert metrics["citation_repair_ms"] == 0
 
 
+def test_single_hop_structured_generation_cites_each_claim_without_repair() -> None:
+    class _AI:
+        def __init__(self) -> None:
+            self.complete_calls = 0
+            self.structured_calls = 0
+            self.thinking_level: object = None
+
+        async def complete(self, *_: object, **__: object) -> str:
+            self.complete_calls += 1
+            raise AssertionError("Single-hop generation must use the response schema")
+
+        async def complete_json(self, *_: object, **kwargs: object) -> dict:
+            self.structured_calls += 1
+            self.thinking_level = kwargs.get("thinking_level")
+            return {
+                "statements": [
+                    {
+                        "text": (
+                            "Người lao động được trả ít nhất 150%. "
+                            "Mức này áp dụng cho ngày làm việc bình thường."
+                        ),
+                        "citations": ["S1"],
+                    }
+                ]
+            }
+
+    sources = [
+        {
+            "source_id": "S1",
+            "citation": "Bộ luật Lao động (45/2019/QH14) > Điều 98",
+            "text": "Làm thêm giờ vào ngày thường được trả ít nhất 150%.",
+        }
+    ]
+    ai = _AI()
+    metrics: dict[str, int | bool] = {}
+
+    answer = asyncio.run(
+        _complete_with_citation_repair(
+            ai,
+            "system",
+            "prompt",
+            allowed_ids=["S1"],
+            sources=sources,
+            max_tokens=650,
+            thinking_level="minimal",
+            structured_initial=True,
+            metrics=metrics,
+        )
+    )
+
+    assert answer.startswith("Theo Điều 98, Bộ luật Lao động số 45/2019/QH14,")
+    assert answer.count("[S1]") == 2
+    assert ai.complete_calls == 0
+    assert ai.structured_calls == 1
+    assert ai.thinking_level == "minimal"
+    assert metrics["citation_repair_attempted"] is False
+    assert metrics["citation_repair_ms"] == 0
+
+
 def test_citation_normalization_never_admits_an_unknown_source() -> None:
     value = "Nguồn không thuộc allowlist [S2."
 
@@ -688,6 +747,11 @@ def test_chat_generation_deadline_returns_grounded_fallback() -> None:
             await asyncio.sleep(1)
             raise AssertionError("The generation deadline must cancel this call")
 
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            self.model = __.get("model")
+            await asyncio.sleep(1)
+            raise AssertionError("The generation deadline must cancel this call")
+
     class _Cache:
         @staticmethod
         def eligible(*_: object, **__: object) -> bool:
@@ -748,7 +812,7 @@ def test_single_hop_answer_policy_is_shorter_than_complex_modes() -> None:
         {"mode": "multi_abstract"}
     )
 
-    assert (single_tokens, single_sources) == (900, 6)
+    assert (single_tokens, single_sources) == (650, 6)
     assert single_tokens < multi_tokens < abstract_tokens
     assert single_sources < multi_sources < abstract_sources
     assert "không" in instruction.lower()

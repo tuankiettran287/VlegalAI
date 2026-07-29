@@ -15,6 +15,7 @@ from app.external_graphrag import (
     UNVERIFIED_LAW_STATUS,
     bm25_score,
     bootstrap_provenance,
+    postgres_and_tsquery,
     postgres_current_chunk_predicate,
     postgres_latest_chunk_predicate,
     postgres_lexical_terms,
@@ -81,6 +82,15 @@ def test_postgres_lexical_terms_preserve_vietnamese_and_remove_stop_words() -> N
     assert "36" in terms
     assert "người" in terms
     assert "'người'" in postgres_or_tsquery(terms)
+    assert "'điều' & '36' & 'người'" in postgres_and_tsquery(terms)
+
+
+def test_postgres_lexical_terms_remove_generic_question_scaffolding() -> None:
+    terms = postgres_lexical_terms(
+        "Hiện nay pháp luật có quy định thời hạn là bao nhiêu ngày?"
+    )
+
+    assert terms == ["thời", "hạn", "ngày"]
 
 
 def test_bm25_rewards_term_frequency_and_normalizes_document_length() -> None:
@@ -547,6 +557,8 @@ def test_postgres_vector_and_bm25_paths_use_latest_indexed_versions(
     candidate_query = bm25_cursor.queries[0][0]
     assert "current_chunk.law_status IN" not in candidate_query
     assert "graphrag_law_version AS latest_law" in candidate_query
+    assert "'thuế'" in bm25_cursor.queries[0][1][0]
+    assert " | " not in bm25_cursor.queries[0][1][0]
     assert len(bm25_cursor.queries) == 1
 
 
