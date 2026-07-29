@@ -4,8 +4,8 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import "./styles.css";
 import "./redesign.css";
-import "./landing.css";
 import "./professional.css";
+import "./landing.css";
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>

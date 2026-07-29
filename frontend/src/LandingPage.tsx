@@ -8,6 +8,7 @@ import {
   FilePenLine,
   MessageSquareText,
   Scale,
+  SearchCheck,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
@@ -20,178 +21,257 @@ type LandingPageProps = {
 const capabilities = [
   {
     icon: MessageSquareText,
+    number: "01",
     title: "Hỏi đáp pháp luật",
-    description: "Nhận câu trả lời có căn cứ, diễn giải rõ và kiểm tra được nguồn.",
+    description: "Nhận câu trả lời rõ ràng, có căn cứ và biết chính xác nguồn nào đã được sử dụng.",
+    accent: "Tra cứu",
   },
   {
     icon: FilePenLine,
-    title: "Soạn hợp đồng",
-    description: "Tạo bản nháp hoặc hoàn thiện tài liệu sẵn có theo yêu cầu.",
+    number: "02",
+    title: "Soạn thảo hợp đồng",
+    description: "Tạo bản nháp có cấu trúc hoặc hoàn thiện hợp đồng từ nội dung bạn đã chuẩn bị.",
+    accent: "Soạn thảo",
   },
   {
     icon: ClipboardCheck,
+    number: "03",
     title: "Review rủi ro",
-    description: "Nhận diện điều khoản bất lợi, thiếu sót và hướng chỉnh sửa.",
+    description: "Phát hiện điều khoản bất lợi, thiếu sót và những điểm cần thương lượng trước khi ký.",
+    accent: "Kiểm tra",
   },
   {
     icon: FileDiff,
+    number: "04",
     title: "So sánh phiên bản",
-    description: "Làm rõ nội dung thêm, xóa, sửa và tác động pháp lý.",
+    description: "Làm rõ nội dung thêm, xóa, chỉnh sửa và tác động pháp lý giữa hai văn bản.",
+    accent: "Đối chiếu",
+  },
+];
+
+const workingSteps = [
+  {
+    number: "01",
+    title: "Đặt câu hỏi",
+    description: "Mô tả vấn đề bằng ngôn ngữ tự nhiên, kể cả khi bạn chưa biết thuật ngữ pháp lý.",
+  },
+  {
+    number: "02",
+    title: "Đối chiếu căn cứ",
+    description: "VLegal tìm nội dung liên quan, kiểm tra hiệu lực và sắp xếp nguồn theo mức độ phù hợp.",
+  },
+  {
+    number: "03",
+    title: "Nhận hướng xử lý",
+    description: "Kết quả được diễn giải dễ hiểu, nêu điểm cần lưu ý và gợi ý bước tiếp theo.",
   },
 ];
 
 export default function LandingPage({ authAvailable, loginUrl }: LandingPageProps) {
   return (
-    <main className="landing-page">
-      <header className="landing-nav" aria-label="Giới thiệu VLegal AI">
-        <div className="landing-brand">
-          <span className="landing-brand-mark" aria-hidden="true"><Scale size={22} /></span>
+    <main className="lp-page">
+      <header className="lp-nav" aria-label="Điều hướng VLegal AI">
+        <a className="lp-brand" href="#top" aria-label="VLegal AI — Trang đầu">
+          <span className="lp-brand-mark" aria-hidden="true"><Scale size={22} /></span>
           <span>
-            <strong>VLegal AI</strong>
-            <small>Legal intelligence workspace</small>
+            <strong>VLegal</strong>
+            <small>Trợ lý pháp lý AI</small>
           </span>
-        </div>
-        <div className="landing-nav-actions">
-          <span className="landing-nav-note"><ShieldCheck size={15} /> Căn cứ minh bạch</span>
-          {authAvailable && (
-            <a className="landing-nav-login" href={loginUrl}>
-              Đăng nhập <ArrowRight size={16} />
-            </a>
-          )}
-        </div>
+        </a>
+
+        <nav className="lp-nav-links" aria-label="Nội dung trang">
+          <a href="#capabilities">Khả năng</a>
+          <a href="#workflow">Cách hoạt động</a>
+          <a href="#trust">Minh bạch</a>
+        </nav>
+
+        {authAvailable ? (
+          <a className="lp-nav-login" href={loginUrl}>
+            Đăng nhập <ArrowRight size={16} />
+          </a>
+        ) : (
+          <span className="lp-nav-offline">Đăng nhập tạm gián đoạn</span>
+        )}
       </header>
 
-      <section className="landing-hero">
-        <div className="landing-hero-copy">
-          <p className="landing-eyebrow"><Sparkles size={15} /> Trợ lý pháp lý Việt Nam</p>
-          <h1>Pháp lý rõ ràng.<br /><em>Quyết định vững vàng.</em></h1>
-          <p className="landing-intro">
-            Tra cứu, phân tích hợp đồng và xử lý tình huống pháp lý trong một
-            không gian làm việc có dẫn nguồn, kiểm tra hiệu lực và giải thích dễ hiểu.
+      <section className="lp-hero" id="top">
+        <div className="lp-hero-copy">
+          <p className="lp-eyebrow"><Sparkles size={15} /> Legal intelligence for Vietnam</p>
+          <h1>
+            Hiểu luật rõ hơn.
+            <span>Hành động tự tin hơn.</span>
+          </h1>
+          <p className="lp-hero-intro">
+            VLegal giúp bạn tra cứu pháp luật, phân tích tình huống và xử lý hợp đồng
+            trong một không gian làm việc có dẫn nguồn, kiểm tra hiệu lực và giải thích dễ hiểu.
           </p>
 
-          <div className="landing-actions">
+          <div className="lp-hero-actions">
             {authAvailable ? (
-              <a className="landing-google-button" href={loginUrl}>
-                <span className="landing-google-mark" aria-hidden="true">G</span>
+              <a className="lp-google-button" href={loginUrl}>
+                <span className="lp-google-mark" aria-hidden="true">G</span>
                 Tiếp tục với Google
                 <ArrowRight size={17} />
               </a>
             ) : (
-              <button className="landing-google-button" type="button" disabled>
-                <span className="landing-google-mark" aria-hidden="true">G</span>
+              <button className="lp-google-button" type="button" disabled>
+                <span className="lp-google-mark" aria-hidden="true">G</span>
                 Đăng nhập đang tạm gián đoạn
               </button>
             )}
-            <p className="landing-trust-line">
-              <CheckCircle2 size={17} />
-              Không cần tạo mật khẩu mới
-            </p>
+            <a className="lp-secondary-link" href="#capabilities">
+              Khám phá VLegal <ArrowRight size={15} />
+            </a>
           </div>
 
-          <div className="landing-proof" aria-label="Cam kết của VLegal AI">
+          <div className="lp-hero-proof" aria-label="Cam kết của VLegal AI">
             <span><ShieldCheck size={15} /> Kiểm tra hiệu lực</span>
             <span><BookOpen size={15} /> Dẫn nguồn rõ ràng</span>
-            <span><Check size={15} /> Dữ liệu được bảo vệ</span>
+            <span><CheckCircle2 size={15} /> Không cần tạo mật khẩu</span>
           </div>
         </div>
 
-        <div className="landing-product-preview" aria-label="Minh họa câu trả lời của VLegal AI">
-          <div className="preview-window">
+        <div className="lp-product-scene" aria-label="Minh họa giao diện hỏi đáp của VLegal AI">
+          <div className="lp-product-glow" aria-hidden="true" />
+          <div className="lp-product-window">
             <header>
-              <div className="preview-window-brand">
+              <div className="lp-preview-brand">
                 <span><Scale size={17} /></span>
-                <div><strong>Trợ lý pháp lý</strong><small>Đối chiếu căn cứ tự động</small></div>
-              </div>
-              <span className="preview-status"><i /> Sẵn sàng</span>
-            </header>
-            <div className="preview-content">
-              <div className="preview-question">
-                Người lao động có quyền từ chối công việc khi nhận thấy nguy cơ mất an toàn không?
-              </div>
-              <article className="preview-answer">
-                <div className="preview-answer-icon"><Scale size={16} /></div>
                 <div>
-                  <span className="preview-answer-label">Phân tích có căn cứ</span>
+                  <strong>Trợ lý pháp lý</strong>
+                  <small>Tự động đối chiếu căn cứ liên quan</small>
+                </div>
+              </div>
+              <span className="lp-preview-status"><i /> Đang hoạt động</span>
+            </header>
+
+            <div className="lp-preview-body">
+              <div className="lp-preview-question">
+                Người lao động có quyền từ chối công việc khi thấy nguy cơ mất an toàn không?
+              </div>
+              <article className="lp-preview-answer">
+                <div className="lp-preview-answer-mark"><Scale size={16} /></div>
+                <div>
+                  <span className="lp-preview-label"><SearchCheck size={13} /> Phân tích có căn cứ</span>
                   <p>
-                    Người lao động có quyền từ chối hoặc rời nơi làm việc khi thấy rõ
+                    Có. Người lao động có quyền từ chối hoặc rời nơi làm việc khi thấy rõ
                     nguy cơ trực tiếp đe dọa tính mạng, sức khỏe.
                   </p>
                   <ul>
-                    <li><Check size={13} /> Thông báo ngay cho người quản lý trực tiếp</li>
-                    <li><Check size={13} /> Không bị xem là vi phạm kỷ luật trong trường hợp hợp lệ</li>
+                    <li><Check size={13} /> Thông báo ngay cho người quản lý trực tiếp.</li>
+                    <li><Check size={13} /> Không bị xem là vi phạm kỷ luật nếu nguy cơ là có căn cứ.</li>
                   </ul>
-                  <div className="preview-source">
-                    <BookOpen size={14} />
-                    <span><strong>[S1]</strong> Bộ luật Lao động 2019</span>
-                    <span className="preview-verified"><ShieldCheck size={13} /> Còn hiệu lực</span>
-                  </div>
                 </div>
               </article>
+              <div className="lp-preview-source">
+                <span><BookOpen size={14} /><strong>[S1]</strong> Bộ luật Lao động 2019</span>
+                <span><ShieldCheck size={13} /> Còn hiệu lực</span>
+              </div>
             </div>
+
             <footer>
               <span>Hỏi tiếp về tình huống của bạn…</span>
-              <span className="preview-send" aria-hidden="true">
-                <ArrowRight size={17} />
-              </span>
+              <i aria-hidden="true"><ArrowRight size={17} /></i>
             </footer>
           </div>
-          <div className="preview-note">
+
+          <div className="lp-floating-card lp-floating-source">
             <ShieldCheck size={17} />
-            <span><strong>Minh bạch ngay từ câu trả lời</strong> Luôn hiển thị căn cứ đã sử dụng.</span>
+            <span><strong>Nguồn có thể kiểm tra</strong>Căn cứ hiển thị ngay trong câu trả lời</span>
+          </div>
+          <div className="lp-floating-card lp-floating-status">
+            <i aria-hidden="true" />
+            <span><strong>Đã đối chiếu</strong>Hiệu lực văn bản</span>
           </div>
         </div>
       </section>
 
-      <section className="landing-capabilities" aria-labelledby="landing-capabilities-title">
-        <header>
-          <p>Không gian pháp lý hợp nhất</p>
-          <h2 id="landing-capabilities-title">Từ câu hỏi đến tài liệu hoàn chỉnh.</h2>
+      <section className="lp-metrics" aria-label="Các tiêu chuẩn của VLegal AI">
+        <article>
+          <strong>01</strong>
+          <span>Không trả lời mơ hồ</span>
+          <p>Nêu rõ điều biết được và phần dữ liệu chưa có sẵn.</p>
+        </article>
+        <article>
+          <strong>02</strong>
+          <span>Nguồn đi cùng nhận định</span>
+          <p>Giúp bạn tự đọc lại văn bản và kiểm tra kết luận.</p>
+        </article>
+        <article>
+          <strong>03</strong>
+          <span>Thiết kế cho pháp luật Việt Nam</span>
+          <p>Tập trung vào ngữ cảnh, thuật ngữ và hệ thống văn bản Việt Nam.</p>
+        </article>
+      </section>
+
+      <section className="lp-capabilities" id="capabilities" aria-labelledby="lp-capabilities-title">
+        <header className="lp-section-heading">
+          <p>Một không gian pháp lý hợp nhất</p>
+          <h2 id="lp-capabilities-title">Từ câu hỏi đầu tiên đến quyết định cuối cùng.</h2>
+          <span>
+            Tra cứu, soạn thảo và rà soát trong cùng một trải nghiệm nhất quán,
+            không cần chuyển qua nhiều công cụ rời rạc.
+          </span>
         </header>
-        <div className="landing-capability-grid">
-          {capabilities.map(({ icon: Icon, title, description }, index) => (
+
+        <div className="lp-capability-grid">
+          {capabilities.map(({ icon: Icon, number, title, description, accent }) => (
             <article key={title}>
-              <div className="landing-capability-head">
-                <span><Icon size={19} /></span>
-                <small>0{index + 1}</small>
+              <div className="lp-capability-top">
+                <span className="lp-capability-icon"><Icon size={20} /></span>
+                <small>{number}</small>
               </div>
+              <span className="lp-capability-accent">{accent}</span>
               <h3>{title}</h3>
               <p>{description}</p>
+              <i aria-hidden="true"><ArrowRight size={16} /></i>
             </article>
           ))}
         </div>
       </section>
 
-      <section className="landing-support" aria-labelledby="landing-support-title">
-        <div className="landing-support-heading">
-          <p>Thiết kế để bạn an tâm kiểm tra</p>
-          <h2 id="landing-support-title">AI hỗ trợ phân tích. Quyết định vẫn nằm trong tay bạn.</h2>
+      <section className="lp-workflow" id="workflow" aria-labelledby="lp-workflow-title">
+        <div className="lp-workflow-copy">
+          <p>Đơn giản từ đầu đến cuối</p>
+          <h2 id="lp-workflow-title">Bạn hỏi như cách bạn vẫn nói.</h2>
+          <span>
+            Không cần biết trước số điều luật. VLegal giúp làm rõ câu hỏi,
+            tìm căn cứ phù hợp và trình bày lại thành hướng xử lý có thể hành động.
+          </span>
         </div>
-        <div className="landing-principles">
-          <article>
-            <BookOpen size={20} />
-            <strong>Nguồn có thể kiểm tra</strong>
-            <p>Mỗi nhận định quan trọng đi cùng văn bản và điều khoản liên quan.</p>
-          </article>
-          <article>
-            <ShieldCheck size={20} />
-            <strong>Hiệu lực được đối chiếu</strong>
-            <p>Ưu tiên căn cứ còn giá trị tại thời điểm bạn thực hiện tra cứu.</p>
-          </article>
-          <article>
-            <CheckCircle2 size={20} />
-            <strong>Hướng hành động rõ</strong>
-            <p>Tóm tắt điểm cần lưu ý và gợi ý bước tiếp theo bằng ngôn ngữ dễ hiểu.</p>
-          </article>
-        </div>
+        <ol className="lp-workflow-list">
+          {workingSteps.map((step) => (
+            <li key={step.number}>
+              <span>{step.number}</span>
+              <div><strong>{step.title}</strong><p>{step.description}</p></div>
+            </li>
+          ))}
+        </ol>
       </section>
 
-      <footer className="landing-footer">
-        <div className="landing-brand">
-          <span className="landing-brand-mark" aria-hidden="true"><Scale size={18} /></span>
-          <span><strong>VLegal AI</strong><small>Trợ lý pháp lý Việt Nam</small></span>
+      <section className="lp-trust" id="trust">
+        <div className="lp-trust-mark" aria-hidden="true"><Scale size={28} /></div>
+        <p>AI hỗ trợ phân tích. Quyết định vẫn nằm trong tay bạn.</p>
+        <h2>Câu trả lời tốt không chỉ nhanh — mà còn phải kiểm tra được.</h2>
+        <div className="lp-trust-points">
+          <span><CheckCircle2 size={16} /> Đối chiếu tình trạng hiệu lực</span>
+          <span><CheckCircle2 size={16} /> Trích dẫn nguồn đã sử dụng</span>
+          <span><CheckCircle2 size={16} /> Bảo vệ dữ liệu người dùng</span>
         </div>
+        {authAvailable && (
+          <a className="lp-trust-cta" href={loginUrl}>
+            Bắt đầu với Google <ArrowRight size={17} />
+          </a>
+        )}
+      </section>
+
+      <footer className="lp-footer">
+        <a className="lp-brand" href="#top" aria-label="VLegal AI — Về đầu trang">
+          <span className="lp-brand-mark" aria-hidden="true"><Scale size={18} /></span>
+          <span><strong>VLegal</strong><small>Trợ lý pháp lý AI</small></span>
+        </a>
         <p>Kết quả do AI hỗ trợ không thay thế ý kiến tư vấn chuyên môn.</p>
+        <span>© 2026 VLegal AI</span>
       </footer>
     </main>
   );

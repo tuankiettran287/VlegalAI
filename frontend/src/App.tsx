@@ -835,6 +835,7 @@ function ChatPage({
 
         <div className="chat-scroll" ref={chatScrollRef}>
             <div className="chat-empty" aria-hidden={hasMessages}>
+              <div className="empty-state-inner">
               <header className="empty-heading">
                 <span className="eyebrow"><i aria-hidden="true" /> Legal intelligence</span>
                 <h1>Xin chào {userName},<br /><span>bạn cần hỗ trợ điều gì?</span></h1>
@@ -863,6 +864,7 @@ function ChatPage({
                 <ShieldCheck size={13} />
                 VLegal kiểm tra hiệu lực và hiển thị nguồn; kết quả không thay thế ý kiến tư vấn chuyên môn.
               </p>
+              </div>
             </div>
             <div className="messages" aria-live="polite">
               {messages.map((message) => (
