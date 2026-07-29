@@ -90,6 +90,20 @@ class Settings(BaseSettings):
         ge=5,
         le=60,
     )
+    # Simple, grounded Q&A can use a lower-latency Vertex model without
+    # changing the model used by complex legal drafting/reasoning workflows.
+    # Leave blank to keep GEMINI_MODEL for every request.
+    legal_chat_fast_model: str = ""
+    legal_chat_fast_timeout_seconds: int = Field(
+        default=8,
+        ge=3,
+        le=30,
+    )
+    legal_chat_citation_repair_timeout_seconds: float = Field(
+        default=2.5,
+        ge=0.5,
+        le=10,
+    )
     gemini_max_concurrent_generations: int = Field(default=8, ge=1, le=64)
     gemini_google_search_max_output_tokens: int = Field(
         default=16_384,

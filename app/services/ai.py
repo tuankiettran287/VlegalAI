@@ -643,20 +643,23 @@ class GeminiService:
             self._vertex_ready = True
         return self._project_id
 
-    def _model_url(self, action: str) -> str:
+    def _model_url(self, action: str, *, model: str | None = None) -> str:
         if action not in {"countTokens", "generateContent"}:
             raise GeminiError("Gemini action không hợp lệ.")
-        model = self.settings.gemini_model.strip()
-        if not model:
+        selected_model = (model or self.settings.gemini_model).strip()
+        if not selected_model:
             raise GeminiError("GEMINI_MODEL chưa được cấu hình.")
         api_key = self.settings.gemini_api_key.strip() or os.getenv("GEMINI_API_KEY", "").strip()
         if (not self.settings.gemini_use_adc and api_key) or self._project_id == "api_key_mode":
-            return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{action}?key={api_key}"
+            return (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{selected_model}:{action}?key={api_key}"
+            )
         location = self.settings.gemini_location.strip() or "global"
         return (
             f"https://{VERTEX_API_SERVICE}/v1/"
             f"projects/{self._project_id}/locations/{location}/"
-            f"publishers/google/models/{model}:{action}"
+            f"publishers/google/models/{selected_model}:{action}"
         )
 
     @property
@@ -672,12 +675,13 @@ class GeminiService:
         max_tokens: int,
         json_schema: dict[str, Any] | None,
         thinking_level: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         generation_config: dict[str, Any] = {
             "maxOutputTokens": max_tokens,
         }
-        model = self.settings.gemini_model.strip().lower()
-        if model.startswith("gemini-3"):
+        selected_model = (model or self.settings.gemini_model).strip().lower()
+        if selected_model.startswith("gemini-3"):
             generation_config["thinkingConfig"] = {
                 "thinkingLevel": (
                     thinking_level or self.settings.gemini_thinking_level
@@ -760,10 +764,16 @@ class GeminiService:
             f"{cls._error_detail(response)}"
         )
 
-    async def _request_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _request_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        model: str | None = None,
+    ) -> dict[str, Any]:
         last_error: GeminiError | None = None
         force_refresh = False
         started_at = time.monotonic()
+        selected_model = (model or self.settings.gemini_model).strip()
 
         for attempt in range(self.settings.gemini_max_retries):
             api_key = (
@@ -785,7 +795,7 @@ class GeminiService:
                 headers["Authorization"] = f"Bearer {token}"
             try:
                 response = await self._client.post(
-                    self._generate_url,
+                    self._model_url("generateContent", model=selected_model),
                     headers=headers,
                     json=payload,
                 )
@@ -816,7 +826,7 @@ class GeminiService:
                         logger.info(
                             "Vertex AI request completed model=%s attempt=%d latency_ms=%d "
                             "finish_reason=%s prompt_tokens=%s output_tokens=%s",
-                            self.settings.gemini_model,
+                            selected_model,
                             attempt + 1,
                             round((time.monotonic() - started_at) * 1000),
                             finish_reason or "unknown",
@@ -844,7 +854,7 @@ class GeminiService:
             delay = min(2**attempt, 8) + random.uniform(0, 0.25)
             logger.warning(
                 "Retrying Vertex AI model=%s next_attempt=%d delay_seconds=%.3f",
-                self.settings.gemini_model,
+                selected_model,
                 attempt + 2,
                 delay,
             )
@@ -861,6 +871,7 @@ class GeminiService:
         max_tokens: int,
         json_schema: dict[str, Any] | None,
         thinking_level: str | None = None,
+        model: str | None = None,
     ) -> str:
         payload = self._payload(
             system,
@@ -869,8 +880,11 @@ class GeminiService:
             max_tokens=max_tokens,
             json_schema=json_schema,
             thinking_level=thinking_level,
+            model=model,
         )
-        return _response_text(await self._request_payload(payload))
+        return _response_text(
+            await self._request_payload(payload, model=model)
+        )
 
     async def search_google(self, query: str) -> dict[str, Any]:
         """Run a Google Search-grounded request and return verified search metadata."""
@@ -983,6 +997,7 @@ class GeminiService:
         max_tokens: int = 2400,
         json_schema: dict[str, Any] | None = None,
         thinking_level: str | None = None,
+        model: str | None = None,
     ) -> str:
         if not system.strip():
             raise GeminiError("System instruction không được để trống.")
@@ -998,6 +1013,7 @@ class GeminiService:
                 max_tokens=max_tokens,
                 json_schema=json_schema,
                 thinking_level=thinking_level,
+                model=model,
             )
 
     async def complete_json(
@@ -1008,6 +1024,7 @@ class GeminiService:
         schema: dict[str, Any],
         temperature: float = 0.05,
         max_tokens: int = 2600,
+        model: str | None = None,
     ) -> dict[str, Any]:
         content = await self.complete(
             system,
@@ -1015,6 +1032,7 @@ class GeminiService:
             temperature=temperature,
             max_tokens=max_tokens,
             json_schema=schema,
+            model=model,
         )
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
         def reject_non_finite(value: str) -> None:

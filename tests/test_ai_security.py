@@ -293,6 +293,53 @@ def test_gemini_three_allows_request_specific_minimal_thinking() -> None:
     }
 
 
+def test_complete_can_route_one_request_to_a_fast_vertex_model() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "Phản hồi nhanh [S1]."}],
+                        },
+                        "finishReason": "STOP",
+                    }
+                ]
+            },
+        )
+
+    async def scenario() -> str:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        service = GeminiService(_settings(), client=client)
+        service._credentials = SimpleNamespace(valid=True, token="test-token")
+        service._project_id = "test-project"
+        try:
+            return await service.complete(
+                "Hướng dẫn hệ thống",
+                "Câu hỏi pháp lý đơn giản.",
+                model="gemini-2.5-flash-lite",
+            )
+        finally:
+            await client.aclose()
+
+    assert asyncio.run(scenario()) == "Phản hồi nhanh [S1]."
+    assert (
+        "/publishers/google/models/gemini-2.5-flash-lite:generateContent"
+        in str(captured["url"])
+    )
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["generationConfig"]["thinkingConfig"] == {
+        "thinkingBudget": 0,
+        "includeThoughts": False,
+    }
+
+
 def test_blank_model_is_rejected_before_vertex_request() -> None:
     service = GeminiService(_settings(gemini_model=""))
     service._project_id = "test-project"

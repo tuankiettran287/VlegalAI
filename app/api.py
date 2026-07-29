@@ -953,6 +953,8 @@ async def _complete_with_citation_repair(
     max_tokens: int,
     temperature: float = 0.1,
     thinking_level: str | None = None,
+    model: str | None = None,
+    repair_timeout_seconds: float | None = None,
     metrics: dict[str, int | bool] | None = None,
 ) -> str:
     if metrics is not None:
@@ -969,6 +971,7 @@ async def _complete_with_citation_repair(
             max_tokens=max_tokens,
             temperature=temperature,
             thinking_level=thinking_level,
+            model=model,
         )
     finally:
         if metrics is not None:
@@ -1044,12 +1047,21 @@ async def _complete_with_citation_repair(
         }
         repair_started = time.monotonic()
         try:
-            structured = await ai.complete_json(
+            repair_call = ai.complete_json(
                 system,
                 repair_prompt,
                 schema=repair_schema,
                 max_tokens=max_tokens,
                 temperature=0,
+                model=model,
+            )
+            structured = (
+                await asyncio.wait_for(
+                    repair_call,
+                    timeout=repair_timeout_seconds,
+                )
+                if repair_timeout_seconds is not None
+                else await repair_call
             )
         finally:
             if metrics is not None:
@@ -1495,6 +1507,7 @@ async def chat(
         "citation_repair_attempted": False,
         "citation_repair_ms": 0,
     }
+    generation_model = settings.gemini_model
     catalog_request = (
         None
         if greeting_answer is not None
@@ -1664,8 +1677,15 @@ async def chat(
             _legal_answer_generation_policy(answer_plan)
         )
         answer_mode = str(answer_plan.get("mode") or "single_hop")
+        fast_model = settings.legal_chat_fast_model.strip()
+        use_fast_model = answer_mode == "single_hop" and bool(fast_model)
+        generation_model = (
+            fast_model if use_fast_model else settings.gemini_model
+        )
         generation_timeout_seconds = (
-            settings.legal_chat_generation_timeout_seconds
+            settings.legal_chat_fast_timeout_seconds
+            if use_fast_model
+            else settings.legal_chat_generation_timeout_seconds
             * (
                 3
                 if answer_mode == "multi_abstract"
@@ -1707,6 +1727,12 @@ async def chat(
                     thinking_level=(
                         "minimal"
                         if answer_plan.get("mode") == "single_hop"
+                        else None
+                    ),
+                    model=generation_model,
+                    repair_timeout_seconds=(
+                        settings.legal_chat_citation_repair_timeout_seconds
+                        if use_fast_model
                         else None
                     ),
                     metrics=generation_metrics,
@@ -1825,6 +1851,7 @@ async def chat(
         "generation_ms=%d initial_generation_ms=%d "
         "citation_repair_attempted=%s citation_repair_ms=%d "
         "persistence_ms=%d total_ms=%d source_count=%d answer_chars=%d "
+        "generation_model=%s "
         "greeting=%s",
         cache_mode,
         cache_lookup_ms,
@@ -1837,6 +1864,7 @@ async def chat(
         total_ms,
         len(sources),
         len(answer),
+        generation_model,
         str(greeting_answer is not None).lower(),
     )
     response.headers["Server-Timing"] = (

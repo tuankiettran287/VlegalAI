@@ -54,23 +54,26 @@ def test_chat_answer_repairs_missing_claim_citations_once() -> None:
     class _AI:
         def __init__(self) -> None:
             self.prompts: list[str] = []
+            self.models: list[object] = []
 
         async def complete(
             self,
             _: str,
             prompt: str,
-            **__: object,
+            **kwargs: object,
         ) -> str:
             self.prompts.append(prompt)
+            self.models.append(kwargs.get("model"))
             return "Luật này đã hết hiệu lực."
 
         async def complete_json(
             self,
             _: str,
             prompt: str,
-            **__: object,
+            **kwargs: object,
         ) -> dict:
             self.prompts.append(prompt)
+            self.models.append(kwargs.get("model"))
             return {
                 "statements": [
                     {
@@ -89,12 +92,17 @@ def test_chat_answer_repairs_missing_claim_citations_once() -> None:
             "prompt",
             allowed_ids=["S1"],
             max_tokens=200,
+            model="gemini-2.5-flash-lite",
             metrics=metrics,
         )
     )
 
     assert answer == "- Luật này còn hiệu lực [S1]."
     assert len(ai.prompts) == 2
+    assert ai.models == [
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash-lite",
+    ]
     assert "DRAFT_WITH_INVALID_CITATIONS" in ai.prompts[1]
     assert metrics["citation_repair_attempted"] is True
     assert isinstance(metrics["initial_generation_ms"], int)
@@ -140,6 +148,33 @@ def test_citation_normalization_never_admits_an_unknown_source() -> None:
     value = "Nguồn không thuộc allowlist [S2."
 
     assert _normalize_allowed_citation_syntax(value, ["S1"]) == value
+
+
+def test_citation_repair_obeys_its_own_deadline() -> None:
+    class _AI:
+        async def complete(self, *_: object, **__: object) -> str:
+            return "Nhận định chưa có trích dẫn."
+
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            await asyncio.sleep(1)
+            raise AssertionError("The citation repair deadline must cancel this call")
+
+    metrics: dict[str, int | bool] = {}
+    with pytest.raises(TimeoutError):
+        asyncio.run(
+            _complete_with_citation_repair(
+                _AI(),
+                "system",
+                "prompt",
+                allowed_ids=["S1"],
+                max_tokens=200,
+                repair_timeout_seconds=0.01,
+                metrics=metrics,
+            )
+        )
+
+    assert metrics["citation_repair_attempted"] is True
+    assert int(metrics["citation_repair_ms"]) < 500
 
 
 @pytest.mark.parametrize(
@@ -642,7 +677,10 @@ def test_chat_generation_deadline_returns_grounded_fallback() -> None:
         )
 
     class _SlowAI:
+        model: object = None
+
         async def complete(self, *_: object, **__: object) -> str:
+            self.model = __.get("model")
             await asyncio.sleep(1)
             raise AssertionError("The generation deadline must cancel this call")
 
@@ -661,6 +699,9 @@ def test_chat_generation_deadline_returns_grounded_fallback() -> None:
         require_freshness_check=False,
     )
     settings.legal_chat_generation_timeout_seconds = 0.01
+    settings.legal_chat_fast_model = "gemini-2.5-flash-lite"
+    settings.legal_chat_fast_timeout_seconds = 0.01
+    slow_ai = _SlowAI()
     request = SimpleNamespace(
         cookies={},
         headers={},
@@ -678,7 +719,7 @@ def test_chat_generation_deadline_returns_grounded_fallback() -> None:
             settings,
             _Retrieval(),
             _Freshness(),
-            _SlowAI(),
+            slow_ai,
             _Limiter(),
             SimpleNamespace(),
             _Cache(),
@@ -689,6 +730,7 @@ def test_chat_generation_deadline_returns_grounded_fallback() -> None:
     assert result.answer.startswith("Theo ")
     assert "[S1]" in result.answer
     assert result.sources[0].source_id == "S1"
+    assert slow_ai.model == "gemini-2.5-flash-lite"
 
 
 def test_single_hop_answer_policy_is_shorter_than_complex_modes() -> None:
