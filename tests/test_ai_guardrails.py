@@ -29,7 +29,11 @@ from app.schemas import ChatRequest
 from app.services.ai import GeminiError, validate_citations
 from app.services.articles import ArticleResearchError
 from app.services.freshness import FreshnessUnavailable, LegalFreshnessService
-from app.services.retrieval import build_context, select_context_sources
+from app.services.retrieval import (
+    build_context,
+    compact_context_sources,
+    select_context_sources,
+)
 from app.services.semantic_cache import CacheLookup, CachedLegalAnswer
 from app.services.tavily import TavilyError
 
@@ -748,6 +752,37 @@ def test_single_hop_answer_policy_is_shorter_than_complex_modes() -> None:
     assert single_tokens < multi_tokens < abstract_tokens
     assert single_sources < multi_sources < abstract_sources
     assert "không" in instruction.lower()
+
+
+def test_single_hop_context_compaction_keeps_sources_and_focuses_long_text() -> None:
+    original = [
+        {
+            "source_id": "S1",
+            "citation": "Bộ luật Lao động > Điều 102",
+            "text": (
+                ("Nội dung không liên quan. " * 100)
+                + "Mức khấu trừ tiền lương hằng tháng không được quá 30 phần trăm."
+                + (" Phần cuối không liên quan." * 100)
+            ),
+        },
+        {
+            "source_id": "S2",
+            "citation": "Bộ luật Lao động > Điều 94",
+            "text": "Người sử dụng lao động phải trả lương trực tiếp và đầy đủ.",
+        },
+    ]
+
+    compacted = compact_context_sources(
+        original,
+        "Mức khấu trừ tiền lương tối đa bao nhiêu phần trăm?",
+        max_chars=1000,
+        per_source_chars=700,
+    )
+
+    assert [row["source_id"] for row in compacted] == ["S1", "S2"]
+    assert "30 phần trăm" in compacted[0]["text"]
+    assert len(compacted[0]["text"]) <= 702
+    assert len(original[0]["text"]) > len(compacted[0]["text"])
 
 
 def test_grounded_fallback_allows_cross_references_inside_retrieved_excerpt() -> None:

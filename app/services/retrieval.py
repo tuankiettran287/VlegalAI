@@ -829,6 +829,71 @@ def select_context_sources(
     return selected
 
 
+def compact_context_sources(
+    sources: list[dict[str, Any]],
+    query: str,
+    *,
+    max_chars: int = 14000,
+    per_source_chars: int = 1800,
+) -> list[dict[str, Any]]:
+    """Copy sources into a query-focused prompt budget without changing UI data.
+
+    Retrieval chunks can be several thousand characters long. Sending six full
+    chunks makes a simple answer slower even when only one short provision in
+    each chunk is relevant. Keep every selected source ID/citation, but trim
+    long text to the overlapping window with the strongest query-term coverage.
+    The original source objects remain untouched for validation and display.
+    """
+
+    if max_chars <= 0 or per_source_chars <= 0:
+        return []
+    terms = _accented_significant_terms(query)
+    compacted: list[dict[str, Any]] = []
+    used_chars = 0
+
+    for source in sources:
+        row = dict(source)
+        source_id = str(row.get("source_id") or "")
+        citation = str(row.get("citation") or "")
+        text = str(row.get("text") or "")
+        metadata_chars = len(source_id) + len(citation)
+        remaining = max_chars - used_chars - metadata_chars
+        if remaining <= 0:
+            break
+        text_budget = min(per_source_chars, remaining)
+
+        if len(text) > text_budget:
+            step = max(text_budget // 2, 1)
+            starts = range(0, max(len(text) - text_budget + 1, 1), step)
+
+            def window_score(start: int) -> tuple[int, int]:
+                window = text[start : start + text_budget].casefold()
+                return (
+                    sum(term in window for term in terms),
+                    -start,
+                )
+
+            best_start = max(starts, key=window_score, default=0)
+            if best_start + text_budget < len(text):
+                tail_start = len(text) - text_budget
+                if window_score(tail_start) > window_score(best_start):
+                    best_start = tail_start
+            excerpt = text[best_start : best_start + text_budget].strip()
+            if best_start > 0:
+                excerpt = f"…{excerpt.lstrip()}"
+            if best_start + text_budget < len(text):
+                excerpt = f"{excerpt.rstrip()}…"
+            row["text"] = excerpt
+
+        row_chars = metadata_chars + len(str(row.get("text") or ""))
+        if row_chars > max_chars - used_chars:
+            break
+        compacted.append(row)
+        used_chars += row_chars
+
+    return compacted
+
+
 def format_source_locator(source: dict[str, Any]) -> str:
     citation = " ".join(str(source.get("citation") or "").split())
     segments = [segment.strip() for segment in citation.split(">") if segment.strip()]

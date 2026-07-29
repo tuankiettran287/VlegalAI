@@ -103,6 +103,7 @@ from app.services.retrieval import (
     append_detailed_citations,
     build_answer_plan,
     build_context,
+    compact_context_sources,
     format_source_locator,
     select_context_sources,
 )
@@ -1698,9 +1699,18 @@ async def chat(
             generation_timeout_seconds,
             settings.gemini_timeout_seconds,
         )
-        model_sources = select_context_sources(
-            sources[:max_model_sources],
-            max_chars=24000,
+        model_sources = (
+            compact_context_sources(
+                sources[:max_model_sources],
+                payload.message,
+                max_chars=14000,
+                per_source_chars=1800,
+            )
+            if answer_mode == "single_hop"
+            else select_context_sources(
+                sources[:max_model_sources],
+                max_chars=24000,
+            )
         )
         generation_started = time.monotonic()
         try:
