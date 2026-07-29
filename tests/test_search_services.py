@@ -13,6 +13,7 @@ from app.services.articles import (
     ArticleResearchService,
     _inherit_followup_citations,
     _plain_source_text,
+    _prune_uncited_article_claims,
     _strip_uncited_editorial_leads,
     _validated_article_summary,
 )
@@ -105,6 +106,24 @@ def test_article_summary_inherits_citations_for_source_followup_only() -> None:
     assert _inherit_followup_citations(
         "Luận điểm thứ nhất có nguồn [W1]. Luận điểm thứ hai không có nguồn."
     ).endswith("Luận điểm thứ hai không có nguồn.")
+
+
+def test_article_summary_prunes_only_uncited_claims() -> None:
+    summary = """## Quyền và nghĩa vụ
+
+Người lao động có quyền được bảo đảm an toàn tại nơi làm việc [W1]. (Thông tin về các trường hợp khác không được nguồn cung cấp chi tiết).
+
+**Lưu ý thực tiễn**
+
+Người lao động có thể từ chối công việc khi có nguy cơ rõ ràng [W2]."""
+
+    result = _prune_uncited_article_claims(summary, ["W1", "W2"])
+
+    assert "## Quyền và nghĩa vụ" in result
+    assert "**Lưu ý thực tiễn**" in result
+    assert "bảo đảm an toàn tại nơi làm việc [W1]." in result
+    assert "có nguy cơ rõ ràng [W2]." in result
+    assert "không được nguồn cung cấp chi tiết" not in result
 
 
 def test_freshness_recognizes_consolidated_law_code_without_year() -> None:

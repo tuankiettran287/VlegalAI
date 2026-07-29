@@ -28,7 +28,7 @@ settings = get_settings()
 ARTICLE_TIMEZONE = ZoneInfo("Asia/Bangkok")
 ARTICLE_PUBLISH_HOURS = (7, 12, 15, 18, 22)
 ARTICLE_BATCH_SIZE = 10
-ARTICLE_BATCH_DELAY_SECONDS = 30.0
+ARTICLE_BATCH_DELAY_SECONDS = 45.0
 broker_url, result_backend = postgres_celery_urls(settings.database_url)
 celery_app = Celery(
     "vlegal",
