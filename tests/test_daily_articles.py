@@ -106,6 +106,22 @@ def test_source_title_rejects_provider_domain() -> None:
     ) == "Quy định mới về hợp đồng lao động"
 
 
+def test_card_excerpt_hides_ai_fallback_and_noisy_navigation() -> None:
+    from app.worker import _article_card_excerpt
+
+    excerpt = _article_card_excerpt(
+        "VLegal chưa thể hoàn tất phần diễn giải tự động cho chủ đề này.",
+        "[Trang chủ](/) [Dịch vụ](/dich-vu) [Đăng nhập](/login) "
+        "[Danh mục](/danh-muc) Nội dung trang.",
+        topic="pháp luật lao động",
+        source_title="Cập nhật Bộ luật Lao động",
+    )
+
+    assert "chưa thể hoàn tất" not in excerpt
+    assert "Tổng hợp cập nhật pháp lý mới nhất về pháp luật lao động" in excerpt
+    assert "Cập nhật Bộ luật Lao động" in excerpt
+
+
 def test_scheduled_article_batch_publishes_ten_unique_items(monkeypatch) -> None:
     from app import worker
 

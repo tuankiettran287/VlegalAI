@@ -153,6 +153,39 @@ def _article_source_title(
     return title or fallback
 
 
+def _article_card_excerpt(
+    summary: str,
+    source_excerpt: str,
+    *,
+    topic: str,
+    source_title: str,
+) -> str:
+    summary_excerpt = _article_excerpt(summary)
+    unavailable_markers = (
+        "vlegal chưa thể hoàn tất phần diễn giải tự động",
+        "ai tạm thời không khả dụng",
+    )
+    if summary_excerpt and not any(
+        marker in summary_excerpt.casefold()
+        for marker in unavailable_markers
+    ):
+        return summary_excerpt
+
+    source_excerpt_clean = _article_excerpt(source_excerpt)
+    source_looks_noisy = (
+        source_excerpt.count("](") > 3
+        or source_excerpt.count("![") > 1
+    )
+    if len(source_excerpt_clean) >= 80 and not source_looks_noisy:
+        return source_excerpt_clean
+
+    return (
+        f"Tổng hợp cập nhật pháp lý mới nhất về {topic}, dựa trên nguồn "
+        f"công khai “{source_title}”. Mở bài viết gốc để xem toàn bộ nội dung "
+        "và đối chiếu thông tin."
+    )[:500]
+
+
 def _article_publication_slot(value: datetime) -> tuple[date, int, int]:
     checked_at = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     local_time = checked_at.astimezone(ARTICLE_TIMEZONE)
@@ -208,7 +241,23 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     existing.source_url,
                     fallback=f"Cập nhật pháp lý: {item['topic']}",
                 )
-                repaired_excerpt = _article_excerpt(existing.content)
+                existing_sources = (
+                    existing.web_sources
+                    if isinstance(existing.web_sources, list)
+                    else []
+                )
+                existing_primary = (
+                    existing_sources[0]
+                    if existing_sources
+                    and isinstance(existing_sources[0], dict)
+                    else {}
+                )
+                repaired_excerpt = _article_card_excerpt(
+                    existing.content,
+                    str(existing_primary.get("excerpt") or ""),
+                    topic=str(item["topic"]),
+                    source_title=repaired_title,
+                )
                 if (
                     repaired_title != existing.title
                     or (
@@ -271,8 +320,10 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     " ",
                     str(primary_source.get("title") or "").strip(),
                 )[:500]
-                source_excerpt = _article_excerpt(
-                    str(primary_source.get("excerpt") or "")
+                article_title = _article_source_title(
+                    source_title,
+                    source_url,
+                    fallback=f"Cập nhật pháp lý: {topic}",
                 )
                 async with SessionFactory() as db:
                     existing_id = await db.scalar(
@@ -284,12 +335,13 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     article = Article(
                         author_id=None,
                         slug=slug,
-                        title=_article_source_title(
-                            source_title,
-                            source_url,
-                            fallback=f"Cập nhật pháp lý: {topic}",
+                        title=article_title,
+                        excerpt=_article_card_excerpt(
+                            summary,
+                            str(primary_source.get("excerpt") or ""),
+                            topic=topic,
+                            source_title=article_title,
                         ),
-                        excerpt=_article_excerpt(summary) or source_excerpt,
                         content=summary,
                         category="Cập nhật pháp luật",
                         status="PUBLISHED",
