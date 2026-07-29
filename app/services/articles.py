@@ -70,6 +70,15 @@ def _strip_uncited_editorial_leads(value: str) -> str:
     return EDITORIAL_LEAD_RE.sub(replace, value).strip()
 
 
+def _normalize_article_citation_syntax(value: str) -> str:
+    return re.sub(
+        r"\[(W\d+)(?=\s*[.!?;:,])",
+        r"[\1]",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
 def _inherit_followup_citations(value: str) -> str:
     paragraphs = re.split(r"(\n\s*\n)", value)
     normalized: list[str] = []
@@ -115,7 +124,9 @@ def _validated_article_summary(
     value: str,
     allowed_source_ids: list[str],
 ) -> str:
-    summary = _strip_uncited_editorial_leads(value)
+    summary = _strip_uncited_editorial_leads(
+        _normalize_article_citation_syntax(value)
+    )
     validate_citations(
         summary,
         allowed_source_ids,
@@ -155,7 +166,9 @@ def _prune_uncited_article_claims(
     value: str,
     allowed_source_ids: list[str],
 ) -> str:
-    summary = _strip_uncited_editorial_leads(value)
+    summary = _strip_uncited_editorial_leads(
+        _normalize_article_citation_syntax(value)
+    )
     validate_citations(
         summary,
         allowed_source_ids,

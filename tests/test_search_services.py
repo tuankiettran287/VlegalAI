@@ -126,6 +126,15 @@ Người lao động có thể từ chối công việc khi có nguy cơ rõ rà
     assert "không được nguồn cung cấp chi tiết" not in result
 
 
+def test_article_summary_repairs_missing_citation_closing_bracket() -> None:
+    result = _validated_article_summary(
+        "Quy định này được nguồn công khai xác nhận [W1.",
+        ["W1"],
+    )
+
+    assert result == "Quy định này được nguồn công khai xác nhận [W1]."
+
+
 def test_freshness_recognizes_consolidated_law_code_without_year() -> None:
     identity = _law_identity(
         {
