@@ -3,7 +3,6 @@ import {
   ReactNode,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -65,6 +64,7 @@ import {
   type SignatureResponse,
 } from "./api";
 import { sampleQuestions, templateFallback } from "./data";
+import LandingPage from "./LandingPage";
 import type {
   Article,
   Artifact,
@@ -379,42 +379,8 @@ function ChatPage({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState("");
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
-  const composerRef = useRef<HTMLFormElement>(null);
-  const composerSlotRef = useRef<HTMLDivElement>(null);
   const conversationRequestRef = useRef(0);
   const hasMessages = messages.length > 0;
-
-  const syncHomeComposerPosition = useCallback(() => {
-    const composer = composerRef.current;
-    const slot = composerSlotRef.current;
-    if (!composer || !slot || hasMessages) return;
-
-    const offsetParent = composer.offsetParent;
-    if (!offsetParent) return;
-
-    slot.style.height = `${composer.offsetHeight}px`;
-    const slotRect = slot.getBoundingClientRect();
-    const parentRect = offsetParent.getBoundingClientRect();
-    const nextOffset = slotRect.top - parentRect.top - composer.offsetTop;
-
-    composer.dataset.homeOffset = String(nextOffset);
-    composer.style.setProperty("--composer-home-offset", `${nextOffset}px`);
-    composer.style.setProperty("--composer-home-width", `${slotRect.width}px`);
-  }, [hasMessages]);
-
-  useLayoutEffect(() => {
-    if (hasMessages) return;
-
-    syncHomeComposerPosition();
-    const observer = new ResizeObserver(syncHomeComposerPosition);
-    if (composerRef.current) observer.observe(composerRef.current);
-    window.addEventListener("resize", syncHomeComposerPosition);
-
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", syncHomeComposerPosition);
-    };
-  }, [hasMessages, syncHomeComposerPosition]);
 
   const reloadHistory = useCallback(() => {
     if (!authenticated) {
@@ -536,7 +502,6 @@ function ChatPage({
 
   const renderComposer = (home = false) => (
     <form
-      ref={composerRef}
       className={home ? "composer composer-home" : "composer"}
       aria-busy={Boolean(loadingConversationId)}
       onSubmit={(event) => {
@@ -553,7 +518,7 @@ function ChatPage({
           id="legal-question-input"
           value={input}
           maxLength={5000}
-          rows={home ? 3 : 1}
+          rows={1}
           disabled={Boolean(loadingConversationId)}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
@@ -677,19 +642,14 @@ function ChatPage({
 
         <div className="chat-scroll">
             <div className="chat-empty" aria-hidden={hasMessages}>
+              <div className="empty-state-inner">
               <header className="empty-heading">
-                <span className="empty-logo" aria-hidden="true"><Scale size={24} /></span>
                 <span className="eyebrow"><i aria-hidden="true" /> Legal intelligence</span>
-                <h1>Hiểu đúng quy định.<br /><span>Vững vàng quyết định.</span></h1>
-                <p>Trình bày tình huống của bạn. VLegal sẽ phân tích, đối chiếu hiệu lực và trả lời bằng những căn cứ có thể kiểm tra lại.</p>
-                <div className="confidence-row" aria-label="Tiêu chuẩn câu trả lời">
-                  <span><ShieldCheck size={14} /> Đối chiếu hiệu lực</span>
-                  <span><BookOpen size={14} /> Dẫn nguồn rõ ràng</span>
-                  <span><Clock3 size={14} /> Lưu vết trao đổi</span>
-                </div>
+                <h1>Xin chào {user?.display_name || "bạn"},<br /><span>bạn cần hỗ trợ điều gì?</span></h1>
+                <p>Mô tả câu hỏi hoặc tình huống pháp lý của bạn. VLegal sẽ phân tích, kiểm tra hiệu lực và dẫn nguồn để bạn dễ đối chiếu.</p>
               </header>
 
-              <div ref={composerSlotRef} className="composer-home-slot" aria-hidden="true" />
+              {!hasMessages && renderComposer(true)}
 
               <div className="chat-shortcuts" aria-label="Công cụ pháp lý">
                 <button type="button" onClick={() => onNavigate("/tao-hop-dong")}><FilePenLine size={16} /> Tạo hợp đồng</button>
@@ -711,6 +671,7 @@ function ChatPage({
                 <ShieldCheck size={13} />
                 VLegal kiểm tra hiệu lực và hiển thị nguồn; kết quả không thay thế ý kiến tư vấn chuyên môn.
               </p>
+              </div>
             </div>
             <div className="messages" aria-live="polite">
               {messages.map((message) => (
@@ -736,7 +697,7 @@ function ChatPage({
             )}
         </div>
         {error && <div className="chat-error"><ErrorNotice error={error} onClose={() => setError("")} /></div>}
-        {renderComposer(!hasMessages)}
+        {hasMessages && renderComposer()}
       </div>
     </section>
   );
@@ -1035,6 +996,14 @@ function App() {
   }, [authAvailable, navigate, path, user]);
 
   if (authLoading) return <div className="app-loading"><Scale size={34} /><span>Đang mở VLegal AI…</span></div>;
+  if (!user && path === "/") {
+    return (
+      <LandingPage
+        authAvailable={authAvailable}
+        loginUrl={authApi.loginUrl(path)}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
