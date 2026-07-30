@@ -1928,19 +1928,59 @@ async def chat(
             skipped_for_effort=effort_profile.skip_query_rewrite,
         )
 
+    structure_result: dict[str, Any] | None = None
+    structure_lookup = getattr(
+        retrieval,
+        "lookup_document_structure",
+        None,
+    )
+    if greeting_answer is None and callable(structure_lookup):
+        structure_result = await structure_lookup(retrieval_query)
+        if structure_result is not None:
+            log_progress(
+                logger,
+                "chat",
+                "structure_answer_completed",
+                operation_started,
+                outcome="deterministic_graph_count",
+            )
+
     cache_lookup: CacheLookup | None = None
     cache_hit = False
     cache_similarity: float | None = None
     cache_mode = "miss"
     cached_draft = ""
-    answer = greeting_answer or ""
-    sources: list[dict[str, Any]] = []
-    verification: dict[str, Any] = (
-        VerificationReport().model_dump(mode="json")
-        if greeting_answer is not None
-        else {}
+    answer = (
+        greeting_answer
+        or str((structure_result or {}).get("answer") or "")
     )
-    answer_ready = greeting_answer is not None
+    structure_source = (structure_result or {}).get("source")
+    sources: list[dict[str, Any]] = (
+        [structure_source]
+        if isinstance(structure_source, dict)
+        else []
+    )
+    if structure_result is not None:
+        verification = VerificationReport(
+            checked=False,
+            all_current=False,
+            checked_at=datetime.now(UTC),
+            items=[],
+            note=(
+                "Thống kê trực tiếp từ graph của phiên bản văn bản đã "
+                "được lập chỉ mục; không phụ thuộc dịch vụ kiểm tra hiệu lực."
+            ),
+        ).model_dump(mode="json")
+    else:
+        verification = (
+            VerificationReport().model_dump(mode="json")
+            if greeting_answer is not None
+            else {}
+        )
+    answer_ready = (
+        greeting_answer is not None
+        or structure_result is not None
+    )
     cache_eligible = (
         not answer_ready
         and answer_cache.eligible(

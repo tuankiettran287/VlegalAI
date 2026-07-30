@@ -16,6 +16,7 @@ from app.external_graphrag import (
     Neo4jGraphRAGStore,
     Neo4jPostgresGraphRAGStore,
     PostgresGraphRAGStore,
+    document_structure_counts,
 )
 from app.legal_graphrag import GraphRAGStore
 from app.services.ai import untrusted_data_block
@@ -67,6 +68,35 @@ _MULTI_ABSTRACT_MARKERS = (
     "nhieu van ban",
     "nhieu linh vuc",
 )
+_DOCUMENT_STRUCTURE_QUERY_RE = re.compile(
+    r"\b(?:"
+    r"(?:co\s+(?:tat\s+ca\s+)?(?:may|bao\s+nhieu)"
+    r"|gom\s+(?:may|bao\s+nhieu)"
+    r"|bao\s+nhieu|tong\s+so|so\s+luong)\s+"
+    r"(?:chuong|muc|dieu|khoan|diem)"
+    r"|cau\s+truc\s+(?:cua\s+)?(?:bo\s+)?luat"
+    r"|(?:so|so\s+luong)\s+(?:chuong|muc|dieu|khoan|diem)\s+"
+    r"(?:cua|trong)\s+(?:bo\s+)?luat"
+    r"|(?:chuong|muc|dieu|khoan|diem)\s+"
+    r"(?:trong\s+)?(?:bo\s+)?luat\s+(?:co\s+may|bao\s+nhieu)"
+    r")\b",
+    re.IGNORECASE,
+)
+_STRUCTURE_MATCH_IGNORED_TERMS = {
+    "bao",
+    "co",
+    "cau",
+    "chuong",
+    "diem",
+    "dieu",
+    "khoan",
+    "may",
+    "muc",
+    "nhieu",
+    "so",
+    "tong",
+    "trong",
+}
 _MULTI_HOP_PATTERNS = (
     re.compile(r"\bneu\b.+\bthi\b", re.IGNORECASE),
     re.compile(r"\b(?:sau khi|truoc khi|ke tu khi|tiep theo)\b", re.IGNORECASE),
@@ -502,7 +532,118 @@ def _accented_significant_terms(value: str) -> list[str]:
 
 def _is_aggregative_query(query: str) -> bool:
     query_ascii = _ascii(query)
-    return any(marker in query_ascii for marker in _AGGREGATIVE_MARKERS)
+    return (
+        is_document_structure_query(query)
+        or any(marker in query_ascii for marker in _AGGREGATIVE_MARKERS)
+    )
+
+
+def is_document_structure_query(query: str) -> bool:
+    return bool(_DOCUMENT_STRUCTURE_QUERY_RE.search(_ascii(query)))
+
+
+def _best_document_structure(
+    query: str,
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, int | str], float] | None:
+    query_ascii = _ascii(query)
+    query_years = set(re.findall(r"\b(?:19|20)\d{2}\b", query_ascii))
+    query_terms = {
+        term
+        for term in _significant_terms(query)
+        if term not in _STRUCTURE_MATCH_IGNORED_TERMS
+    }
+    ranked: list[
+        tuple[float, dict[str, Any], dict[str, int | str]]
+    ] = []
+    for raw_row in rows:
+        row = dict(raw_row)
+        counts = document_structure_counts(row)
+        if counts is None:
+            continue
+        evidence = _ascii(
+            " ".join(
+                str(row.get(field) or "")
+                for field in (
+                    "title",
+                    "citation",
+                    "law_code",
+                    "doc_id",
+                )
+            )
+        )
+        evidence_years = set(
+            re.findall(r"\b(?:19|20)\d{2}\b", evidence)
+        )
+        if query_years and not query_years.intersection(evidence_years):
+            continue
+        matched = sum(term in evidence for term in query_terms)
+        if query_terms and matched == 0:
+            continue
+        coverage = (
+            matched / len(query_terms)
+            if query_terms
+            else 0.0
+        )
+        score = coverage
+        if query_years:
+            score += 0.45
+        law_code = _ascii(str(row.get("law_code") or ""))
+        if law_code and law_code in query_ascii:
+            score += 1.0
+        title = _ascii(str(row.get("title") or ""))
+        if (
+            title.replace("cau truc ", "") in query_ascii
+            or query_ascii in title
+        ):
+            score += 0.7
+        ranked.append((score, row, counts))
+    if not ranked:
+        return None
+    ranked.sort(
+        key=lambda item: (
+            -item[0],
+            str(item[1].get("law_code") or item[1].get("doc_id") or ""),
+        )
+    )
+    score, row, counts = ranked[0]
+    return row, counts, score
+
+
+def _document_structure_answer(
+    row: dict[str, Any],
+    counts: dict[str, int | str],
+) -> str:
+    identity = str(
+        row.get("citation")
+        or row.get("title")
+        or row.get("law_code")
+        or "văn bản"
+    )
+    if " > " in identity:
+        identity = identity.split(" > ", 1)[0]
+    identity = re.sub(
+        r"^\s*Cấu trúc\s+",
+        "",
+        identity,
+        flags=re.IGNORECASE,
+    )
+    first_article = str(counts.get("first_article") or "")
+    last_article = str(counts.get("last_article") or "")
+    article_range = (
+        f", được đánh số từ Điều {first_article} đến Điều {last_article}"
+        if first_article and last_article
+        else ""
+    )
+    return (
+        f"Theo cấu trúc của {identity} trong kho dữ liệu, văn bản có "
+        f"**{counts['articles']} điều**{article_range} [S1].\n\n"
+        "Graph phân cấp hiện ghi nhận thêm "
+        f"**{counts['chapters']} chương**, **{counts['sections']} mục**, "
+        f"**{counts['clauses']} khoản** và **{counts['points']} điểm** [S1].\n\n"
+        "_Đây là số liệu đếm trực tiếp trên phiên bản văn bản đã được lập "
+        "chỉ mục; không phải kết luận riêng về tình trạng hiệu lực hiện tại._"
+    )
 
 
 def _question_facets(query: str) -> list[str]:
@@ -551,6 +692,8 @@ def classify_retrieval_route(query: str) -> RetrievalRoute:
         return "single_hop"
 
     query_ascii = _ascii(normalized)
+    if is_document_structure_query(normalized):
+        return "multi_abstract"
     if any(marker in query_ascii for marker in _MULTI_ABSTRACT_MARKERS):
         return "multi_abstract"
 
@@ -980,6 +1123,48 @@ class RetrievalService:
                     raise
             setattr(self, attribute, store)
         return store
+
+    async def lookup_document_structure(
+        self,
+        query: str,
+    ) -> dict[str, Any] | None:
+        """Resolve hierarchy-count questions directly from the graph snapshot."""
+
+        if not is_document_structure_query(query):
+            return None
+        try:
+            store = await self._get_store("multi_abstract")
+            loader = getattr(store, "document_structures", None)
+            if not callable(loader):
+                return None
+            rows = await run_in_threadpool(loader, 500)
+            best = _best_document_structure(query, list(rows or []))
+            if best is None:
+                return None
+            row, counts, score = best
+            source_row = dict(row)
+            source_row["source_id"] = "S1"
+            source_row["score"] = round(float(score), 4)
+            source_row["reasons"] = list(
+                dict.fromkeys(
+                    [
+                        *source_row.get("reasons", []),
+                        "document_structure_graph",
+                        "deterministic_count",
+                    ]
+                )
+            )
+            return {
+                "answer": _document_structure_answer(source_row, counts),
+                "source": serialize_source(source_row),
+                "counts": counts,
+            }
+        except Exception as exc:
+            logger.warning(
+                "Document structure lookup failed error_type=%s",
+                type(exc).__name__,
+            )
+            return None
 
     async def retrieve(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
         return await self._retrieve(query, top_k=top_k, effort="medium")

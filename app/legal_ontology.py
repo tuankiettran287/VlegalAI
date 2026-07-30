@@ -141,6 +141,11 @@ NODE_TYPES: dict[str, tuple[int, str]] = {
 RELATIONS: dict[str, tuple[str, int, float, str]] = {
     # Layer 0 / 1 - structure & lifecycle of documents
     "THUỘC_VỀ": ("BELONGS_TO", 1, 0.45, "Liên kết thứ bậc Điểm → Khoản → Điều → Mục → Chương → VănBản."),
+    "CÓ_CHƯƠNG": ("HAS_CHAPTER", 1, 0.52, "VănBản → Chương trực thuộc."),
+    "CÓ_MỤC": ("HAS_SECTION", 1, 0.54, "Chương/VănBản → Mục trực thuộc."),
+    "CÓ_ĐIỀU": ("HAS_ARTICLE", 1, 0.62, "VănBản/Chương/Mục → Điều trực thuộc."),
+    "CÓ_KHOẢN": ("HAS_CLAUSE", 1, 0.66, "Điều → Khoản trực thuộc."),
+    "CÓ_ĐIỂM": ("HAS_POINT", 1, 0.68, "Khoản/Điều → Điểm trực thuộc."),
     "BAN_HÀNH": ("ISSUED_BY", 0, 0.20, "CơQuanBanHành → VănBản."),
     "CÓ_HIỆU_LỰC_TỪ": ("EFFECTIVE_FROM", 0, 0.60, "VănBản → HiệuLựcVănBản."),
     "HƯỚNG_DẪN": ("GUIDES", 0, 0.68, "Nghị định/Thông tư hướng dẫn Luật/Bộ luật."),

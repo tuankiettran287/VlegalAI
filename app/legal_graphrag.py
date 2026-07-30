@@ -9,7 +9,7 @@ import re
 import sqlite3
 import unicodedata
 from array import array
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -477,6 +477,7 @@ class LegalGraphBuilder:
             self._parse_document(path)
 
         self._finalize_node_text()
+        self._finalize_structure_metadata()
         self._register_system_document()
 
         # Layer 0-1: document lifecycle, cross references, effective dates.
@@ -598,6 +599,14 @@ class LegalGraphBuilder:
                 "text": "",
                 "_parts": [],
                 "ordinal": ordinal,
+                "direct_child_count": 0,
+                "chapter_count": 0,
+                "section_count": 0,
+                "article_count": 0,
+                "clause_count": 0,
+                "point_count": 0,
+                "first_article_number": "",
+                "last_article_number": "",
             }
         return node_id
 
@@ -855,6 +864,110 @@ class LegalGraphBuilder:
         for node in self.nodes.values():
             node["text"] = normalize_block("\n".join(node.pop("_parts", [])))
         self._refresh_path_labels()
+
+    def _finalize_structure_metadata(self) -> None:
+        """Materialize the legal hierarchy in both directions and store counts.
+
+        The parser has always emitted ``Điểm/Khoản/Điều -> THUỘC_VỀ`` edges.
+        Aggregate questions such as "Bộ luật này có bao nhiêu điều?" also need
+        a document-level graph fact and efficient parent-to-child traversal.
+        """
+
+        inverse_relations = {
+            "Chương": "CÓ_CHƯƠNG",
+            "Mục": "CÓ_MỤC",
+            "Điều": "CÓ_ĐIỀU",
+            "Khoản": "CÓ_KHOẢN",
+            "Điểm": "CÓ_ĐIỂM",
+        }
+        structure_types = set(inverse_relations)
+        document_counts: dict[str, Counter[str]] = {}
+        article_numbers: dict[str, list[str]] = {}
+
+        for node in self.nodes.values():
+            node["direct_child_count"] = 0
+            node["chapter_count"] = 0
+            node["section_count"] = 0
+            node["article_count"] = 0
+            node["clause_count"] = 0
+            node["point_count"] = 0
+            node["first_article_number"] = ""
+            node["last_article_number"] = ""
+
+        for node in list(self.nodes.values()):
+            node_type = str(node.get("node_type") or "")
+            doc_id = str(node.get("doc_id") or "")
+            if doc_id and node_type in structure_types:
+                document_counts.setdefault(doc_id, Counter())[node_type] += 1
+            if doc_id and node_type == "Điều":
+                article_numbers.setdefault(doc_id, []).append(
+                    str(node.get("number") or "")
+                )
+
+            parent_id = node.get("parent_id")
+            if not parent_id or parent_id not in self.nodes:
+                continue
+            self.nodes[parent_id]["direct_child_count"] += 1
+            relation = inverse_relations.get(node_type)
+            if relation:
+                self._add_edge(
+                    parent_id,
+                    node["node_id"],
+                    relation,
+                    node.get("path_label") or node.get("label") or "",
+                )
+
+        article_descendant_counts: dict[str, Counter[str]] = {}
+        clause_point_counts: Counter[str] = Counter()
+        for node in self.nodes.values():
+            node_type = str(node.get("node_type") or "")
+            if node_type not in {"Khoản", "Điểm"}:
+                continue
+            article_id = self._owning_article(node)
+            article_descendant_counts.setdefault(
+                article_id,
+                Counter(),
+            )[node_type] += 1
+            if node_type == "Điểm":
+                parent_id = str(node.get("parent_id") or "")
+                if (
+                    parent_id in self.nodes
+                    and self.nodes[parent_id]["node_type"] == "Khoản"
+                ):
+                    clause_point_counts[parent_id] += 1
+
+        for article_id, counts in article_descendant_counts.items():
+            if article_id not in self.nodes:
+                continue
+            self.nodes[article_id]["clause_count"] = counts["Khoản"]
+            self.nodes[article_id]["point_count"] = counts["Điểm"]
+        for clause_id, count in clause_point_counts.items():
+            self.nodes[clause_id]["point_count"] = count
+
+        for doc_id, counts in document_counts.items():
+            document_id = f"doc:{doc_id}"
+            document = self.nodes.get(document_id)
+            if document is None:
+                continue
+            document["chapter_count"] = counts["Chương"]
+            document["section_count"] = counts["Mục"]
+            document["article_count"] = counts["Điều"]
+            document["clause_count"] = counts["Khoản"]
+            document["point_count"] = counts["Điểm"]
+            numbers = sorted(
+                (number for number in article_numbers.get(doc_id, []) if number),
+                key=self._legal_number_sort_key,
+            )
+            if numbers:
+                document["first_article_number"] = numbers[0]
+                document["last_article_number"] = numbers[-1]
+
+    @staticmethod
+    def _legal_number_sort_key(value: str) -> tuple[int, str]:
+        match = re.fullmatch(r"(\d+)([A-Za-z]?)", value.strip())
+        if not match:
+            return (10**9, value.casefold())
+        return (int(match.group(1)), match.group(2).casefold())
 
     def _refresh_path_labels(self) -> None:
         for node_id in list(self.nodes):
@@ -1917,6 +2030,39 @@ class LegalGraphBuilder:
         listed = "; ".join(dict.fromkeys(citations))[:1200]
         return f"{base} Căn cứ pháp lý liên quan: {listed}."
 
+    def _document_structure_chunk_text(
+        self,
+        node: dict[str, Any],
+    ) -> str:
+        title = str(node.get("title") or node.get("label") or "Văn bản")
+        code = str(node.get("number") or "")
+        chapter_count = int(node.get("chapter_count") or 0)
+        section_count = int(node.get("section_count") or 0)
+        article_count = int(node.get("article_count") or 0)
+        clause_count = int(node.get("clause_count") or 0)
+        point_count = int(node.get("point_count") or 0)
+        first_article = str(node.get("first_article_number") or "")
+        last_article = str(node.get("last_article_number") or "")
+        article_range = (
+            f", đánh số từ Điều {first_article} đến Điều {last_article}"
+            if first_article and last_article
+            else ""
+        )
+        identity = f"{title} số {code}" if code else title
+        return (
+            f"Thống kê cấu trúc của {identity}: "
+            f"{chapter_count} chương, {section_count} mục, "
+            f"{article_count} điều{article_range}, "
+            f"{clause_count} khoản và {point_count} điểm. "
+            "Các số liệu được đếm trực tiếp từ graph phân cấp "
+            "Văn bản → Chương → Mục → Điều → Khoản → Điểm.\n"
+            "STRUCTURE_COUNTS: "
+            f"chapters={chapter_count}; sections={section_count}; "
+            f"articles={article_count}; clauses={clause_count}; "
+            f"points={point_count}; first_article={first_article}; "
+            f"last_article={last_article}."
+        )
+
     def _build_chunks(self) -> None:
         relevant = {"QUY_ĐỊNH_TẠI", "ĐƯỢC_ĐỊNH_NGHĨA_LÀ", "ÁP_DỤNG_CHO", "BỊ_NGHIÊM_CẤM", "KÍCH_HOẠT_NGHĨA_VỤ"}
         outgoing: dict[str, list[str]] = {}
@@ -1987,6 +2133,21 @@ class LegalGraphBuilder:
                 )
                 ordinal += 1
 
+        # Append rather than prepend these chunks so every pre-existing chunk
+        # keeps its stable id/ordinal and can reuse its embedding checkpoint.
+        for node_id, node in self.nodes.items():
+            if node["node_type"] != "VănBản":
+                continue
+            self._add_chunk(
+                node["doc_id"],
+                node_id,
+                "document_structure",
+                self._document_structure_chunk_text(node),
+                ordinal,
+                title=f"Cấu trúc {node.get('label') or node.get('title')}",
+            )
+            ordinal += 1
+
     def _write_sqlite(self) -> None:
         if self.db_path.exists():
             self.db_path.unlink()
@@ -2014,7 +2175,15 @@ class LegalGraphBuilder:
                 parent_id TEXT,
                 path_label TEXT,
                 text TEXT,
-                ordinal INTEGER
+                ordinal INTEGER,
+                direct_child_count INTEGER,
+                chapter_count INTEGER,
+                section_count INTEGER,
+                article_count INTEGER,
+                clause_count INTEGER,
+                point_count INTEGER,
+                first_article_number TEXT,
+                last_article_number TEXT
             );
             CREATE TABLE edges (
                 edge_id TEXT PRIMARY KEY,
@@ -2061,11 +2230,43 @@ class LegalGraphBuilder:
             self.docs.values(),
         )
         node_rows = [
-            {k: v for k, v in node.items() if k in {"node_id", "doc_id", "node_type", "label", "number", "title", "parent_id", "path_label", "text", "ordinal"}}
+            {
+                k: v
+                for k, v in node.items()
+                if k
+                in {
+                    "node_id",
+                    "doc_id",
+                    "node_type",
+                    "label",
+                    "number",
+                    "title",
+                    "parent_id",
+                    "path_label",
+                    "text",
+                    "ordinal",
+                    "direct_child_count",
+                    "chapter_count",
+                    "section_count",
+                    "article_count",
+                    "clause_count",
+                    "point_count",
+                    "first_article_number",
+                    "last_article_number",
+                }
+            }
             for node in self.nodes.values()
         ]
         conn.executemany(
-            "INSERT INTO nodes VALUES (:node_id, :doc_id, :node_type, :label, :number, :title, :parent_id, :path_label, :text, :ordinal)",
+            """
+            INSERT INTO nodes VALUES (
+                :node_id, :doc_id, :node_type, :label, :number, :title,
+                :parent_id, :path_label, :text, :ordinal,
+                :direct_child_count, :chapter_count, :section_count,
+                :article_count, :clause_count, :point_count,
+                :first_article_number, :last_article_number
+            )
+            """,
             node_rows,
         )
         conn.executemany(
@@ -2174,6 +2375,23 @@ class GraphRAGStore:
             "node_types": {row["node_type"]: row["count"] for row in node_types_rows},
             "db_path": str(self.db_path),
         }
+
+    def document_structures(self, limit: int = 500) -> list[dict[str, Any]]:
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT chunk_id, doc_id, node_id, chunk_type, title,
+                       path_label, citation, text, token_count, ordinal
+                FROM chunks
+                WHERE chunk_type = 'document_structure'
+                ORDER BY doc_id
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [dict(row) for row in rows]
 
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         query = normalize_space(query)

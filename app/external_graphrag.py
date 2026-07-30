@@ -81,6 +81,36 @@ SETTLED_LAW_STATUSES = (
     "UNKNOWN",
 )
 UNVERIFIED_LAW_STATUS = "UNVERIFIED"
+DOCUMENT_STRUCTURE_COUNTS_RE = re.compile(
+    r"STRUCTURE_COUNTS:\s*"
+    r"chapters=(?P<chapters>\d+);\s*"
+    r"sections=(?P<sections>\d+);\s*"
+    r"articles=(?P<articles>\d+);\s*"
+    r"clauses=(?P<clauses>\d+);\s*"
+    r"points=(?P<points>\d+);\s*"
+    r"first_article=(?P<first_article>[^;.\s]*);\s*"
+    r"last_article=(?P<last_article>[^;.\s]*)(?:[.;]|$)",
+    re.IGNORECASE,
+)
+
+
+def document_structure_counts(
+    row: dict[str, Any],
+) -> dict[str, int | str] | None:
+    """Decode the machine-readable graph counts embedded in a structure chunk."""
+
+    match = DOCUMENT_STRUCTURE_COUNTS_RE.search(str(row.get("text") or ""))
+    if match is None:
+        return None
+    return {
+        "chapters": int(match.group("chapters")),
+        "sections": int(match.group("sections")),
+        "articles": int(match.group("articles")),
+        "clauses": int(match.group("clauses")),
+        "points": int(match.group("points")),
+        "first_article": match.group("first_article"),
+        "last_article": match.group("last_article"),
+    }
 
 
 def merge_chunk_rows(
@@ -486,6 +516,8 @@ def ensure_neo4j_schema(driver, database: str) -> None:
         "CREATE CONSTRAINT legal_chunk_id IF NOT EXISTS FOR (c:LegalChunk) REQUIRE c.chunk_id IS UNIQUE",
         "CREATE INDEX legal_node_type IF NOT EXISTS FOR (n:LegalNode) ON (n.node_type)",
         "CREATE INDEX legal_node_doc IF NOT EXISTS FOR (n:LegalNode) ON (n.doc_id)",
+        "CREATE INDEX legal_document_code IF NOT EXISTS FOR (n:LegalDocument) ON (n.code)",
+        "CREATE INDEX legal_article_number IF NOT EXISTS FOR (n:LegalArticle) ON (n.number)",
         "CREATE INDEX legal_chunk_node IF NOT EXISTS FOR (c:LegalChunk) ON (c.node_id)",
         "CREATE INDEX legal_chunk_type IF NOT EXISTS FOR (c:LegalChunk) ON (c.chunk_type)",
         "CREATE FULLTEXT INDEX legal_chunk_fulltext IF NOT EXISTS FOR (c:LegalChunk) ON EACH [c.title, c.citation, c.text]",
@@ -541,6 +573,14 @@ def sync_neo4j(
                         n.path_label = row.path_label,
                         n.text = row.text,
                         n.ordinal = row.ordinal,
+                        n.direct_child_count = row.direct_child_count,
+                        n.chapter_count = row.chapter_count,
+                        n.section_count = row.section_count,
+                        n.article_count = row.article_count,
+                        n.clause_count = row.clause_count,
+                        n.point_count = row.point_count,
+                        n.first_article_number = row.first_article_number,
+                        n.last_article_number = row.last_article_number,
                         n.code = row.law_code,
                         n.status = row.law_status,
                         n.version = row.law_version,
@@ -552,6 +592,35 @@ def sync_neo4j(
                     """,
                     rows=prepared,
                 )
+
+            session.run(
+                """
+                MATCH (n:LegalNode)
+                WHERE n.node_type IN ['VănBản', 'document']
+                SET n:LegalDocument
+                """
+            )
+            session.run(
+                """
+                MATCH (n:LegalNode)
+                WHERE n.node_type = 'Điều'
+                SET n:LegalArticle
+                """
+            )
+            session.run(
+                """
+                MATCH (n:LegalNode)
+                WHERE n.node_type = 'Khoản'
+                SET n:LegalClause
+                """
+            )
+            session.run(
+                """
+                MATCH (n:LegalNode)
+                WHERE n.node_type = 'Điểm'
+                SET n:LegalPoint
+                """
+            )
 
             for batch in batched(chunks, config.batch_size):
                 prepared = []
@@ -1164,6 +1233,30 @@ class PostgresGraphRAGStore:
             "retrieval": {"dense": "cosine", "lexical": "bm25", "fusion": "rrf"},
         }
 
+    def document_structures(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Return one precomputed hierarchy summary for each latest law."""
+
+        current_chunk = postgres_latest_chunk_predicate("current_chunk")
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT current_chunk.chunk_id, current_chunk.doc_id,
+                       current_chunk.node_id, current_chunk.chunk_type,
+                       current_chunk.title, current_chunk.path_label,
+                       current_chunk.citation, current_chunk.text,
+                       current_chunk.token_count, current_chunk.ordinal,
+                       current_chunk.source_url, current_chunk.law_code,
+                       current_chunk.law_status, current_chunk.law_version
+                FROM graphrag_chunk AS current_chunk
+                WHERE {current_chunk}
+                  AND current_chunk.chunk_type = 'document_structure'
+                ORDER BY current_chunk.law_code, current_chunk.doc_id
+                LIMIT %s
+                """,
+                (max(1, int(limit)),),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         if not getattr(self, "_is_ready", True):
             return []
@@ -1385,6 +1478,40 @@ class Neo4jGraphRAGStore:
             "node_types": {item["node_type"]: item["count"] for item in node_type_rows},
             "neo4j_uri": self.config.neo4j_uri,
         }
+
+    def document_structures(self, limit: int = 500) -> list[dict[str, Any]]:
+        with self.driver.session(database=self.config.neo4j_database) as session:
+            return session.run(
+                """
+                MATCH (c:LegalChunk)-[:CHUNK_OF]->(document:LegalNode)
+                WHERE c.chunk_type = 'document_structure'
+                  AND coalesce(c.law_version, c.version) = document.version
+                  AND NOT EXISTS {
+                      MATCH (newer_document:LegalNode)
+                      WHERE newer_document.node_type IN ['VănBản', 'document']
+                        AND toUpper(replace(coalesce(newer_document.code, ''), ' ', ''))
+                            = toUpper(replace(coalesce(document.code, ''), ' ', ''))
+                        AND newer_document.version > document.version
+                  }
+                RETURN c.chunk_id AS chunk_id,
+                       c.doc_id AS doc_id,
+                       c.node_id AS node_id,
+                       c.chunk_type AS chunk_type,
+                       c.title AS title,
+                       c.path_label AS path_label,
+                       c.citation AS citation,
+                       c.text AS text,
+                       c.token_count AS token_count,
+                       c.ordinal AS ordinal,
+                       c.source_url AS source_url,
+                       c.law_code AS law_code,
+                       c.law_status AS law_status,
+                       c.law_version AS law_version
+                ORDER BY c.law_code, c.doc_id
+                LIMIT $limit
+                """,
+                limit=max(1, int(limit)),
+            ).data()
 
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         query = normalize_space(query)
@@ -1708,6 +1835,11 @@ class Neo4jPostgresGraphRAGStore:
                 "graph": "neo4j",
             },
         }
+
+    def document_structures(self, limit: int = 500) -> list[dict[str, Any]]:
+        # PostgreSQL carries the same immutable structure chunks and remains
+        # available when Neo4j Aura is temporarily unreachable.
+        return self.rag.document_structures(limit)
 
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         query = normalize_space(query)
