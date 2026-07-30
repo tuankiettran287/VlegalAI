@@ -86,8 +86,8 @@ jobs:
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       NEO4J_URI: ${{ secrets.NEO4J_URI }}
-      NEO4J_USER: ${{ vars.NEO4J_USER || '21d22093' }}
-      NEO4J_DATABASE: ${{ vars.NEO4J_DATABASE || '21d22093' }}
+      NEO4J_USER: ${{ vars.NEO4J_USER || 'neo4j' }}
+      NEO4J_DATABASE: ${{ vars.NEO4J_DATABASE || 'neo4j' }}
       IMAGE_TAG: ${{ github.sha }}
 
     steps:

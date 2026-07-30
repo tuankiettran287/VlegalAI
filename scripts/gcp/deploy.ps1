@@ -12,8 +12,8 @@ param(
     [string]$Network = "default",
     [string]$Subnet = "default",
     [string]$Neo4jUri = $env:NEO4J_URI,
-    [string]$Neo4jUser = "21d22093",
-    [string]$Neo4jDatabase = "21d22093",
+    [string]$Neo4jUser = "neo4j",
+    [string]$Neo4jDatabase = "neo4j",
     [string]$FrontendUrl = "",
     [ValidateRange(0, 100)]
     [int]$WorkerInstances = 0,

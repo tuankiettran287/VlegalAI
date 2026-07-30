@@ -1,0 +1,13 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'docker/backend.Dockerfile'
+      - '-t'
+      - 'asia-southeast1-docker.pkg.dev/idyllic-anvil-452006-k0/vlegal/vlegal-api:latest'
+      - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
+images:
+  - 'asia-southeast1-docker.pkg.dev/idyllic-anvil-452006-k0/vlegal/vlegal-api:latest'
