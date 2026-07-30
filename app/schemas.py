@@ -155,6 +155,7 @@ class ChatResponse(BaseModel):
         "scope_clarification",
         "catalog",
         "greeting",
+        "unsupported_official_catalog",
     ] = "miss"
 
 
