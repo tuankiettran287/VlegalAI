@@ -158,6 +158,32 @@ def _check_prompt_injection(message: str) -> str | None:
     return None
 
 
+_NON_LABOR_SCOPE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\b(?:luật|quy\s+định|xem\s+luật)?\s*đất\s+đai\b", re.IGNORECASE),
+    re.compile(r"\b(?:thành\s+lập|đăng\s+ký|giấy\s+phép)\s+(?:công\s+ty|doanh\s+nghiệp)\b", re.IGNORECASE),
+    re.compile(r"\b(?:luật|bộ\s+luật)\s+dân\s+sự\b", re.IGNORECASE),
+    re.compile(r"\b(?:tố\s+tụng\s+dân\s+sự|hình\s+sự|luật\s+hình\s+sự)\b", re.IGNORECASE),
+    re.compile(r"\b(?:sổ\s+đỏ|sổ\s+hồng|quy\s+hoạch\s+đất|thu\s+hồi\s+đất|bất\s+động\s+sản)\b", re.IGNORECASE),
+    re.compile(r"\b(?:hôn\s+nhân\s+gia\s+đình|ly\s+hôn|kết\s+hôn|thừa\s+kế|tài\s+sản\s+thừa\s+kế)\b", re.IGNORECASE),
+    re.compile(r"\b(?:xử\s+lý\s+vi\s+phạm\s+hành\s+chính|vi\s+phạm\s+giao\s+thông|phạt\s+giao\s+thông|bằng\s+lái)\b", re.IGNORECASE),
+]
+
+
+def _check_non_labor_scope(message: str) -> str | None:
+    """Detect queries clearly outside the Labor Law scope (Option A)."""
+    for pat in _NON_LABOR_SCOPE_PATTERNS:
+        if pat.search(message):
+            logger.info("non_labor_scope_detected query=%s", message[:80])
+            return (
+                "VLegal AI hiện tại là trợ lý chuyên sâu về **Pháp luật Lao động Việt Nam** "
+                "(Bộ luật Lao động 2019, hợp đồng lao động, tiền lương, thời giờ làm việc - nghỉ ngơi, "
+                "bảo hiểm xã hội, an toàn lao động, việc làm, kỷ luật lao động, tranh chấp lao động...).\n\n"
+                "Câu hỏi của bạn nằm ngoài phạm vi CSDL chuyên ngành Lao động hiện tại của hệ thống. "
+                "Bạn có cần hỗ trợ câu hỏi nào liên quan đến Pháp luật Lao động không?"
+            )
+    return None
+
+
 CONTRACT_TEMPLATES = [
     {"id": "employment", "name": "Hợp đồng lao động", "category": "Lao động"},
     {"id": "probation", "name": "Hợp đồng thử việc", "category": "Lao động"},
@@ -1642,7 +1668,7 @@ async def chat(
     }
     generation_model = settings.gemini_model
 
-    # --- Prompt injection guard (Python layer) ---
+    # --- Prompt injection and Out-of-Scope guards (Python layer) ---
     if greeting_answer is None:
         injection_block = _check_prompt_injection(payload.message)
         if injection_block is not None:
@@ -1654,6 +1680,17 @@ async def chat(
                 items=[],
                 note="injection_blocked",
             ).model_dump(mode="json")
+        else:
+            scope_block = _check_non_labor_scope(payload.message)
+            if scope_block is not None:
+                answer = scope_block
+                cache_mode = "out_of_scope"
+                verification = VerificationReport(
+                    checked=False,
+                    all_current=False,
+                    items=[],
+                    note="out_of_scope_non_labor",
+                ).model_dump(mode="json")
 
     catalog_request = (
         None

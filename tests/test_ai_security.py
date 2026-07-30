@@ -543,3 +543,21 @@ def test_vertex_schema_forwards_array_and_string_bounds() -> None:
     assert converted["items"]["minLength"] == 2
     assert converted["items"]["maxLength"] == 20
     assert converted["items"]["pattern"] == r"^S\d+$"
+
+
+def test_check_non_labor_scope_detects_out_of_scope_queries() -> None:
+    from app.api import _check_non_labor_scope
+
+    assert _check_non_labor_scope("cho tôi xem luật đất đai") is not None
+    assert _check_non_labor_scope("thành lập công ty tnhh") is not None
+    assert _check_non_labor_scope("bộ luật dân sự 2015") is not None
+    assert _check_non_labor_scope("Lương làm thêm giờ ngày lễ?") is None
+
+
+def test_greetings_detects_typos_and_variations() -> None:
+    from app.services.greetings import greeting_response
+
+    assert greeting_response("xin cho", "Dat Le") is not None
+    assert greeting_response("xinchao", "Dat Le") is not None
+    assert greeting_response("alô", "Dat Le") is not None
+
