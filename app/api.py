@@ -456,6 +456,58 @@ def _message_out(
     )
 
 
+async def _enrich_stored_source_urls(
+    db: AsyncSession,
+    messages: list[MessageOut],
+) -> None:
+    """Attach official links to sources saved before URL enrichment."""
+
+    missing_by_code: dict[str, list[SourceOut]] = {}
+    for message in messages:
+        for source in message.sources:
+            if source.source_url:
+                continue
+            label = f"{source.citation} {source.title}".upper()
+            match = LAW_CODE_RE.search(label)
+            if match:
+                missing_by_code.setdefault(
+                    match.group(0).upper(),
+                    [],
+                ).append(source)
+    if not missing_by_code:
+        return
+
+    documents = (
+        await db.scalars(
+            select(LegalDocument)
+            .where(
+                func.upper(LegalDocument.code).in_(
+                    list(missing_by_code)
+                ),
+                LegalDocument.source_url.is_not(None),
+            )
+            .order_by(
+                LegalDocument.version.desc(),
+                LegalDocument.verified_at.desc().nullslast(),
+            )
+        )
+    ).all()
+    official_urls: dict[str, str] = {}
+    for document in documents:
+        source_url = str(document.source_url or "").strip()
+        if source_url:
+            official_urls.setdefault(
+                document.code.strip().upper(),
+                source_url,
+            )
+    for code, sources in missing_by_code.items():
+        source_url = official_urls.get(code)
+        if not source_url:
+            continue
+        for source in sources:
+            source.source_url = source_url
+
+
 def _conversation_out(conversation: Conversation, count: int = 0) -> ConversationOut:
     return ConversationOut(
         id=conversation.id,
@@ -1633,12 +1685,14 @@ async def get_conversation(
             .order_by(ChatMessage.message_sequence)
         )
     ).all()
+    messages = [
+        _message_out(message, settings, feedback_rating)
+        for message, feedback_rating in message_rows
+    ]
+    await _enrich_stored_source_urls(db, messages)
     return ConversationDetailOut(
         conversation=_conversation_out(conversation, len(message_rows)),
-        messages=[
-            _message_out(message, settings, feedback_rating)
-            for message, feedback_rating in message_rows
-        ],
+        messages=messages,
     )
 
 

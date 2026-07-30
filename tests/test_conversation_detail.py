@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
-from app.api import _message_out
+from app.api import _enrich_stored_source_urls, _message_out
 from app.core.config import Settings
 from app.core.security import encrypt_text
 from app.models import ChatMessage
@@ -85,3 +87,44 @@ def test_stored_message_with_unreadable_ciphertext_does_not_break_conversation()
     result = _message_out(message, settings)
 
     assert result.content == "Không thể khôi phục nội dung tin nhắn này."
+
+
+def test_stored_message_sources_receive_official_catalog_url() -> None:
+    settings = Settings(_env_file=None, session_secret="conversation-detail-test")
+    message = _stored_message(
+        settings,
+        verification={},
+        sources=[
+            {
+                "source_id": "S1",
+                "citation": "Bộ Luật Lao Động (45/2019/QH14)",
+                "title": "Bộ Luật Lao Động",
+                "text": "Nội dung nguồn",
+                "reasons": [],
+            },
+        ],
+    )
+    output = _message_out(message, settings)
+
+    class _ScalarRows:
+        @staticmethod
+        def all() -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(
+                    code="45/2019/QH14",
+                    source_url=(
+                        "https://vanban.chinhphu.vn"
+                        "?pageid=27160&docid=198540"
+                    ),
+                )
+            ]
+
+    class _Db:
+        async def scalars(self, _: object) -> _ScalarRows:
+            return _ScalarRows()
+
+    asyncio.run(_enrich_stored_source_urls(_Db(), [output]))
+
+    assert output.sources[0].source_url == (
+        "https://vanban.chinhphu.vn?pageid=27160&docid=198540"
+    )
