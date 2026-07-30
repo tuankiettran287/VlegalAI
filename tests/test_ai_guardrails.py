@@ -4,7 +4,6 @@ import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -321,7 +320,7 @@ def test_legal_sources_fail_closed_for_unverified_opaque_document() -> None:
     assert error.value.status_code == 409
 
 
-def test_legal_sources_sanitizes_second_freshness_failure_after_reindex() -> None:
+def test_legal_sources_keeps_sources_after_second_freshness_failure() -> None:
     source = {
         "doc_id": "doc-1",
         "title": "Luật 100/2020/QH14",
@@ -346,16 +345,21 @@ def test_legal_sources_sanitizes_second_freshness_failure_after_reindex() -> Non
     freshness = _Freshness()
 
     async def scenario() -> None:
-        with pytest.raises(HTTPException) as error:
-            await _legal_sources("query", _Retrieval(), freshness)
-        assert error.value.status_code == 503
-        assert "private provider detail" not in str(error.value.detail)
+        sources, verification = await _legal_sources(
+            "query",
+            _Retrieval(),
+            freshness,
+        )
+        assert [item["source_id"] for item in sources] == ["S1"]
+        assert verification["checked"] is False
+        assert "Chưa thể kiểm tra hiệu lực văn bản trực tuyến" in verification["note"]
+        assert "private provider detail" not in str(verification)
 
     asyncio.run(scenario())
     assert freshness.calls == 2
 
 
-def test_legal_sources_returns_data_unavailable_when_freshness_fails_for_chat() -> None:
+def test_legal_sources_keeps_retrieved_data_when_freshness_fails_for_chat() -> None:
     source = {
         "doc_id": "doc-1",
         "title": "Luật 100/2020/QH14",
@@ -380,9 +384,12 @@ def test_legal_sources_returns_data_unavailable_when_freshness_fails_for_chat() 
         )
     )
 
-    assert sources == []
+    assert len(sources) == 1
+    assert sources[0]["source_id"] == "S1"
+    assert sources[0]["citation"] == "100/2020/QH14"
     assert verification["checked"] is False
-    assert verification["note"] == "Dữ liệu không có sẵn"
+    assert verification["all_current"] is False
+    assert "Chưa thể kiểm tra hiệu lực văn bản trực tuyến" in verification["note"]
     assert "private provider detail" not in str(verification)
 
 

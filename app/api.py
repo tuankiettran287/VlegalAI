@@ -124,6 +124,11 @@ router = APIRouter()
 router.include_router(auth_router)
 logger = logging.getLogger(__name__)
 LEGAL_DATA_UNAVAILABLE_MESSAGE = "Dữ liệu không có sẵn"
+FRESHNESS_TEMPORARILY_UNAVAILABLE_MESSAGE = (
+    "Chưa thể kiểm tra hiệu lực văn bản trực tuyến tại thời điểm này. "
+    "Câu trả lời sử dụng dữ liệu pháp luật đã được lập chỉ mục; "
+    "vui lòng đối chiếu nguồn gốc trước khi áp dụng."
+)
 AI_TEMPORARILY_UNAVAILABLE_MESSAGE = (
     "Dịch vụ AI tạm thời không khả dụng. Vui lòng thử lại sau."
 )
@@ -724,6 +729,31 @@ async def _legal_sources(
             ).model_dump(mode="json"),
         )
 
+    def freshness_unavailable_result(
+        rows: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        retained_sources = [dict(source) for source in rows]
+        for index, source in enumerate(retained_sources, start=1):
+            source["source_id"] = f"S{index}"
+        log_progress(
+            logger,
+            "legal_sources",
+            "completed",
+            operation_started,
+            outcome="freshness_unavailable_fallback",
+            source_count=len(retained_sources),
+        )
+        return (
+            retained_sources,
+            VerificationReport(
+                checked=False,
+                all_current=False,
+                checked_at=datetime.now(UTC),
+                items=[],
+                note=FRESHNESS_TEMPORARILY_UNAVAILABLE_MESSAGE,
+            ).model_dump(mode="json"),
+        )
+
     configured_limit = getattr(
         getattr(freshness, "settings", None),
         "max_laws_verified_per_request",
@@ -817,23 +847,13 @@ async def _legal_sources(
                 "Freshness verification unavailable error_type=%s",
                 type(exc).__name__,
             )
-            if allow_empty:
-                return unavailable_result()
-            raise HTTPException(
-                status_code=503,
-                detail="Không thể kiểm tra hiệu lực văn bản tại thời điểm này.",
-            ) from exc
+            return freshness_unavailable_result(sources)
         except Exception as exc:
             logger.warning(
                 "Freshness verification failed error_type=%s",
                 type(exc).__name__,
             )
-            if allow_empty:
-                return unavailable_result()
-            raise HTTPException(
-                status_code=503,
-                detail="Không thể kiểm tra hiệu lực văn bản tại thời điểm này.",
-            ) from exc
+            return freshness_unavailable_result(sources)
 
         raw_items = getattr(verification, "items", [])
         verification_items = (
@@ -923,12 +943,7 @@ async def _legal_sources(
                 )
             sources = current_sources
         elif require_freshness:
-            if allow_empty:
-                return unavailable_result()
-            raise HTTPException(
-                status_code=503,
-                detail="Không nhận được bằng chứng kiểm tra hiệu lực văn bản.",
-            )
+            return freshness_unavailable_result(sources)
         break
     else:
         if allow_empty:
