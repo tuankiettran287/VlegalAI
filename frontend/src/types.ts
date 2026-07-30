@@ -34,6 +34,7 @@ export type VerificationReport = {
   checked_at?: string | null;
   items: VerificationItem[];
   note: string;
+  mode?: string;
 };
 
 export type ChatMessage = {
