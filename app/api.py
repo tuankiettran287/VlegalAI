@@ -780,6 +780,30 @@ def _validate_professional_legal_opening(value: str) -> None:
         )
 
 
+_DOCUMENT_COUNT_QUERY_RE = re.compile(
+    r"\b(?:co\s+)?bao\s+nhieu\s+"
+    r"(?:nghi\s+dinh|thong\s+tu|bo\s+luat|luat|van\s+ban)\b"
+    r"|\btong\s+so\s+"
+    r"(?:nghi\s+dinh|thong\s+tu|bo\s+luat|luat|van\s+ban)\b",
+    re.IGNORECASE,
+)
+
+
+def _document_count_scope_clarification(query: str) -> str:
+    """Avoid presenting top-k retrieval as an exhaustive legal catalogue."""
+
+    normalized = _ascii_text(query)
+    if not _DOCUMENT_COUNT_QUERY_RE.search(normalized):
+        return ""
+    return (
+        "Mình chưa thể đưa ra một con số chính xác cho toàn bộ hệ thống văn bản "
+        "chỉ từ các kết quả truy hồi, vì phạm vi có thể gồm văn bản còn hiệu lực, "
+        "hết hiệu lực, sửa đổi và văn bản chỉ liên quan gián tiếp. Hãy chọn rõ một "
+        "phạm vi: “thống kê các nghị định hiện có trong kho VLegal” hoặc “thống kê "
+        "các nghị định đang còn hiệu lực theo cơ sở dữ liệu pháp luật chính thức”."
+    )
+
+
 def _grounded_source_fallback(
     sources: list[dict[str, Any]],
     *,
