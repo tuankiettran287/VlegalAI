@@ -1319,9 +1319,37 @@ class PostgresGraphRAGStore:
                        current_chunk.title, current_chunk.path_label,
                        current_chunk.citation, current_chunk.text,
                        current_chunk.token_count, current_chunk.ordinal,
-                       current_chunk.source_url, current_chunk.law_code,
+                       coalesce(
+                           current_chunk.source_url,
+                           official_document.source_url
+                       ) AS source_url,
+                       current_chunk.law_code,
                        current_chunk.law_status, current_chunk.law_version
                 FROM graphrag_chunk AS current_chunk
+                LEFT JOIN LATERAL (
+                    SELECT document.source_url
+                    FROM legal_document AS document
+                    WHERE upper(
+                              regexp_replace(
+                                  btrim(document.code),
+                                  '[[:space:]]+',
+                                  '',
+                                  'g'
+                              )
+                          ) = upper(
+                              regexp_replace(
+                                  btrim(current_chunk.law_code),
+                                  '[[:space:]]+',
+                                  '',
+                                  'g'
+                              )
+                          )
+                      AND document.source_url IS NOT NULL
+                      AND btrim(document.source_url) <> ''
+                    ORDER BY document.version DESC,
+                             document.verified_at DESC NULLS LAST
+                    LIMIT 1
+                ) AS official_document ON TRUE
                 WHERE {current_chunk}
                   AND current_chunk.chunk_type = 'document_structure'
                 ORDER BY current_chunk.law_code, current_chunk.doc_id

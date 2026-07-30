@@ -102,6 +102,10 @@ def test_structure_question_uses_graph_count_without_external_freshness() -> Non
                         "first_article=1; last_article=220."
                     ),
                     "law_code": "45/2019/QH14",
+                    "source_url": (
+                        "https://vanban.chinhphu.vn"
+                        "?pageid=27160&docid=198540"
+                    ),
                 }
             ]
 
@@ -120,4 +124,7 @@ def test_structure_question_uses_graph_count_without_external_freshness() -> Non
     assert "**640 khoản**" in result["answer"]
     assert "Graph" not in result["answer"]
     assert result["source"]["source_id"] == "S1"
+    assert result["source"]["source_url"] == (
+        "https://vanban.chinhphu.vn?pageid=27160&docid=198540"
+    )
     assert "document_structure_graph" in result["source"]["reasons"]

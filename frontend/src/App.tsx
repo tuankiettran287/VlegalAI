@@ -378,6 +378,17 @@ function VerificationBadge({ report }: { report?: VerificationReport | null }) {
 
 function SourcePanel({ sources }: { sources?: Source[] | null }) {
   if (!Array.isArray(sources) || !sources.length) return null;
+
+  const safeSourceUrl = (value?: string | null) => {
+    if (!value) return null;
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" ? url.toString() : null;
+    } catch {
+      return null;
+    }
+  };
+
   return (
     <details className="source-panel">
       <summary>
@@ -386,20 +397,30 @@ function SourcePanel({ sources }: { sources?: Source[] | null }) {
         <ChevronDown size={16} />
       </summary>
       <div className="source-list">
-        {sources.map((source) => (
-          <article className="source-item" key={`${source.source_id}-${source.citation}`}>
-            <div className="source-title">
-              <span className="source-id">{source.source_id}</span>
-              <strong>{source.citation || source.title}</strong>
-              {source.source_url && (
-                <a href={source.source_url} target="_blank" rel="noreferrer" aria-label="Mở nguồn chính thức">
-                  <ExternalLink size={14} />
-                </a>
-              )}
-            </div>
-            <p>{source.text}</p>
-          </article>
-        ))}
+        {sources.map((source) => {
+          const sourceUrl = safeSourceUrl(source.source_url);
+          return (
+            <article className="source-item" key={`${source.source_id}-${source.citation}`}>
+              <div className="source-title">
+                <span className="source-id">{source.source_id}</span>
+                <strong>{source.citation || source.title}</strong>
+                {sourceUrl && (
+                  <a
+                    className="source-open-link"
+                    href={sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={`Mở văn bản gốc: ${source.citation || source.title}`}
+                  >
+                    <span>Mở văn bản</span>
+                    <ExternalLink size={13} />
+                  </a>
+                )}
+              </div>
+              <p>{source.text}</p>
+            </article>
+          );
+        })}
       </div>
     </details>
   );

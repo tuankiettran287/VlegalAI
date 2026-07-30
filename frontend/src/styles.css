@@ -1660,6 +1660,39 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
+.source-open-link {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--brand) 28%, var(--line));
+  border-radius: 8px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.source-open-link:hover {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 14%, var(--surface));
+  transform: translateY(-1px);
+}
+
+.source-open-link:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand) 42%, transparent);
+  outline-offset: 2px;
+}
+
 .source-id {
   padding: 3px 6px;
   border-radius: 7px;
@@ -1677,6 +1710,17 @@ summary:focus-visible {
   font-size: 9px;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+}
+
+@media (max-width: 640px) {
+  .source-title {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .source-open-link {
+    grid-column: 2;
+    justify-self: start;
+  }
 }
 
 .markdown {
