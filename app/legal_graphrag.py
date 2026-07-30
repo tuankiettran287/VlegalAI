@@ -43,6 +43,10 @@ VN_WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", re.UNICODE)
 CHAPTER_RE = re.compile(r"^Chương\s+([IVXLCDM]+|\d+)(?:[\.\s:-]+(.+))?$", re.IGNORECASE)
 SECTION_RE = re.compile(r"^Mục\s+([IVXLCDM]+|\d+)(?:[\.\s:-]+(.+))?$", re.IGNORECASE)
 ARTICLE_RE = re.compile(r"^Điều\s+(\d+[a-zA-Z]?)\s*[\.:]\s*(.+)$", re.IGNORECASE)
+APPENDIX_RE = re.compile(
+    r"^(Phụ\s+lục|Mẫu\s+số|Biểu\s+mẫu)\s*([IVXLCDM\d]*)(?:[\.\s:-]+(.+))?$",
+    re.IGNORECASE,
+)
 CLAUSE_RE = re.compile(r"^(\d{1,3})\.\s+(.+)$")
 POINT_RE = re.compile(r"^([a-zđ](?:\d+)?)\)\s+(.+)$", re.IGNORECASE)
 ARTICLE_REF_RE = re.compile(
@@ -653,6 +657,7 @@ class LegalGraphBuilder:
         auto_article_number = 0
         current_chapter: str | None = None
         current_section: str | None = None
+        current_appendix: str | None = None
         current_article: str | None = None
         current_clause: str | None = None
         current_point: str | None = None
@@ -669,7 +674,7 @@ class LegalGraphBuilder:
                 while i < len(lines) and kinds[i] == "table":
                     i += 1
                 rows = lines[start:i]
-                anchor = current_clause or current_article
+                anchor = current_clause or current_article or current_appendix
                 table_seq += 1
                 ordinal = self._attach_table(
                     doc_id, doc_node_id, anchor, rows, table_seq, ordinal
@@ -679,8 +684,35 @@ class LegalGraphBuilder:
                     self._append_node_text(current_article, payload)
                     self._append_node_text(current_clause, payload)
                     self._append_node_text(current_point, payload)
+                    if not current_article:
+                        self._append_node_text(current_appendix, payload)
                 else:
                     intro.extend(rows)
+                continue
+
+            appendix = APPENDIX_RE.match(text)
+            if appendix:
+                kind_name = appendix.group(1)
+                num = appendix.group(2) or ""
+                heading = normalize_space(appendix.group(3) or "")
+                if not heading and i + 1 < len(lines) and is_heading_title(lines[i + 1]):
+                    heading = lines[i + 1]
+                    i += 1
+                node_id = f"phuluc:{doc_id}:{slugify(kind_name)}-{slugify(num or '1')}"
+                dup_count = 1
+                base_appendix_id = node_id
+                node_label = f"{kind_name} {num}".strip() + (f". {heading}" if heading else "")
+                while node_id in self.nodes and self.nodes[node_id].get("title") != node_label:
+                    node_id = f"{base_appendix_id}:{dup_count}"
+                    dup_count += 1
+                current_appendix = self._add_node(
+                    node_id, doc_id, "PhụLục", node_label, num, heading, doc_node_id, ordinal
+                )
+                self._add_edge(current_appendix, doc_node_id, "THUỘC_VỀ", node_label)
+                self._append_node_text(current_appendix, node_label)
+                current_chapter = current_section = current_article = current_clause = current_point = None
+                ordinal += 1
+                i += 1
                 continue
 
             chapter = CHAPTER_RE.match(text)
@@ -709,7 +741,7 @@ class LegalGraphBuilder:
                 if not heading and i + 1 < len(lines) and is_heading_title(lines[i + 1]):
                     heading = lines[i + 1]
                     i += 1
-                parent = current_chapter or doc_node_id
+                parent = current_chapter or current_appendix or doc_node_id
                 node_id = f"muc:{doc_id}:{slugify(parent)}:{slugify(number)}"
                 node_label = f"Mục {number}" + (f". {heading}" if heading else "")
                 current_section = self._add_node(
@@ -729,9 +761,20 @@ class LegalGraphBuilder:
             if article:
                 number = article.group(1)
                 heading = normalize_space(article.group(2))
-                parent = current_section or current_chapter or doc_node_id
-                node_id = f"dieu:{doc_id}:{slugify(number)}"
-                node_label = f"Điều {number}. {heading}"
+                parent = current_section or current_chapter or current_appendix or doc_node_id
+                parent_slug = slugify(parent) if parent != doc_node_id else ""
+                if parent_slug:
+                    base_node_id = f"dieu:{doc_id}:{parent_slug}:{slugify(number)}"
+                else:
+                    base_node_id = f"dieu:{doc_id}:{slugify(number)}"
+                node_id = base_node_id
+                dup_count = 1
+                node_title_candidate = f"Điều {number}. {heading}"
+                while node_id in self.nodes and self.nodes[node_id].get("title") != node_title_candidate:
+                    node_id = f"{base_node_id}:{dup_count}"
+                    dup_count += 1
+
+                node_label = node_title_candidate
                 current_article = self._add_node(
                     node_id, doc_id, "Điều", node_label, number, heading, parent, ordinal
                 )
@@ -748,7 +791,7 @@ class LegalGraphBuilder:
             if clause and current_article:
                 number = clause.group(1)
                 body = normalize_space(clause.group(2))
-                node_id = f"khoan:{doc_id}:{slugify(current_article_number)}:{number}"
+                node_id = f"khoan:{current_article}:{number}"
                 node_label = f"Khoản {number}"
                 current_clause = self._add_node(
                     node_id, doc_id, "Khoản", node_label, number, "", current_article, ordinal
@@ -769,7 +812,7 @@ class LegalGraphBuilder:
                 body = normalize_space(point.group(2))
                 parent = current_clause or current_article
                 clause_number = self.nodes[parent]["number"] if current_clause else "0"
-                node_id = f"diem:{doc_id}:{slugify(current_article_number)}:{slugify(clause_number)}:{slugify(number)}"
+                node_id = f"diem:{current_article}:{slugify(clause_number)}:{slugify(number)}"
                 node_label = f"Điểm {number}"
                 current_point = self._add_node(
                     node_id, doc_id, "Điểm", node_label, number, "", parent, ordinal

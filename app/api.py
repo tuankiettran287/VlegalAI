@@ -1573,7 +1573,7 @@ async def chat(
     answer = greeting_answer or ""
     sources: list[dict[str, Any]] = []
     verification: dict[str, Any] = (
-        VerificationReport().model_dump(mode="json")
+        VerificationReport(checked=False, all_current=False, note="greeting").model_dump(mode="json")
         if greeting_answer is not None
         else {}
     )
@@ -1603,13 +1603,30 @@ async def chat(
         retrieval_ms += round(
             (time.monotonic() - catalog_started) * 1000
         )
-        cache_mode = "catalog"
-        verification = {
-            "checked": False,
-            "all_current": False,
-            "items": [],
-            "note": "indexed_catalog_direct_sql",
-        }
+        if catalog_request.action == "unsupported_official_catalog":
+            cache_mode = "unsupported_official_catalog"
+            verification = {
+                "checked": False,
+                "all_current": False,
+                "items": [],
+                "note": "unsupported_official_catalog",
+            }
+        elif catalog_request.action == "scope_required":
+            cache_mode = "scope_clarification"
+            verification = {
+                "checked": False,
+                "all_current": False,
+                "items": [],
+                "note": "document_count_scope_required",
+            }
+        else:
+            cache_mode = "catalog"
+            verification = {
+                "checked": False,
+                "all_current": False,
+                "items": [],
+                "note": "indexed_catalog_direct_sql",
+            }
     scope_clarification = (
         ""
         if catalog_request is not None

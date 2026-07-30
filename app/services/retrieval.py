@@ -726,7 +726,9 @@ class RetrievalService:
                     round((time.perf_counter() - retrieval_started) * 1000),
                 )
                 return []
-            serialized = [serialize_source(row) for row in rows]
+            non_semantic_rows = [r for r in rows if r.get("chunk_type") != "semantic"]
+            target_rows = non_semantic_rows if non_semantic_rows else rows
+            serialized = [serialize_source(row) for row in target_rows]
             for index, source in enumerate(serialized, start=1):
                 source["source_id"] = f"S{index}"
             logger.info(

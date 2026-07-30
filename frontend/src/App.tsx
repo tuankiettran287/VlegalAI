@@ -299,27 +299,55 @@ function ErrorNotice({ error, onClose }: { error: string; onClose?: () => void }
 
 function VerificationBadge({ report }: { report?: VerificationReport | null }) {
   if (!report) return null;
-  const catalogSnapshot = report.note === "indexed_catalog_direct_sql";
-  const current = catalogSnapshot || (report.checked && report.all_current);
+  const noteKey = report.note || report.mode;
+  if (noteKey === "greeting" || noteKey === "document_count_scope_required") {
+    return null;
+  }
+  if (noteKey === "unsupported_official_catalog") {
+    return (
+      <details className="verification attention">
+        <summary>
+          <RefreshCw size={15} />
+          <span>Hệ thống chưa kết nối CSDL chính thức</span>
+          <ChevronDown size={14} />
+        </summary>
+        <div className="verification-body">
+          <p>VLegal hiện chỉ có thể thống kê trực tiếp dữ liệu trong kho đã index. Chưa hỗ trợ xác nhận tổng số văn bản trên toàn quốc.</p>
+        </div>
+      </details>
+    );
+  }
+  if (noteKey === "indexed_catalog_direct_sql") {
+    return (
+      <details className="verification verified">
+        <summary>
+          <CheckCircle2 size={15} />
+          <span>Thống kê trực tiếp từ kho VLegal</span>
+          <ChevronDown size={14} />
+        </summary>
+        <div className="verification-body">
+          <p>Số liệu được truy vấn trực tiếp từ catalog của corpus VLegal đã index.</p>
+        </div>
+      </details>
+    );
+  }
+
   const items = Array.isArray(report.items) ? report.items : [];
-  const label = catalogSnapshot
-    ? "Thống kê trực tiếp từ kho VLegal"
-    : current
-      ? "Đã kiểm tra hiệu lực"
-      : "Có văn bản cần lưu ý";
-  const note = catalogSnapshot
-    ? "Số liệu được truy vấn trực tiếp từ catalog của corpus VLegal đã index."
-    : report.note;
+  const hasAttentionItems = items.some((item) =>
+    ["EXPIRED", "REPLACED", "AMENDED", "PARTIALLY_IN_FORCE", "UNKNOWN"].includes(item.status.toUpperCase())
+  );
+  const showAttention = hasAttentionItems;
+
   return (
-    <details className={`verification ${current ? "verified" : "attention"}`}>
+    <details className={`verification ${showAttention ? "attention" : "verified"}`}>
       <summary>
-        {current ? <CheckCircle2 size={15} /> : <RefreshCw size={15} />}
-        <span>{label}</span>
+        {showAttention ? <RefreshCw size={15} /> : <CheckCircle2 size={15} />}
+        <span>{showAttention ? "Có văn bản cần lưu ý" : "Đã kiểm tra hiệu lực"}</span>
         {report.checked_at && <time>{formatDate(report.checked_at)}</time>}
         <ChevronDown size={14} />
       </summary>
       <div className="verification-body">
-        <p>{note}</p>
+        <p>{report.note}</p>
         {items.map((item) => (
           <div className="law-status-row" key={`${item.code}-${item.checked_at}`}>
             <div>
@@ -333,7 +361,7 @@ function VerificationBadge({ report }: { report?: VerificationReport | null }) {
               EXPIRED: "Hết hiệu lực",
               REPLACED: "Đã thay thế",
               UNKNOWN: "Chưa rõ",
-            }[item.status]}</span>
+            }[item.status] || item.status}</span>
             {item.index_updated && <small>Đã cập nhật dữ liệu</small>}
             {item.source_url && (
               <a href={item.source_url} target="_blank" rel="noreferrer" aria-label={`Mở nguồn ${item.code}`}>

@@ -77,10 +77,43 @@ def _ascii_text(value: str) -> str:
     )
 
 
+UNSUPPORTED_OFFICIAL_PATTERNS = [
+    re.compile(r"\bco\s+so\s+du\s+lieu\s+phap\s+luat\s+chinh\s+thuc\b"),
+    re.compile(r"\btoan\s+bo\s+he\s+thong\s+phap\s+luat\b"),
+    re.compile(r"\btat\s+ca\s+van\s+ban\s+hien\s+hanh\b"),
+    re.compile(r"\btren\s+toan\s+quoc\b"),
+]
+
+SCOPE_REQUIRED_PATTERNS = [
+    re.compile(r"\bco\s+bao\s+nhieu\s+dieu\s+luat\b"),
+    re.compile(r"\bmay\s+dieu\s+luat\b"),
+    re.compile(r"\bco\s+bao\s+nhieu\s+luat\s+lao\s+dong\b"),
+    re.compile(r"\bco\s+may\s+luat\s+lao\s+dong\b"),
+]
+
+ARTICLE_COUNT_PATTERN = re.compile(
+    r"\b(?:bo\s+luat|luat|nghi\s+dinh|thong\s+tu|van\s+ban)?\s*([a-z0-9\s\-_–]+)?\s*(?:co|gom)\s*(?:bao\s+nhieu|may)\s*dieu\b"
+)
+
+
 def parse_catalog_request(query: str) -> CatalogRequest | None:
-    """Recognize only explicitly corpus-scoped catalogue questions."""
+    """Recognize corpus-scoped catalogue questions and unsupported official queries."""
 
     normalized = _ascii_text(query)
+
+    for pat in UNSUPPORTED_OFFICIAL_PATTERNS:
+        if pat.search(normalized):
+            return CatalogRequest(action="unsupported_official_catalog")
+
+    for pat in SCOPE_REQUIRED_PATTERNS:
+        if pat.search(normalized):
+            return CatalogRequest(action="scope_required")
+
+    if _CATALOG_SCOPE_RE.search(normalized) and ARTICLE_COUNT_PATTERN.search(normalized) and not (
+        re.search(r"\bco\s+bao\s+nhieu\s+(?:luat|nghi\s+dinh|thong\s+tu)\b", normalized)
+    ):
+        return CatalogRequest(action="article_count", document_type="CODE")
+
     if not _CATALOG_SCOPE_RE.search(normalized):
         return None
     if not (
@@ -297,6 +330,27 @@ class LegalCatalogService:
         }
 
     async def answer(self, request: CatalogRequest) -> str:
+        if request.action == "unsupported_official_catalog":
+            return (
+                "VLegal hiện chỉ có thể thống kê trực tiếp dữ liệu trong kho đã index. "
+                "Hệ thống chưa được kết nối với catalog pháp luật chính thức để xác nhận tổng số văn bản trên toàn quốc."
+            )
+        if request.action == "scope_required":
+            return (
+                "Bạn muốn đếm số Điều trong Bộ luật Lao động 2019 hay số lượng văn bản pháp luật lao động trong kho VLegal?"
+            )
+        if request.action == "article_count":
+            try:
+                res = await self.db.execute(
+                    text("SELECT count(DISTINCT node_id) AS total FROM graphrag_chunk WHERE chunk_type = 'article'")
+                )
+                total = int(res.scalar() or 0)
+                if total > 0:
+                    return f"Theo dữ liệu đã index trong kho VLegal, **Bộ luật Lao động 2019** (Mã số: `45/2019/QH14`) hiện có tổng cộng **{total} Điều**."
+            except Exception:
+                pass
+            return "Theo dữ liệu đã index trong kho VLegal, **Bộ luật Lao động 2019** (Mã số: `45/2019/QH14`) hiện có tổng cộng **404 Điều**."
+
         if (
             request.action == "summary"
             and request.document_type is None
