@@ -145,6 +145,117 @@ function markdown(value: string) {
     .replace(/\n/g, "<br />");
 }
 
+function LegalThinkingStatus() {
+  return (
+    <div className="legal-thinking" role="status" aria-live="polite">
+      <div className="legal-thinking-head">
+        <span className="legal-thinking-pulse" aria-hidden="true"><Sparkles size={14} /></span>
+        <span>
+          <strong>VLegal đang phân tích</strong>
+          <small>Tra cứu căn cứ · kiểm tra hiệu lực · soạn câu trả lời</small>
+        </span>
+        <i className="legal-thinking-dots" aria-hidden="true"><b /><b /><b /></i>
+      </div>
+      <div className="legal-thinking-track" aria-hidden="true"><i /></div>
+    </div>
+  );
+}
+
+function TypewriterAnswer({
+  text,
+  active,
+  onComplete,
+  onProgress,
+}: {
+  text: string;
+  active: boolean;
+  onComplete: () => void;
+  onProgress: () => void;
+}) {
+  const characters = useMemo(() => Array.from(text), [text]);
+  const [visibleCount, setVisibleCount] = useState(active ? 0 : characters.length);
+  const animationFrameRef = useRef<number | null>(null);
+  const completedRef = useRef(!active);
+  const onCompleteRef = useRef(onComplete);
+  const onProgressRef = useRef(onProgress);
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+    onProgressRef.current = onProgress;
+  }, [onComplete, onProgress]);
+
+  useEffect(() => {
+    if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
+
+    if (!active || !characters.length) {
+      completedRef.current = true;
+      setVisibleCount(characters.length);
+      return;
+    }
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setVisibleCount(characters.length);
+      if (!completedRef.current) {
+        completedRef.current = true;
+        onCompleteRef.current();
+      }
+      return;
+    }
+
+    completedRef.current = false;
+    setVisibleCount(0);
+    const startedAt = performance.now();
+    const duration = Math.min(3600, Math.max(700, characters.length * 5));
+
+    const reveal = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      setVisibleCount(Math.max(1, Math.ceil(progress * characters.length)));
+      if (progress < 1) {
+        animationFrameRef.current = requestAnimationFrame(reveal);
+        return;
+      }
+      animationFrameRef.current = null;
+      if (!completedRef.current) {
+        completedRef.current = true;
+        onCompleteRef.current();
+      }
+    };
+
+    animationFrameRef.current = requestAnimationFrame(reveal);
+    return () => {
+      if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
+    };
+  }, [active, characters]);
+
+  useEffect(() => {
+    if (active && visibleCount > 0) onProgressRef.current();
+  }, [active, visibleCount]);
+
+  const finishImmediately = () => {
+    if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
+    animationFrameRef.current = null;
+    setVisibleCount(characters.length);
+    if (!completedRef.current) {
+      completedRef.current = true;
+      onCompleteRef.current();
+    }
+  };
+
+  const visibleText = characters.slice(0, visibleCount).join("");
+  return (
+    <div className={`assistant-answer${active ? " is-typing" : ""}`} aria-busy={active}>
+      <div dangerouslySetInnerHTML={{ __html: markdown(visibleText) }} />
+      {active && (
+        <div className="typing-controls">
+          <span className="typing-cursor" aria-hidden="true" />
+          <span role="status">Đang hiển thị câu trả lời</span>
+          <button type="button" onClick={finishImmediately}>Hiện ngay</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function formatDate(value?: string | null) {
   if (!value) return "—";
   const date = new Date(value);
@@ -379,8 +490,18 @@ function ChatPage({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState("");
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const conversationRequestRef = useRef(0);
   const hasMessages = messages.length > 0;
+
+  const scrollToLatest = useCallback(() => {
+    const container = chatScrollRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  }, []);
+
+  useEffect(() => {
+    scrollToLatest();
+  }, [messages.length, scrollToLatest]);
 
   const reloadHistory = useCallback(() => {
     if (!authenticated) {
@@ -460,9 +581,9 @@ function ChatPage({
     const userMessage: ChatMessage = { id: uid(), role: "user", content: trimmed };
     const pendingId = uid();
     setMessages((current) => [
-      ...current,
+      ...current.map((message) => message.typing ? { ...message, typing: false } : message),
       userMessage,
-      { id: pendingId, role: "assistant", content: "Đang đối chiếu hiệu lực văn bản và xây dựng câu trả lời…", pending: true },
+      { id: pendingId, role: "assistant", content: "", pending: true },
     ]);
     setInput("");
     try {
@@ -486,6 +607,7 @@ function ChatPage({
                 content: data.answer,
                 sources: data.sources,
                 verification: data.verification,
+                typing: true,
               }
             : message,
         ),
@@ -640,7 +762,7 @@ function ChatPage({
           </div>
         </header>
 
-        <div className="chat-scroll">
+        <div className="chat-scroll" ref={chatScrollRef}>
             <div className="chat-empty" aria-hidden={hasMessages}>
               <div className="empty-state-inner">
               <header className="empty-heading">
@@ -678,10 +800,24 @@ function ChatPage({
                 <article className={`message ${message.role}`} key={message.id}>
                   {message.role === "assistant" && <div className="avatar"><Scale size={16} /></div>}
                   <div className="bubble">
-                    <div dangerouslySetInnerHTML={{ __html: markdown(message.content) }} />
-                    {message.pending && <div className="loading-line" />}
-                    <VerificationBadge report={message.verification} />
-                    <SourcePanel sources={message.sources} answer={message.content} />
+                    {message.pending ? (
+                      <LegalThinkingStatus />
+                    ) : message.role === "assistant" ? (
+                      <TypewriterAnswer
+                        text={message.content}
+                        active={Boolean(message.typing)}
+                        onProgress={scrollToLatest}
+                        onComplete={() => setMessages((current) =>
+                          current.map((item) =>
+                            item.id === message.id && item.typing ? { ...item, typing: false } : item,
+                          )
+                        )}
+                      />
+                    ) : (
+                      <div dangerouslySetInnerHTML={{ __html: markdown(message.content) }} />
+                    )}
+                    {!message.pending && !message.typing && <VerificationBadge report={message.verification} />}
+                    {!message.pending && !message.typing && <SourcePanel sources={message.sources} answer={message.content} />}
                   </div>
                 </article>
               ))}
