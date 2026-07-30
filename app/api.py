@@ -1628,7 +1628,7 @@ async def chat(
             (time.monotonic() - catalog_started) * 1000
         )
         if catalog_request.action == "unsupported_official_catalog":
-            cache_mode = "unsupported_official_catalog"
+            cache_mode = "catalog"
             verification = VerificationReport(
                 checked=False,
                 all_current=False,
