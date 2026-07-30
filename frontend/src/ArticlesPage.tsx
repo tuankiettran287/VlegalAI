@@ -479,14 +479,21 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
                     <footer>
                       <span><CalendarDays size={14} /> {formatArticleDate(article.published_at || article.created_at)}</span>
                       <span><Eye size={14} /> {article.views.toLocaleString("vi-VN")} lượt xem</span>
-                      {article.source_url && (
-                        <a href={article.source_url} target="_blank" rel="noreferrer">
-                          Bài viết gốc <ExternalLink size={13} />
+                      {article.source_url ? (
+                        <a
+                          className="article-read-link"
+                          href={article.source_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={`Đọc bài viết gốc: ${article.title}`}
+                        >
+                          Đọc bài <ExternalLink size={14} />
                         </a>
+                      ) : (
+                        <button type="button" onClick={() => onNavigate(`/bai-viet/${encodeURIComponent(article.slug)}`)}>
+                          Đọc bài <ArrowRight size={14} />
+                        </button>
                       )}
-                      <button type="button" onClick={() => onNavigate(`/bai-viet/${encodeURIComponent(article.slug)}`)}>
-                        Đọc bài <ArrowRight size={14} />
-                      </button>
                     </footer>
                   </div>
                 </article>

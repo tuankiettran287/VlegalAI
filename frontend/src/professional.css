@@ -2604,6 +2604,18 @@ main:focus-visible {
   background: var(--brand-soft);
 }
 
+.article-card-copy footer > a.article-read-link {
+  margin-left: auto;
+  padding: 0 10px;
+  border: 0;
+  background: var(--brand-soft);
+}
+
+.article-card-copy footer > a.article-read-link:hover {
+  background: var(--brand);
+  color: #fff;
+}
+
 .article-card-copy footer > button {
   display: inline-flex;
   min-height: 32px;
