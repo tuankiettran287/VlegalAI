@@ -18,6 +18,7 @@ _MIXED_LETTER_ZERO_RE = re.compile(
     r"(?i)(?:[a-zà-ỹđ]+0[a-zà-ỹđ]*|[a-zà-ỹđ]*0[a-zà-ỹđ]+)"
 )
 _UPPERCASE_ABBREVIATION_RE = re.compile(r"(?<!\w)[A-ZĐ]{2,10}(?!\w)")
+_STRANGE_CHARACTER_RE = re.compile(r"[@#$^*_+=|\\<>]{1,}")
 _CITATION_RE = re.compile(r"\[(?:S|W)\d+\]", re.IGNORECASE)
 _LEGAL_REFERENCE_RE = re.compile(
     r"(?i)\b(?:điều|khoản|điểm)\s+\d+[a-zđ]?|"
@@ -134,6 +135,7 @@ def should_rewrite_query(query: str) -> bool:
         or _UPPERCASE_ABBREVIATION_RE.search(normalized)
         or _REPEATED_CHARACTER_RE.search(normalized)
         or _MIXED_LETTER_ZERO_RE.search(normalized)
+        or _STRANGE_CHARACTER_RE.search(normalized)
         or re.search(r"[!?.,]{3,}", normalized)
     )
 

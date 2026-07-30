@@ -104,7 +104,10 @@ from app.services.freshness import (
     LegalFreshnessService,
 )
 from app.services.greetings import greeting_response
-from app.services.query_rewrite import rewrite_query_if_needed
+from app.services.query_rewrite import (
+    rewrite_query_if_needed,
+    should_rewrite_query,
+)
 from app.services.retrieval import (
     RetrievalService,
     build_answer_plan,
@@ -1901,7 +1904,8 @@ async def chat(
     else:
         rewrite_started = time.perf_counter()
         log_progress(logger, "chat", "query_rewrite_started", operation_started)
-        if effort_profile.skip_query_rewrite:
+        rewrite_triggered = should_rewrite_query(current_question)
+        if effort_profile.skip_query_rewrite or not rewrite_triggered:
             retrieval_query = current_question
             query_was_rewritten = False
             rewrite_attempted = False
@@ -1926,6 +1930,7 @@ async def chat(
             phase_ms=round((time.perf_counter() - rewrite_started) * 1000),
             rewritten=query_was_rewritten,
             skipped_for_effort=effort_profile.skip_query_rewrite,
+            trigger_detected=rewrite_triggered,
         )
 
     structure_result: dict[str, Any] | None = None
@@ -1967,8 +1972,8 @@ async def chat(
             checked_at=datetime.now(UTC),
             items=[],
             note=(
-                "Thống kê trực tiếp từ graph của phiên bản văn bản đã "
-                "được lập chỉ mục; không phụ thuộc dịch vụ kiểm tra hiệu lực."
+                "Số liệu được thống kê trực tiếp từ phiên bản văn bản đã "
+                "được lập chỉ mục."
             ),
         ).model_dump(mode="json")
     else:

@@ -31,6 +31,7 @@ def _settings(**overrides: object) -> Settings:
         "NLĐ nghỉ việc có được nhận BHXH không?",
         "kh0ng ký hđlđ có sao ko???",
         "trờiiii công ty giữ lương",
+        "công ty gi@ lương thì làm sao?",
     ],
 )
 def test_noisy_or_abbreviated_query_requires_rewrite(query: str) -> None:
@@ -43,6 +44,7 @@ def test_noisy_or_abbreviated_query_requires_rewrite(query: str) -> None:
         "Cưỡng bức lao động",
         "Doanh nghiệp có được giữ lương của người lao động không?",
         "Điều kiện hưởng trợ cấp thất nghiệp là gì?",
+        "Luật lao động 2019 có mấy điều?",
     ],
 )
 def test_clear_query_skips_rewrite(query: str) -> None:

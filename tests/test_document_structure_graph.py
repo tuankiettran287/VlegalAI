@@ -108,7 +108,7 @@ def test_structure_question_uses_graph_count_without_external_freshness() -> Non
     service = RetrievalService(
         SimpleNamespace(retriever_backend="hybrid_rag")
     )
-    service._graph_store = _StructureStore()
+    service._store = _StructureStore()
 
     result = asyncio.run(service.lookup_document_structure(query))
 
@@ -118,5 +118,6 @@ def test_structure_question_uses_graph_count_without_external_freshness() -> Non
     assert "**220 điều**" in result["answer"]
     assert "Điều 1 đến Điều 220" in result["answer"]
     assert "**640 khoản**" in result["answer"]
+    assert "Graph" not in result["answer"]
     assert result["source"]["source_id"] == "S1"
     assert "document_structure_graph" in result["source"]["reasons"]

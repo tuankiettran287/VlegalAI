@@ -844,27 +844,58 @@ def drop_postgres_bulk_load_indexes(config: ExternalGraphRAGConfig) -> None:
 
 
 def validate_postgres_embeddings(connection, config: ExternalGraphRAGConfig) -> None:
+    metadata_row: dict[str, Any] | None = None
     with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT embedding_model, embedding_revision, vector_dims(embedding) AS dimensions
-            FROM graphrag_chunk
-            GROUP BY embedding_model, embedding_revision, vector_dims(embedding)
-            ORDER BY embedding_model, embedding_revision, dimensions
-            LIMIT 2
-            """
-        )
-        rows = cursor.fetchall()
-    if not rows:
-        return
-    actual = {
-        (
-            row["embedding_model"],
-            row["embedding_revision"],
-            int(row["dimensions"]),
-        )
-        for row in rows
-    }
+        try:
+            cursor.execute(
+                """
+                SELECT embedding_model, embedding_revision,
+                       embedding_dimensions AS dimensions, status
+                FROM graphrag_index_metadata
+                WHERE index_name = 'active'
+                """
+            )
+            metadata_row = cursor.fetchone()
+        except psycopg.errors.UndefinedTable:
+            # Compatibility for a database that has not run migration 0015.
+            # Production uses the constant-time metadata lookup above.
+            metadata_row = None
+
+        if metadata_row is None:
+            cursor.execute(
+                """
+                SELECT embedding_model, embedding_revision,
+                       vector_dims(embedding) AS dimensions
+                FROM graphrag_chunk
+                GROUP BY embedding_model, embedding_revision,
+                         vector_dims(embedding)
+                ORDER BY embedding_model, embedding_revision, dimensions
+                LIMIT 2
+                """
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return
+            actual = {
+                (
+                    row["embedding_model"],
+                    row["embedding_revision"],
+                    int(row["dimensions"]),
+                )
+                for row in rows
+            }
+        else:
+            if str(metadata_row.get("status") or "").lower() != "ready":
+                raise RuntimeError(
+                    "PostgreSQL GraphRAG index is not ready; retry after indexing completes."
+                )
+            actual = {
+                (
+                    metadata_row["embedding_model"],
+                    metadata_row["embedding_revision"],
+                    int(metadata_row["dimensions"]),
+                )
+            }
     expected = (
         config.embedding_model,
         config.embedding_config.model_revision,
@@ -873,6 +904,48 @@ def validate_postgres_embeddings(connection, config: ExternalGraphRAGConfig) -> 
     if actual != {expected}:
         raise RuntimeError(
             f"PostgreSQL embeddings {actual!r} do not match configured model {expected!r}; re-embed the corpus."
+        )
+
+
+def update_postgres_index_metadata(
+    config: ExternalGraphRAGConfig,
+    chunk_count: int,
+) -> None:
+    """Publish the completed vector contract for constant-time startup checks."""
+
+    try:
+        with postgres_connection(config) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO graphrag_index_metadata (
+                        index_name, embedding_provider, embedding_model,
+                        embedding_revision, embedding_dimensions, status,
+                        chunk_count, updated_at
+                    )
+                    VALUES (
+                        'active', %s, %s, %s, %s, 'ready', %s, now()
+                    )
+                    ON CONFLICT (index_name) DO UPDATE SET
+                        embedding_provider = EXCLUDED.embedding_provider,
+                        embedding_model = EXCLUDED.embedding_model,
+                        embedding_revision = EXCLUDED.embedding_revision,
+                        embedding_dimensions = EXCLUDED.embedding_dimensions,
+                        status = EXCLUDED.status,
+                        chunk_count = EXCLUDED.chunk_count,
+                        updated_at = now()
+                    """,
+                    (
+                        config.embedding_provider,
+                        config.embedding_model,
+                        config.embedding_config.model_revision,
+                        config.postgres_vector_size,
+                        max(0, int(chunk_count)),
+                    ),
+                )
+    except psycopg.errors.UndefinedTable:
+        logger.warning(
+            "graphrag_index_metadata is unavailable; run Alembic migration 0015."
         )
 
 
@@ -1157,6 +1230,7 @@ def sync_postgres(
         if reset:
             ensure_postgres_schema(config)
 
+    update_postgres_index_metadata(config, total)
     return {"chunks": total}
 
 

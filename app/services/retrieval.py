@@ -18,7 +18,6 @@ from app.external_graphrag import (
     PostgresGraphRAGStore,
     document_structure_counts,
 )
-from app.legal_graphrag import GraphRAGStore
 from app.services.ai import untrusted_data_block
 from app.services.chat_effort import ChatEffort, chat_effort_profile
 from app.services.embeddings import EmbeddingConfig, embedding_config_from_settings
@@ -636,13 +635,10 @@ def _document_structure_answer(
         else ""
     )
     return (
-        f"Theo cấu trúc của {identity} trong kho dữ liệu, văn bản có "
-        f"**{counts['articles']} điều**{article_range} [S1].\n\n"
-        "Graph phân cấp hiện ghi nhận thêm "
-        f"**{counts['chapters']} chương**, **{counts['sections']} mục**, "
-        f"**{counts['clauses']} khoản** và **{counts['points']} điểm** [S1].\n\n"
-        "_Đây là số liệu đếm trực tiếp trên phiên bản văn bản đã được lập "
-        "chỉ mục; không phải kết luận riêng về tình trạng hiệu lực hiện tại._"
+        f"{identity} có **{counts['articles']} điều**{article_range} [S1].\n\n"
+        f"Cơ cấu văn bản gồm **{counts['chapters']} chương**, "
+        f"**{counts['sections']} mục**, **{counts['clauses']} khoản** và "
+        f"**{counts['points']} điểm** [S1]."
     )
 
 
@@ -1065,7 +1061,9 @@ class RetrievalService:
         # test injection and for direct PostgreSQL retrieval.
         self._store: Any = None
         self._graph_store: Any = None
+        self._document_structure_rows: tuple[dict[str, Any], ...] | None = None
         self._lock = asyncio.Lock()
+        self._document_structure_lock = asyncio.Lock()
 
     async def _get_store(
         self,
@@ -1128,16 +1126,26 @@ class RetrievalService:
         self,
         query: str,
     ) -> dict[str, Any] | None:
-        """Resolve hierarchy-count questions directly from the graph snapshot."""
+        """Resolve hierarchy-count questions from a cached structure snapshot."""
 
         if not is_document_structure_query(query):
             return None
         try:
-            store = await self._get_store("multi_abstract")
-            loader = getattr(store, "document_structures", None)
-            if not callable(loader):
-                return None
-            rows = await run_in_threadpool(loader, 500)
+            rows = self._document_structure_rows
+            if rows is None:
+                async with self._document_structure_lock:
+                    rows = self._document_structure_rows
+                    if rows is None:
+                        # Structure summaries are already materialized in
+                        # PostgreSQL. Avoid initializing Neo4j and running a
+                        # vector search for a deterministic count question.
+                        store = await self._get_store("single_hop")
+                        loader = getattr(store, "document_structures", None)
+                        if not callable(loader):
+                            return None
+                        loaded = await run_in_threadpool(loader, 500)
+                        rows = tuple(dict(row) for row in (loaded or []))
+                        self._document_structure_rows = rows
             best = _best_document_structure(query, list(rows or []))
             if best is None:
                 return None
@@ -1315,6 +1323,7 @@ class RetrievalService:
     def invalidate(self) -> None:
         self._store = None
         self._graph_store = None
+        self._document_structure_rows = None
 
 
 def serialize_source(source: dict[str, Any]) -> dict[str, Any]:

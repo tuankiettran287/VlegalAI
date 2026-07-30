@@ -248,6 +248,32 @@ def test_postgres_embedding_validation_rejects_mixed_vector_spaces() -> None:
         validate_postgres_embeddings(_RecordingConnection(cursor), config)
 
 
+def test_postgres_embedding_validation_uses_constant_time_metadata() -> None:
+    cursor = _RecordingCursor(
+        fetchone_results=[
+            {
+                "embedding_model": "gemini-embedding-001",
+                "embedding_revision": "vertex-ai-v1:redact",
+                "dimensions": 1024,
+                "status": "ready",
+            }
+        ]
+    )
+    config = SimpleNamespace(
+        embedding_model="gemini-embedding-001",
+        postgres_vector_size=1024,
+        embedding_config=SimpleNamespace(
+            model_revision="vertex-ai-v1:redact"
+        ),
+    )
+
+    validate_postgres_embeddings(_RecordingConnection(cursor), config)
+
+    assert len(cursor.queries) == 1
+    assert "graphrag_index_metadata" in cursor.queries[0][0]
+    assert "GROUP BY" not in cursor.queries[0][0]
+
+
 def test_current_postgres_predicate_requires_current_status_and_latest_version() -> None:
     predicate = postgres_current_chunk_predicate("candidate")
 
