@@ -98,6 +98,7 @@ class MessageOut(BaseModel):
     content: str
     sources: list[SourceOut] = Field(default_factory=list)
     verification: VerificationReport | None = None
+    feedback_rating: Literal["good", "bad"] | None = None
     created_at: datetime
 
 
@@ -114,6 +115,7 @@ class ChatTurn(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=2, max_length=5000)
     conversation_id: uuid.UUID | None = None
+    regenerate_from_message_id: uuid.UUID | None = None
     effort: ChatEffort = Field(
         default="medium",
         description="Answer depth: instant is fastest, medium is balanced, high is most thorough.",
@@ -128,6 +130,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     conversation_id: uuid.UUID | None = None
     message_id: uuid.UUID
+    replaces_message_id: uuid.UUID | None = None
     answer: str
     sources: list[SourceOut]
     verification: VerificationReport
@@ -136,6 +139,25 @@ class ChatResponse(BaseModel):
     cache_similarity: float | None = None
     cache_mode: Literal["miss", "exact", "semantic_draft"] = "miss"
     effort: ChatEffort = "medium"
+
+
+class ChatAnswerFeedbackRequest(BaseModel):
+    rating: Literal["good", "bad"]
+    comment: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("comment")
+    @classmethod
+    def normalize_comment(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(value.split())
+        return normalized or None
+
+
+class ChatAnswerFeedbackOut(BaseModel):
+    message_id: uuid.UUID
+    rating: Literal["good", "bad"]
+    regeneration_available: bool = False
 
 
 class DraftContractRequest(BaseModel):

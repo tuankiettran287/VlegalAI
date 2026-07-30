@@ -93,6 +93,7 @@ class ConversationMemoryService:
                     select(ChatMessage)
                     .where(
                         ChatMessage.conversation_id == conversation_id,
+                        ChatMessage.status == "COMPLETED",
                         ChatMessage.message_sequence > summarized_sequence,
                     )
                     .order_by(ChatMessage.message_sequence)

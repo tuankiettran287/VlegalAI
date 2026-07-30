@@ -45,8 +45,10 @@ export type ChatMessage = {
   content: string;
   sources?: Source[];
   verification?: VerificationReport;
+  feedback_rating?: "good" | "bad" | null;
   pending?: boolean;
   typing?: boolean;
+  regenerating?: boolean;
   created_at?: string;
 };
 

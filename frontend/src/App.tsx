@@ -40,6 +40,8 @@ import {
   ShieldCheck,
   Sparkles,
   Sun,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Upload,
   UserRound,
@@ -56,6 +58,7 @@ import {
   extractContractDocument,
   getTemplates,
   prepareSignature,
+  rateChatAnswer,
   reviewContract,
   sendFeedback,
   type CompareResponse,
@@ -528,6 +531,10 @@ function ChatPage({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState("");
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
+  const [feedbackMessageId, setFeedbackMessageId] = useState<string | null>(null);
+  const [feedbackComment, setFeedbackComment] = useState("");
+  const [feedbackLoadingId, setFeedbackLoadingId] = useState<string | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const conversationRequestRef = useRef(0);
   const hasMessages = messages.length > 0;
@@ -587,6 +594,8 @@ function ChatPage({
       }
       setConversationId(id);
       setMessages(data.messages);
+      setFeedbackMessageId(null);
+      setFeedbackComment("");
       setHistoryOpen(false);
     } catch (reason) {
       if (conversationRequestRef.current !== requestId) return;
@@ -606,6 +615,9 @@ function ChatPage({
     setMessages([]);
     setInput("");
     setError("");
+    setFeedbackMessageId(null);
+    setFeedbackComment("");
+    setCopiedMessageId(null);
   };
 
   const submit = async (question = input) => {
@@ -662,6 +674,128 @@ function ChatPage({
       setMessages((current) => current.filter((item) => item.id !== pendingId));
       setError(message);
     } finally {
+      setLoading(false);
+    }
+  };
+
+  const copyAnswer = async (message: ChatMessage) => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+      window.setTimeout(() => {
+        setCopiedMessageId((current) =>
+          current === message.id ? null : current
+        );
+      }, 1800);
+    } catch {
+      setError("Không thể sao chép câu trả lời. Vui lòng thử lại.");
+    }
+  };
+
+  const markAnswerGood = async (message: ChatMessage) => {
+    if (feedbackLoadingId || message.feedback_rating === "good") return;
+    setFeedbackLoadingId(message.id);
+    setError("");
+    try {
+      await rateChatAnswer(message.id, { rating: "good" });
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === message.id
+            ? { ...item, feedback_rating: "good" }
+            : item
+        )
+      );
+      setFeedbackMessageId(null);
+      setFeedbackComment("");
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setFeedbackLoadingId(null);
+    }
+  };
+
+  const regenerateFromFeedback = async (
+    event: FormEvent,
+    message: ChatMessage,
+  ) => {
+    event.preventDefault();
+    const comment = feedbackComment.trim();
+    if (
+      comment.length < 3
+      || feedbackLoadingId
+      || loading
+      || !conversationId
+    ) {
+      return;
+    }
+    const answerIndex = messages.findIndex(
+      (item) => item.id === message.id
+    );
+    const question = messages
+      .slice(0, Math.max(0, answerIndex))
+      .reverse()
+      .find((item) => item.role === "user");
+    if (!question) {
+      setError("Không tìm thấy câu hỏi gốc để tạo lại câu trả lời.");
+      return;
+    }
+
+    setError("");
+    setLoading(true);
+    setFeedbackLoadingId(message.id);
+    setMessages((current) =>
+      current.map((item) =>
+        item.id === message.id
+          ? {
+              ...item,
+              feedback_rating: "bad",
+              regenerating: true,
+            }
+          : item
+      )
+    );
+    try {
+      await rateChatAnswer(message.id, {
+        rating: "bad",
+        comment,
+      });
+      const data = await askLegalQuestion(
+        question.content,
+        conversationId,
+        effort,
+        { regenerateFromMessageId: message.id },
+      );
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === message.id
+            ? {
+                id: data.message_id,
+                conversation_id: data.conversation_id || undefined,
+                role: "assistant",
+                content: data.answer,
+                sources: data.sources,
+                verification: data.verification,
+                feedback_rating: null,
+                regenerating: false,
+                typing: true,
+              }
+            : item
+        )
+      );
+      setFeedbackMessageId(null);
+      setFeedbackComment("");
+      reloadHistory();
+    } catch (reason) {
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === message.id
+            ? { ...item, regenerating: false }
+            : item
+        )
+      );
+      setError((reason as Error).message);
+    } finally {
+      setFeedbackLoadingId(null);
       setLoading(false);
     }
   };
@@ -889,6 +1023,105 @@ function ChatPage({
                     {message.pending && <div className="loading-line" />}
                     {!message.typing && <VerificationBadge report={message.verification} />}
                     {!message.typing && <SourcePanel sources={message.sources} />}
+                    {message.role === "assistant" && !message.typing && !message.pending && (
+                      <>
+                        {message.regenerating ? (
+                          <div className="answer-regenerating" role="status">
+                            <RefreshCw size={14} />
+                            Đang tạo lại câu trả lời theo góp ý của bạn…
+                          </div>
+                        ) : (
+                          <div className="answer-actions" aria-label="Thao tác với câu trả lời">
+                            <button
+                              type="button"
+                              onClick={() => void copyAnswer(message)}
+                              aria-label="Sao chép câu trả lời"
+                            >
+                              {copiedMessageId === message.id
+                                ? <Check size={14} />
+                                : <Copy size={14} />}
+                              <span>{copiedMessageId === message.id ? "Đã sao chép" : "Sao chép"}</span>
+                            </button>
+                            <button
+                              className={message.feedback_rating === "good" ? "active good" : ""}
+                              type="button"
+                              disabled={feedbackLoadingId === message.id}
+                              aria-pressed={message.feedback_rating === "good"}
+                              aria-label="Câu trả lời tốt"
+                              onClick={() => void markAnswerGood(message)}
+                            >
+                              <ThumbsUp size={14} />
+                              <span>Hữu ích</span>
+                            </button>
+                            <button
+                              className={[
+                                message.feedback_rating === "bad" ? "active bad" : "",
+                                feedbackMessageId === message.id ? "selected" : "",
+                              ].filter(Boolean).join(" ")}
+                              type="button"
+                              disabled={feedbackLoadingId === message.id}
+                              aria-pressed={message.feedback_rating === "bad"}
+                              aria-label="Câu trả lời chưa tốt"
+                              onClick={() => {
+                                setFeedbackMessageId((current) =>
+                                  current === message.id ? null : message.id
+                                );
+                                setFeedbackComment("");
+                              }}
+                            >
+                              <ThumbsDown size={14} />
+                              <span>Chưa tốt</span>
+                            </button>
+                          </div>
+                        )}
+                        {feedbackMessageId === message.id && !message.regenerating && (
+                          <form
+                            className="answer-feedback-form"
+                            onSubmit={(event) =>
+                              void regenerateFromFeedback(event, message)
+                            }
+                          >
+                            <label htmlFor={`answer-feedback-${message.id}`}>
+                              Câu trả lời cần cải thiện điều gì?
+                            </label>
+                            <textarea
+                              id={`answer-feedback-${message.id}`}
+                              value={feedbackComment}
+                              maxLength={2000}
+                              rows={3}
+                              autoFocus
+                              placeholder="Ví dụ: thiếu căn cứ cụ thể, giải thích khó hiểu, chưa trả lời đúng tình huống…"
+                              onChange={(event) =>
+                                setFeedbackComment(event.target.value)
+                              }
+                            />
+                            <footer>
+                              <span>{feedbackComment.length}/2000</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setFeedbackMessageId(null);
+                                  setFeedbackComment("");
+                                }}
+                              >
+                                Hủy
+                              </button>
+                              <button
+                                className="primary"
+                                type="submit"
+                                disabled={
+                                  feedbackComment.trim().length < 3
+                                  || feedbackLoadingId === message.id
+                                }
+                              >
+                                <RefreshCw size={13} />
+                                Gửi và tạo lại
+                              </button>
+                            </footer>
+                          </form>
+                        )}
+                      </>
+                    )}
                   </div>
                 </article>
               ))}

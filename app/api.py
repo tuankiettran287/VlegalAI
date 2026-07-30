@@ -24,7 +24,7 @@ from fastapi import (
 )
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,8 +37,10 @@ from app.db import get_db
 from app.models import (
     Article,
     Artifact,
+    ChatAnswerFeedback,
     ChatMessage,
     Conversation,
+    ConversationSummary,
     LegalAnswerCache,
     LegalDocument,
     SignaturePacket,
@@ -54,6 +56,8 @@ from app.schemas import (
     ArtifactUpdate,
     ChatRequest,
     ChatResponse,
+    ChatAnswerFeedbackOut,
+    ChatAnswerFeedbackRequest,
     CompareContractRequest,
     ConversationCreate,
     ConversationDetailOut,
@@ -424,7 +428,11 @@ def _message_content_out(message: ChatMessage, settings: Settings) -> str:
         return "Không thể khôi phục nội dung tin nhắn này."
 
 
-def _message_out(message: ChatMessage, settings: Settings) -> MessageOut:
+def _message_out(
+    message: ChatMessage,
+    settings: Settings,
+    feedback_rating: str | None = None,
+) -> MessageOut:
     role = str(message.role).lower()
     if role not in {"user", "assistant"}:
         logger.warning("Normalizing unsupported stored chat role role=%s message_id=%s", role, message.id)
@@ -436,6 +444,11 @@ def _message_out(message: ChatMessage, settings: Settings) -> MessageOut:
         content=_message_content_out(message, settings),
         sources=_message_sources_out(message.sources),
         verification=_message_verification_out(message.verification),
+        feedback_rating=(
+            feedback_rating.lower()
+            if feedback_rating in {"GOOD", "BAD"}
+            else None
+        ),
         created_at=message.created_at,
     )
 
@@ -459,6 +472,157 @@ async def _owned_conversation(db: AsyncSession, conversation_id: uuid.UUID, user
     if not conversation:
         raise HTTPException(status_code=404, detail="Không tìm thấy cuộc trò chuyện")
     return conversation
+
+
+async def _owned_feedback_target(
+    db: AsyncSession,
+    message_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> tuple[ChatMessage, ChatMessage]:
+    message = await db.scalar(
+        select(ChatMessage)
+        .join(
+            Conversation,
+            Conversation.id == ChatMessage.conversation_id,
+        )
+        .where(
+            ChatMessage.id == message_id,
+            Conversation.user_id == user_id,
+            ChatMessage.role == "ASSISTANT",
+            ChatMessage.status == "COMPLETED",
+        )
+    )
+    if message is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy câu trả lời để đánh giá",
+        )
+    question = await db.scalar(
+        select(ChatMessage)
+        .where(
+            ChatMessage.conversation_id == message.conversation_id,
+            ChatMessage.role == "USER",
+            ChatMessage.status == "COMPLETED",
+            ChatMessage.message_sequence < message.message_sequence,
+        )
+        .order_by(ChatMessage.message_sequence.desc())
+        .limit(1)
+    )
+    if question is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Không tìm thấy câu hỏi gốc của câu trả lời",
+        )
+    return message, question
+
+
+_FEEDBACK_STOP_WORDS = {
+    "cua",
+    "cho",
+    "cac",
+    "voi",
+    "trong",
+    "theo",
+    "duoc",
+    "khong",
+    "nhung",
+    "mot",
+    "nay",
+    "do",
+    "la",
+    "va",
+    "thi",
+    "toi",
+    "ban",
+}
+
+
+def _feedback_terms(value: str) -> set[str]:
+    normalized = unicodedata.normalize("NFKD", value.lower())
+    normalized = "".join(
+        character
+        for character in normalized
+        if not unicodedata.combining(character)
+    )
+    return {
+        term
+        for term in re.findall(r"[a-z0-9]{2,}", normalized)
+        if term not in _FEEDBACK_STOP_WORDS
+    }
+
+
+def _feedback_question_similarity(left: str, right: str) -> float:
+    left_terms = _feedback_terms(left)
+    right_terms = _feedback_terms(right)
+    if not left_terms or not right_terms:
+        return 0.0
+    overlap = len(left_terms.intersection(right_terms))
+    return overlap / max(1, min(len(left_terms), len(right_terms)))
+
+
+async def _load_approved_answer_examples(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    question: str,
+    settings: Settings,
+    *,
+    limit: int = 2,
+) -> list[dict[str, str]]:
+    scalars = getattr(db, "scalars", None)
+    if not callable(scalars):
+        return []
+    try:
+        rows = (
+            await scalars(
+                select(ChatAnswerFeedback)
+                .where(
+                    ChatAnswerFeedback.user_id == user_id,
+                    ChatAnswerFeedback.rating == "GOOD",
+                )
+                .order_by(ChatAnswerFeedback.updated_at.desc())
+                .limit(60)
+            )
+        ).all()
+    except Exception:
+        logger.exception("Cannot load approved HITL answer examples")
+        return []
+
+    ranked: list[tuple[float, dict[str, str]]] = []
+    for row in rows:
+        if not isinstance(row, ChatAnswerFeedback):
+            continue
+        try:
+            approved_question = decrypt_text(
+                row.question_ciphertext,
+                settings,
+            )
+            approved_answer = decrypt_text(
+                row.answer_ciphertext,
+                settings,
+            )
+        except (BinasciiError, InvalidTag, UnicodeDecodeError, ValueError):
+            logger.warning(
+                "Ignoring unreadable approved feedback feedback_id=%s",
+                row.id,
+            )
+            continue
+        similarity = _feedback_question_similarity(
+            question,
+            approved_question,
+        )
+        if similarity < 0.4:
+            continue
+        ranked.append(
+            (
+                similarity,
+                {
+                    "question": approved_question[:1500],
+                    "approved_answer": approved_answer[:3500],
+                },
+            )
+        )
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [example for _, example in ranked[:limit]]
 
 
 async def _legal_sources(
@@ -1261,12 +1425,19 @@ async def _load_postgres_chat_history(
     settings: Settings,
     *,
     limit: int = 12,
+    before_sequence: int | None = None,
 ) -> list[tuple[str, str]]:
     """Load persisted history from PostgreSQL in chronological order."""
+    filters = [
+        ChatMessage.conversation_id == conversation_id,
+        ChatMessage.status == "COMPLETED",
+    ]
+    if before_sequence is not None:
+        filters.append(ChatMessage.message_sequence < before_sequence)
     stored_messages = (
         await db.scalars(
             select(ChatMessage)
-            .where(ChatMessage.conversation_id == conversation_id)
+            .where(*filters)
             .order_by(ChatMessage.message_sequence.desc())
             .limit(limit)
         )
@@ -1422,7 +1593,13 @@ async def list_conversations(
 ) -> list[ConversationOut]:
     statement = (
         select(Conversation, func.count(ChatMessage.id))
-        .outerjoin(ChatMessage)
+        .outerjoin(
+            ChatMessage,
+            and_(
+                ChatMessage.conversation_id == Conversation.id,
+                ChatMessage.status == "COMPLETED",
+            ),
+        )
         .where(Conversation.user_id == user.id, Conversation.status == status_filter.upper())
         .group_by(Conversation.id)
         .order_by(Conversation.updated_at.desc())
@@ -1439,16 +1616,26 @@ async def get_conversation(
     settings: Settings = Depends(get_settings),
 ) -> ConversationDetailOut:
     conversation = await _owned_conversation(db, conversation_id, user)
-    messages = (
-        await db.scalars(
-            select(ChatMessage)
-            .where(ChatMessage.conversation_id == conversation.id)
+    message_rows = (
+        await db.execute(
+            select(ChatMessage, ChatAnswerFeedback.rating)
+            .outerjoin(
+                ChatAnswerFeedback,
+                ChatAnswerFeedback.message_id == ChatMessage.id,
+            )
+            .where(
+                ChatMessage.conversation_id == conversation.id,
+                ChatMessage.status == "COMPLETED",
+            )
             .order_by(ChatMessage.message_sequence)
         )
     ).all()
     return ConversationDetailOut(
-        conversation=_conversation_out(conversation, len(messages)),
-        messages=[_message_out(row, settings) for row in messages],
+        conversation=_conversation_out(conversation, len(message_rows)),
+        messages=[
+            _message_out(message, settings, feedback_rating)
+            for message, feedback_rating in message_rows
+        ],
     )
 
 
@@ -1479,6 +1666,66 @@ async def delete_conversation(
     return Response(status_code=204)
 
 
+@router.put(
+    "/chat/messages/{message_id}/feedback",
+    response_model=ChatAnswerFeedbackOut,
+)
+async def rate_chat_answer(
+    message_id: uuid.UUID,
+    payload: ChatAnswerFeedbackRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+    settings: Settings = Depends(get_settings),
+) -> ChatAnswerFeedbackOut:
+    if (
+        payload.rating == "bad"
+        and (payload.comment is None or len(payload.comment) < 3)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Vui lòng cho biết câu trả lời cần cải thiện điều gì",
+        )
+
+    answer_message, question_message = await _owned_feedback_target(
+        db,
+        message_id,
+        user.id,
+    )
+    question = _message_content_out(question_message, settings)
+    answer = _message_content_out(answer_message, settings)
+    feedback = await db.scalar(
+        select(ChatAnswerFeedback).where(
+            ChatAnswerFeedback.message_id == message_id
+        )
+    )
+    if feedback is None:
+        feedback = ChatAnswerFeedback(
+            user_id=user.id,
+            conversation_id=answer_message.conversation_id,
+            message_id=message_id,
+            rating=payload.rating.upper(),
+            question_ciphertext=encrypt_text(question, settings),
+            answer_ciphertext=encrypt_text(answer, settings),
+        )
+        db.add(feedback)
+    else:
+        feedback.rating = payload.rating.upper()
+        feedback.question_ciphertext = encrypt_text(question, settings)
+        feedback.answer_ciphertext = encrypt_text(answer, settings)
+        feedback.regenerated_message_id = None
+    feedback.comment_ciphertext = (
+        encrypt_text(payload.comment, settings)
+        if payload.comment
+        else None
+    )
+    await db.commit()
+    return ChatAnswerFeedbackOut(
+        message_id=message_id,
+        rating=payload.rating,
+        regeneration_available=payload.rating == "bad",
+    )
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
@@ -1501,6 +1748,18 @@ async def chat(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Vui lòng chọn tên gọi trước khi bắt đầu trò chuyện",
+        )
+
+    current_question = payload.message
+    regeneration_target_id = payload.regenerate_from_message_id
+    regeneration_feedback = ""
+    regeneration_original_answer = ""
+    regeneration_feedback_id: uuid.UUID | None = None
+    regeneration_question_sequence: int | None = None
+    if regeneration_target_id and payload.conversation_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Cần có cuộc trò chuyện để tạo lại câu trả lời",
         )
 
     operation_started = time.perf_counter()
@@ -1526,21 +1785,99 @@ async def chat(
     cache_scope = f"user:{authenticated_user_id}:effort:{cache_effort}"
     summary_context = ""
     history_turns: list[tuple[str, str]] = []
-    greeting_answer = greeting_response(payload.message, preferred_name)
+    greeting_answer = (
+        None
+        if regeneration_target_id
+        else greeting_response(current_question, preferred_name)
+    )
     if payload.conversation_id:
         conversation = await _owned_conversation(db, payload.conversation_id, user)
         conversation_id = conversation.id
-        if greeting_answer is None:
+        if regeneration_target_id:
+            answer_message, question_message = await _owned_feedback_target(
+                db,
+                regeneration_target_id,
+                authenticated_user_id,
+            )
+            if answer_message.conversation_id != conversation_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Câu trả lời không thuộc cuộc trò chuyện này",
+                )
+            stored_feedback = await db.scalar(
+                select(ChatAnswerFeedback).where(
+                    ChatAnswerFeedback.message_id == regeneration_target_id,
+                    ChatAnswerFeedback.user_id == authenticated_user_id,
+                    ChatAnswerFeedback.rating == "BAD",
+                )
+            )
+            if (
+                stored_feedback is None
+                or not stored_feedback.comment_ciphertext
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Hãy gửi góp ý trước khi tạo lại câu trả lời",
+                )
+            current_question = _message_content_out(
+                question_message,
+                settings,
+            )
+            regeneration_original_answer = _message_content_out(
+                answer_message,
+                settings,
+            )
+            regeneration_feedback = decrypt_text(
+                stored_feedback.comment_ciphertext,
+                settings,
+            )
+            regeneration_feedback_id = stored_feedback.id
+            regeneration_question_sequence = (
+                question_message.message_sequence
+            )
+            history_turns = await _load_postgres_chat_history(
+                db,
+                conversation_id,
+                settings,
+                before_sequence=regeneration_question_sequence,
+            )
+        elif greeting_answer is None:
             summary_context = await memory.get_summary(db, conversation_id)
             history_turns = await _load_postgres_chat_history(
                 db,
                 conversation_id,
                 settings,
             )
+    approved_examples = (
+        await _load_approved_answer_examples(
+            db,
+            authenticated_user_id,
+            current_question,
+            settings,
+        )
+        if greeting_answer is None
+        else []
+    )
     # Authentication and history reads must not retain a PostgreSQL
     # transaction while cache/search/Gemini network calls are in flight.
     await db.rollback()
     conversation = None
+    invalidate_feedback_answer = getattr(
+        answer_cache,
+        "invalidate_feedback_answer",
+        None,
+    )
+    if regeneration_target_id and callable(invalidate_feedback_answer):
+        try:
+            await invalidate_feedback_answer(
+                current_question,
+                regeneration_original_answer,
+                scope=cache_scope,
+            )
+        except Exception:
+            logger.exception(
+                "Cannot invalidate answer cache after negative feedback"
+            )
 
     log_progress(
         logger,
@@ -1551,7 +1888,7 @@ async def chat(
         summary_available=bool(summary_context),
     )
     if greeting_answer is not None:
-        retrieval_query = payload.message
+        retrieval_query = current_question
         answer_plan: dict[str, Any] = {}
         query_was_rewritten = False
         log_progress(
@@ -1565,13 +1902,13 @@ async def chat(
         rewrite_started = time.perf_counter()
         log_progress(logger, "chat", "query_rewrite_started", operation_started)
         if effort_profile.skip_query_rewrite:
-            retrieval_query = payload.message
+            retrieval_query = current_question
             query_was_rewritten = False
             rewrite_attempted = False
         else:
             query_rewrite = await rewrite_query_if_needed(
                 ai,
-                payload.message,
+                current_question,
                 history=history_turns,
                 settings=settings,
             )
@@ -1607,9 +1944,10 @@ async def chat(
     cache_eligible = (
         not answer_ready
         and answer_cache.eligible(
-            payload.message,
+            current_question,
             has_conversation_context=bool(history_turns or summary_context),
         )
+        and regeneration_target_id is None
     )
     cache_lookup_started = time.perf_counter()
     log_progress(
@@ -1752,9 +2090,17 @@ async def chat(
                     f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
                     f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
                     f"NGUỒN:\n{build_context(sources)}\n\n"
-                    f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', payload.message)}"
+                    f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', current_question)}"
                     "\n\nCÁCH HIỂU ĐÃ CHUẨN HÓA:\n"
                     f"{untrusted_data_block('REWRITTEN_QUERY', retrieval_query) if query_was_rewritten else '(Không cần chuẩn hóa)'}"
+                    "\n\nVÍ DỤ ĐÃ ĐƯỢC NGƯỜI DÙNG ĐÁNH GIÁ TỐT:\n"
+                    f"{untrusted_data_block('APPROVED_ANSWER_EXAMPLES', approved_examples) if approved_examples else '(Không có)'}\n"
+                    "Chỉ học cách tổ chức, mức độ rõ ràng và phong cách trình bày từ ví dụ tốt. "
+                    "Không sao chép dữ kiện hay mã nguồn của ví dụ; mọi kết luận hiện tại phải dựa trên NGUỒN đang được cấp.\n"
+                    "\nPHẢN HỒI CẦN SỬA Ở LẦN TRẢ LỜI TRƯỚC:\n"
+                    f"{untrusted_data_block('REGENERATION_FEEDBACK', {'previous_answer': regeneration_original_answer, 'human_feedback': regeneration_feedback}) if regeneration_target_id else '(Không có)'}\n"
+                    "Nếu có phản hồi, hãy tạo một câu trả lời mới giải quyết trực tiếp góp ý, "
+                    "không nhắc đến quy trình đánh giá hoặc việc đang tạo lại câu trả lời.\n"
                     f"\n\nBẢN NHÁP CACHE THAM KHẢO:\n"
                     f"{untrusted_data_block('CACHE_DRAFT', cached_draft) if cached_draft else '(Không có)'}\n"
                     "Nếu có bản nháp, phải điều chỉnh theo đúng câu hỏi hiện tại; "
@@ -1821,7 +2167,7 @@ async def chat(
     if conversation_id is None:
         conversation = Conversation(
             user_id=authenticated_user_id,
-            title=payload.message[:100],
+            title=current_question[:100],
             retrieval_mode=settings.retriever_backend.upper(),
         )
         db.add(conversation)
@@ -1858,17 +2204,50 @@ async def chat(
         )
         or 0
     )
-    user_message = ChatMessage(
-        conversation_id=conversation_id,
-        message_sequence=last_sequence + 1,
-        role="USER",
-        content_ciphertext=encrypt_text(payload.message, settings),
-        content_hash=_hash_content(payload.message),
-    )
-    db.add(user_message)
+    assistant_sequence = last_sequence + 2
+    feedback_to_link: ChatAnswerFeedback | None = None
+    if regeneration_target_id is None:
+        user_message = ChatMessage(
+            conversation_id=conversation_id,
+            message_sequence=last_sequence + 1,
+            role="USER",
+            content_ciphertext=encrypt_text(current_question, settings),
+            content_hash=_hash_content(current_question),
+        )
+        db.add(user_message)
+    else:
+        assistant_sequence = last_sequence + 1
+        target_message = await db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.id == regeneration_target_id,
+                ChatMessage.conversation_id == conversation_id,
+                ChatMessage.role == "ASSISTANT",
+                ChatMessage.status == "COMPLETED",
+            )
+        )
+        feedback = await db.scalar(
+            select(ChatAnswerFeedback).where(
+                ChatAnswerFeedback.id == regeneration_feedback_id,
+                ChatAnswerFeedback.message_id == regeneration_target_id,
+                ChatAnswerFeedback.rating == "BAD",
+            )
+        )
+        if target_message is None or feedback is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Câu trả lời đã được thay đổi; vui lòng tải lại cuộc trò chuyện",
+            )
+        target_message.status = "SUPERSEDED"
+        feedback_to_link = feedback
+        await db.execute(
+            delete(ConversationSummary).where(
+                ConversationSummary.conversation_id == conversation_id
+            )
+        )
     assistant_message = ChatMessage(
+        id=message_id,
         conversation_id=conversation_id,
-        message_sequence=last_sequence + 2,
+        message_sequence=assistant_sequence,
         role="ASSISTANT",
         content_ciphertext=encrypt_text(answer, settings),
         content_hash=_hash_content(answer),
@@ -1876,6 +2255,9 @@ async def chat(
         verification=verification,
     )
     db.add(assistant_message)
+    if feedback_to_link is not None:
+        await db.flush()
+        feedback_to_link.regenerated_message_id = message_id
     conversation.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(assistant_message)
@@ -1914,6 +2296,7 @@ async def chat(
     return ChatResponse(
         conversation_id=conversation_id,
         message_id=message_id,
+        replaces_message_id=regeneration_target_id,
         answer=answer,
         sources=sources,
         verification=verification,

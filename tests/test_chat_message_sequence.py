@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 from app.api import chat
 from app.core.config import Settings
-from app.models import ChatMessage, Conversation
+from app.core.security import encrypt_text
+from app.models import ChatAnswerFeedback, ChatMessage, Conversation
 from app.schemas import ChatRequest, VerificationItem, VerificationReport
 
 
@@ -173,3 +174,141 @@ def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() ->
     assert result.conversation_id == conversation_id
     assert memory.refreshed == [conversation_id]
     assert "Căn cứ được trích dẫn:" not in result.answer
+
+
+class _RegenerationSession:
+    def __init__(
+        self,
+        conversation: Conversation,
+        question: ChatMessage,
+        answer: ChatMessage,
+        feedback: ChatAnswerFeedback,
+    ) -> None:
+        self.results: list[object] = [
+            conversation,
+            answer,
+            question,
+            feedback,
+            conversation,
+            4,
+            answer,
+            feedback,
+        ]
+        self.rolled_back = False
+        self.lock_acquired = False
+        self.added: list[object] = []
+        self.executed_sql: list[str] = []
+        self.committed = False
+
+    async def scalar(self, _: object) -> object:
+        return self.results.pop(0)
+
+    async def scalars(self, _: object) -> _Rows:
+        return _Rows([])
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
+
+    async def execute(self, statement: object, *_: object) -> None:
+        sql = str(statement)
+        self.executed_sql.append(sql)
+        if "pg_advisory_xact_lock" in sql:
+            self.lock_acquired = True
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def flush(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def refresh(self, _: object) -> None:
+        return None
+
+
+def test_bad_feedback_regenerates_without_duplicating_the_user_question() -> None:
+    settings = Settings(
+        _env_file=None,
+        session_secret="chat-regeneration-test",
+    )
+    user_id = uuid.uuid4()
+    conversation_id = uuid.uuid4()
+    conversation = Conversation(id=conversation_id, user_id=user_id)
+    question = ChatMessage(
+        id=uuid.uuid4(),
+        conversation_id=conversation_id,
+        message_sequence=3,
+        role="USER",
+        content_ciphertext=encrypt_text(
+            "Quy định pháp luật thử nghiệm là gì?",
+            settings,
+        ),
+        content_hash="question-hash",
+        status="COMPLETED",
+    )
+    answer = ChatMessage(
+        id=uuid.uuid4(),
+        conversation_id=conversation_id,
+        message_sequence=4,
+        role="ASSISTANT",
+        content_ciphertext=encrypt_text(
+            "Câu trả lời cũ còn thiếu ví dụ.",
+            settings,
+        ),
+        content_hash="answer-hash",
+        status="COMPLETED",
+    )
+    feedback = ChatAnswerFeedback(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        conversation_id=conversation_id,
+        message_id=answer.id,
+        rating="BAD",
+        comment_ciphertext=encrypt_text(
+            "Hãy bổ sung ví dụ dễ hiểu.",
+            settings,
+        ),
+        question_ciphertext=question.content_ciphertext,
+        answer_ciphertext=answer.content_ciphertext,
+    )
+    db = _RegenerationSession(
+        conversation,
+        question,
+        answer,
+        feedback,
+    )
+
+    result = asyncio.run(
+        chat(
+            ChatRequest(
+                message="Nội dung này không được dùng thay câu hỏi gốc",
+                conversation_id=conversation_id,
+                regenerate_from_message_id=answer.id,
+                effort="instant",
+            ),
+            db=db,
+            user=SimpleNamespace(id=user_id, preferred_name="Minh"),
+            settings=settings,
+            retrieval=_Retrieval(db),  # type: ignore[arg-type]
+            freshness=_Freshness(db),  # type: ignore[arg-type]
+            ai=_AI(db),  # type: ignore[arg-type]
+            memory=_Memory(db),  # type: ignore[arg-type]
+            answer_cache=_Cache(),
+        )
+    )
+
+    persisted = [
+        item for item in db.added if isinstance(item, ChatMessage)
+    ]
+    assert len(persisted) == 1
+    assert persisted[0].role == "ASSISTANT"
+    assert persisted[0].message_sequence == 5
+    assert answer.status == "SUPERSEDED"
+    assert feedback.regenerated_message_id == result.message_id
+    assert result.replaces_message_id == answer.id
+    assert any(
+        "DELETE FROM conversation_summary" in sql
+        for sql in db.executed_sql
+    )

@@ -440,3 +440,32 @@ class SemanticAnswerCacheService:
                 .values(expires_at=func.now(), updated_at=func.now())
             )
             await db.commit()
+
+    async def invalidate_feedback_answer(
+        self,
+        query: str,
+        answer: str,
+        *,
+        scope: str,
+    ) -> None:
+        """Expire exact and semantically reused copies of a rejected answer."""
+
+        normalized_query = normalize_public_query(query)
+        scope_hash = hashlib.sha256(scope.encode("utf-8")).hexdigest()
+        query_hash = hashlib.sha256(
+            normalized_query.encode("utf-8")
+        ).hexdigest()
+        answer_hash = hashlib.sha256(answer.encode("utf-8")).hexdigest()
+        async with SessionFactory() as db:
+            await db.execute(
+                update(LegalAnswerCache)
+                .where(
+                    LegalAnswerCache.cache_scope_hash == scope_hash,
+                    (
+                        (LegalAnswerCache.query_hash == query_hash)
+                        | (LegalAnswerCache.answer_hash == answer_hash)
+                    ),
+                )
+                .values(expires_at=func.now(), updated_at=func.now())
+            )
+            await db.commit()

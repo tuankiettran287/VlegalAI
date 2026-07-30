@@ -77,6 +77,10 @@ function patch<T>(url: string, body: unknown) {
   return requestJson<T>(url, { method: "PATCH", body: JSON.stringify(body) });
 }
 
+function put<T>(url: string, body: unknown) {
+  return requestJson<T>(url, { method: "PUT", body: JSON.stringify(body) });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -155,6 +159,10 @@ function normalizeConversationMessages(value: unknown, conversationId: string): 
       content: typeof item.content === "string" ? item.content : "",
       sources: sources.length ? sources : undefined,
       verification,
+      feedback_rating:
+        item.feedback_rating === "good" || item.feedback_rating === "bad"
+          ? item.feedback_rating
+          : null,
       created_at: typeof item.created_at === "string" ? item.created_at : undefined,
     }];
   });
@@ -190,6 +198,7 @@ export const conversationApi = {
 export type ChatResponse = {
   conversation_id: string | null;
   message_id: string;
+  replaces_message_id: string | null;
   answer: string;
   sources: Source[];
   verification: VerificationReport;
@@ -204,12 +213,31 @@ export function askLegalQuestion(
   message: string,
   conversationId?: string | null,
   effort: ChatEffort = "medium",
+  options: {
+    regenerateFromMessageId?: string | null;
+  } = {},
 ) {
   return post<ChatResponse>("/api/chat", {
     message,
     conversation_id: conversationId || null,
+    regenerate_from_message_id:
+      options.regenerateFromMessageId || null,
     effort,
   });
+}
+
+export function rateChatAnswer(
+  messageId: string,
+  payload: {
+    rating: "good" | "bad";
+    comment?: string;
+  },
+) {
+  return put<{
+    message_id: string;
+    rating: "good" | "bad";
+    regeneration_available: boolean;
+  }>(`/api/chat/messages/${encodeURIComponent(messageId)}/feedback`, payload);
 }
 
 export type DraftResponse = {

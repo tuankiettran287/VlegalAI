@@ -120,6 +120,48 @@ class ChatMessage(Base):
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
 
+class ChatAnswerFeedback(TimestampMixin, Base):
+    __tablename__ = "chat_answer_feedback"
+    __table_args__ = (
+        UniqueConstraint("message_id", name="uq_chat_answer_feedback_message"),
+        CheckConstraint(
+            "rating IN ('GOOD', 'BAD')",
+            name="ck_chat_answer_feedback_rating",
+        ),
+        Index(
+            "ix_chat_answer_feedback_user_rating_updated",
+            "user_id",
+            "rating",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        index=True,
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversation.id", ondelete="CASCADE"),
+        index=True,
+    )
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("chat_message.id", ondelete="CASCADE"),
+    )
+    regenerated_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("chat_message.id", ondelete="SET NULL"),
+        index=True,
+    )
+    rating: Mapped[str] = mapped_column(String(8), index=True)
+    comment_ciphertext: Mapped[str | None] = mapped_column(Text)
+    question_ciphertext: Mapped[str] = mapped_column(Text)
+    answer_ciphertext: Mapped[str] = mapped_column(Text)
+
+
 class ConversationSummary(TimestampMixin, Base):
     __tablename__ = "conversation_summary"
     __table_args__ = (
