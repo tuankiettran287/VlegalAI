@@ -1629,28 +1629,28 @@ async def chat(
         )
         if catalog_request.action == "unsupported_official_catalog":
             cache_mode = "unsupported_official_catalog"
-            verification = {
-                "checked": False,
-                "all_current": False,
-                "items": [],
-                "note": "unsupported_official_catalog",
-            }
+            verification = VerificationReport(
+                checked=False,
+                all_current=False,
+                items=[],
+                note="unsupported_official_catalog",
+            ).model_dump(mode="json")
         elif catalog_request.action == "scope_required":
             cache_mode = "scope_clarification"
-            verification = {
-                "checked": False,
-                "all_current": False,
-                "items": [],
-                "note": "document_count_scope_required",
-            }
+            verification = VerificationReport(
+                checked=False,
+                all_current=False,
+                items=[],
+                note="document_count_scope_required",
+            ).model_dump(mode="json")
         else:
             cache_mode = "catalog"
-            verification = {
-                "checked": False,
-                "all_current": False,
-                "items": [],
-                "note": "indexed_catalog_direct_sql",
-            }
+            verification = VerificationReport(
+                checked=False,
+                all_current=False,
+                items=[],
+                note="indexed_catalog_direct_sql",
+            ).model_dump(mode="json")
     scope_clarification = (
         ""
         if catalog_request is not None
@@ -1659,12 +1659,12 @@ async def chat(
     if scope_clarification:
         answer = scope_clarification
         cache_mode = "scope_clarification"
-        verification = {
-            "checked": False,
-            "all_current": False,
-            "items": [],
-            "note": "document_count_scope_required",
-        }
+        verification = VerificationReport(
+            checked=False,
+            all_current=False,
+            items=[],
+            note="document_count_scope_required",
+        ).model_dump(mode="json")
     cache_eligible = not answer and answer_cache.eligible(
         payload.message,
         has_conversation_context=bool(history_turns or summary_context),
