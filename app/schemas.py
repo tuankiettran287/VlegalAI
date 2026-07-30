@@ -156,7 +156,9 @@ class ChatResponse(BaseModel):
         "catalog",
         "greeting",
         "unsupported_official_catalog",
+        "injection_blocked",
     ] = "miss"
+
 
 
 class DraftContractRequest(BaseModel):

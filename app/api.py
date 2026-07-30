@@ -123,6 +123,40 @@ _UNCLOSED_CITATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Prompt-injection guard (Python layer — runs before LLM and catalog dispatch)
+# Chặn các mẫu câu phổ biến cố đử ghi đè system prompt hoặc tiết lộ cấu hình
+# ---------------------------------------------------------------------------
+_INJECTION_PATTERNS: list[re.Pattern[str]] = [
+    # English classic injection
+    re.compile(r"\bignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?\b", re.IGNORECASE),
+    re.compile(r"\b(?:forget|disregard)\s+(?:your\s+)?(?:instructions?|rules?|guidelines?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:reveal|show|print|output|display)\s+(?:your\s+)?(?:system\s+prompt|instructions?|config(?:uration)?)\b", re.IGNORECASE),
+    re.compile(r"\bact\s+as\s+(?:a\s+)?(?:different|another|new|unrestricted)\b", re.IGNORECASE),
+    # Vietnamese injection
+    re.compile(r"\bbỏ\s+qua\s+(?:tất\s+cả\s+)?(?:quy\s+tắc|hướng\s+dẫn|chỉ\s+dẫn|lệnh)\b", re.IGNORECASE),
+    re.compile(r"\btiết\s+lộ\s+(?:system\s+prompt|prompt\s+hệ\s+thống|cấu\s+hình|nội\s+dung\s+hệ\s+thống)\b", re.IGNORECASE),
+]
+
+
+def _check_prompt_injection(message: str) -> str | None:
+    """Return a rejection string if the message matches a known injection pattern.
+
+    This is a lightweight Python-layer guard that runs before the LLM is called.
+    It complements (does not replace) the UNTRUSTED_DATA wrapper and system-prompt
+    instruction in LEGAL_SYSTEM_PROMPT.
+    Returns None if the message is clean.
+    """
+    for pat in _INJECTION_PATTERNS:
+        if pat.search(message):
+            logger.warning(
+                "prompt_injection_blocked pattern=%s query_prefix=%s",
+                pat.pattern[:60],
+                message[:80],
+            )
+            return "Mình chỉ hỗ trợ các câu hỏi về pháp luật Việt Nam."
+    return None
+
 
 CONTRACT_TEMPLATES = [
     {"id": "employment", "name": "Hợp đồng lao động", "category": "Lao động"},
@@ -1607,9 +1641,23 @@ async def chat(
         "citation_repair_ms": 0,
     }
     generation_model = settings.gemini_model
+
+    # --- Prompt injection guard (Python layer) ---
+    if greeting_answer is None:
+        injection_block = _check_prompt_injection(payload.message)
+        if injection_block is not None:
+            answer = injection_block
+            cache_mode = "injection_blocked"
+            verification = VerificationReport(
+                checked=False,
+                all_current=False,
+                items=[],
+                note="injection_blocked",
+            ).model_dump(mode="json")
+
     catalog_request = (
         None
-        if greeting_answer is not None
+        if greeting_answer is not None or answer
         else parse_catalog_request(payload.message)
     )
     if catalog_request is not None:

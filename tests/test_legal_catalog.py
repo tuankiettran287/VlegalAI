@@ -136,9 +136,11 @@ def test_catalog_intent_requires_explicit_vlegal_scope() -> None:
     assert parse_catalog_request(
         "Có bao nhiêu nghị định của Việt Nam?"
     ) is None
-    assert parse_catalog_request(
-        "Nghị định 118 có bao nhiêu Điều?"
-    ) is None
+    # Câu hỏi về số Điều của văn bản cụ thể → article_count (hành vi đúng)
+    result = parse_catalog_request("Nghị định 118 có bao nhiêu Điều?")
+    assert result is not None
+    assert result.action == "article_count"
+
 
 
 def test_catalog_intent_recognizes_vlegal_summary_wording() -> None:
@@ -200,3 +202,134 @@ def test_catalog_summary_uses_direct_sql_group_counts() -> None:
     assert "luật: 1" in answer
     assert "đang có hiệu lực: 2" in answer
     assert "chưa được kiểm chứng: 1" in answer
+
+
+
+# ---------------------------------------------------------------------------
+# Article-count bug regression tests (bug: SQL thiếu WHERE law_code filter)
+# ---------------------------------------------------------------------------
+
+class _ArticleCountDB:
+    """Mock DB cho article_count — trả 220 khi SQL có :normalized_code param."""
+
+    def __init__(self, *, raise_on_count: bool = False, empty_result: bool = False):
+        self.statements: list[str] = []
+        self.params: list[dict] = []
+        self.raise_on_count = raise_on_count
+        self.empty_result = empty_result
+
+    async def execute(self, statement, parameters=None):
+        sql = str(statement)
+        self.statements.append(sql)
+        self.params.append(parameters or {})
+
+        if "legal_catalog_corpus" in sql and "title ILIKE" in sql:
+            # name_hint resolution query
+            return _Result(
+                [
+                    {
+                        "law_code_normalized": "45/2019/QH14",
+                        "title": "Bộ luật Lao động",
+                    }
+                ]
+            )
+
+        if "chunk_type = 'article'" in sql and "law_code_normalized = :normalized_code" in sql:
+            if self.raise_on_count:
+                raise RuntimeError("DB unavailable")
+            if self.empty_result:
+                return _Result([])
+            return _Result(
+                [
+                    {
+                        "law_code_normalized": "45/2019/QH14",
+                        "title": "Bộ luật Lao động",
+                        "article_count": 220,
+                    }
+                ]
+            )
+
+        raise AssertionError(f"Unexpected SQL: {sql[:120]}")
+
+
+def test_parse_catalog_request_extracts_law_code_from_natural_query() -> None:
+    """Bug regression: parse_catalog_request phải extract law_code hoặc law_name_hint,
+    không được trả về action='article_count' với cả hai là None khi câu hỏi có tên văn bản."""
+    result = parse_catalog_request("Bộ luật Lao động 2019 có bao nhiêu Điều?")
+    assert result is not None
+    assert result.action == "article_count"
+    # Phải extract được tên gợi ý (law_name_hint) vì không có mã số hình thức
+    assert result.law_code is not None or result.law_name_hint is not None
+
+    # Khi câu hỏi có mã số hình thức, phải extract law_code
+    result2 = parse_catalog_request("Luật số 45/2019/QH14 có mấy điều?")
+    assert result2 is not None
+    assert result2.action == "article_count"
+    assert result2.law_code is not None
+    assert "45/2019" in result2.law_code
+
+    # Câu không liên quan pháp luật không được match
+    result3 = parse_catalog_request("Cháu có mấy điều muốn hỏi thầy?")
+    assert result3 is None or result3.action != "article_count"
+
+
+def test_article_count_sql_filters_by_law_code_and_returns_correct_count() -> None:
+    """Bug regression: SQL phải có WHERE lc.law_code_normalized = :normalized_code
+    và trả đúng 220 (không phải 3724 hay 404)."""
+    db = _ArticleCountDB()
+    service = LegalCatalogService(db)  # type: ignore[arg-type]
+
+    answer = asyncio.run(
+        service.answer(CatalogRequest(action="article_count", law_code="45/2019/QH14"))
+    )
+
+    # Kết quả phải chứa đúng 220
+    assert "220" in answer
+    # Không được chứa số sai cũ
+    assert "3724" not in answer
+    assert "404" not in answer
+
+    # SQL được gọi phải có filter law_code_normalized
+    count_sqls = [s for s in db.statements if "chunk_type = 'article'" in s]
+    assert count_sqls, "Phải có SQL đếm article"
+    assert any("law_code_normalized = :normalized_code" in s for s in count_sqls), (
+        "SQL thiếu WHERE law_code_normalized = :normalized_code"
+    )
+
+
+def test_article_count_db_error_fallback_contains_no_hardcoded_number() -> None:
+    """Bug regression: khi DB lỗi, fallback KHÔNG được trả số điều cụ thể (như 404).
+    Chỉ được thông báo lỗi mà không đoán số."""
+    import re as _re
+
+    db = _ArticleCountDB(raise_on_count=True)
+    service = LegalCatalogService(db)  # type: ignore[arg-type]
+
+    answer = asyncio.run(
+        service.answer(CatalogRequest(action="article_count", law_code="45/2019/QH14"))
+    )
+
+    # Không được chứa bất kỳ số lượng điều cụ thể nào
+    assert not _re.search(r"\b\d{2,4}\s*[Đđ]iều\b", answer), (
+        f"Fallback không được chứa số Điều cụ thể: {answer}"
+    )
+    # Phải nói rõ không thể xác định
+    assert "tạm thời" in answer or "không thể" in answer or "thử lại" in answer
+
+
+def test_article_count_unknown_law_returns_clarification() -> None:
+    """Khi không extract được law_code hoặc name_hint, phải yêu cầu người dùng cung cấp mã số."""
+    db = _ArticleCountDB()
+    service = LegalCatalogService(db)  # type: ignore[arg-type]
+
+    answer = asyncio.run(
+        service.answer(CatalogRequest(action="article_count", law_code=None, law_name_hint=None))
+    )
+
+    # Phải hướng dẫn người dùng cung cấp mã số
+    assert "mã số" in answer.lower() or "chưa xác định" in answer.lower() or "cung cấp" in answer.lower()
+    # Không được trả số điều cụ thể
+    assert "220" not in answer
+    assert "404" not in answer
+    assert "3724" not in answer
+

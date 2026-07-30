@@ -65,6 +65,8 @@ class CatalogRequest:
     action: str
     document_type: str | None = None
     status: str | None = None
+    law_code: str | None = None          # mã số chuẩn hoá (vd: 45/2019/QH14)
+    law_name_hint: str | None = None     # tên tự nhiên khi không có mã số
 
 
 def _ascii_text(value: str) -> str:
@@ -87,13 +89,49 @@ UNSUPPORTED_OFFICIAL_PATTERNS = [
 SCOPE_REQUIRED_PATTERNS = [
     re.compile(r"\bco\s+bao\s+nhieu\s+dieu\s+luat\b"),
     re.compile(r"\bmay\s+dieu\s+luat\b"),
-    re.compile(r"\bco\s+bao\s+nhieu\s+luat\s+lao\s+dong\b"),
-    re.compile(r"\bco\s+may\s+luat\s+lao\s+dong\b"),
 ]
 
+# Phải có từ chỉ loại văn bản pháp luật HOẶC mã số trước cụm “có bao nhiêu/mấy điều”
+# → tránh false positive câu như “Cháu có mấy điều muốn hỏi”
 ARTICLE_COUNT_PATTERN = re.compile(
-    r"\b(?:bo\s+luat|luat|nghi\s+dinh|thong\s+tu|van\s+ban)?\s*([a-z0-9\s\-_–]+)?\s*(?:co|gom)\s*(?:bao\s+nhieu|may)\s*dieu\b"
+    r"\b(?:bo\s+luat|luat|nghi\s+dinh|thong\s+tu|van\s+ban)\s+[a-z0-9][a-z0-9\s\-_\u2013/]*\s*(?:co|gom)\s*(?:bao\s+nhieu|may)\s*dieu\b"
+    r"|\b\d{1,3}/\d{4}/[A-Z\u0110][A-Z0-9\u0110\-]*[^/]*(?:co|gom)\s*(?:bao\s+nhieu|may)\s*dieu\b"
+    r"|\b(?:co|gom)\s*(?:bao\s+nhieu|may)\s*dieu\b.*\b(?:bo\s+luat|luat|nghi\s+dinh|thong\s+tu)\b",
+    re.IGNORECASE,
 )
+
+# Regex trích xuất mã số văn bản hình thức từ câu hỏi tự nhiên
+# Khớp: 45/2019/QH14, 145/2020/NĐ-CP, 05/2015/NĐ-CP, 43/2013/QH13…
+_LAW_CODE_RE = re.compile(
+    r"\b(\d{1,3}/\d{4}/[A-Z\u0110][A-Z0-9\u0110\-]*)\b",
+    re.IGNORECASE,
+)
+
+# Regex trích xuất tên văn bản tự nhiên (dùng làm law_name_hint khi không có mã số)
+_LAW_NAME_HINT_RE = re.compile(
+    r"\b((?:bo\s+luat|luat|nghi\s+dinh|thong\s+tu)(?:\s+[a-z0-9]+){1,6})\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_law_info(normalized_query: str, original_query: str) -> tuple[str | None, str | None]:
+    """Return (law_code, law_name_hint) extracted from the query.
+
+    Tries to find a formal law code first (e.g. 45/2019/QH14). If not found,
+    falls back to extracting a natural name hint (e.g. 'bo luat lao dong 2019').
+    Both can be None if nothing useful is detected.
+    """
+    # Ưu tiên mã số hình thức từ câu hỏi gốc (trước khi ASCII-normalize)
+    code_match = _LAW_CODE_RE.search(original_query)
+    if code_match:
+        return code_match.group(1), None
+
+    # Thử trích tên tự nhiên từ câu đã normalize
+    name_match = _LAW_NAME_HINT_RE.search(normalized_query)
+    if name_match:
+        return None, name_match.group(1).strip()
+
+    return None, None
 
 
 def parse_catalog_request(query: str) -> CatalogRequest | None:
@@ -109,10 +147,15 @@ def parse_catalog_request(query: str) -> CatalogRequest | None:
         if pat.search(normalized):
             return CatalogRequest(action="scope_required")
 
-    if _CATALOG_SCOPE_RE.search(normalized) and ARTICLE_COUNT_PATTERN.search(normalized) and not (
+    if ARTICLE_COUNT_PATTERN.search(normalized) and not (
         re.search(r"\bco\s+bao\s+nhieu\s+(?:luat|nghi\s+dinh|thong\s+tu)\b", normalized)
     ):
-        return CatalogRequest(action="article_count", document_type="CODE")
+        law_code, law_name_hint = _extract_law_info(normalized, query)
+        return CatalogRequest(
+            action="article_count",
+            law_code=law_code,
+            law_name_hint=law_name_hint,
+        )
 
     if not _CATALOG_SCOPE_RE.search(normalized):
         return None
@@ -340,16 +383,7 @@ class LegalCatalogService:
                 "Bạn muốn đếm số Điều trong Bộ luật Lao động 2019 hay số lượng văn bản pháp luật lao động trong kho VLegal?"
             )
         if request.action == "article_count":
-            try:
-                res = await self.db.execute(
-                    text("SELECT count(DISTINCT node_id) AS total FROM graphrag_chunk WHERE chunk_type = 'article'")
-                )
-                total = int(res.scalar() or 0)
-                if total > 0:
-                    return f"Theo dữ liệu đã index trong kho VLegal, **Bộ luật Lao động 2019** (Mã số: `45/2019/QH14`) hiện có tổng cộng **{total} Điều**."
-            except Exception:
-                pass
-            return "Theo dữ liệu đã index trong kho VLegal, **Bộ luật Lao động 2019** (Mã số: `45/2019/QH14`) hiện có tổng cộng **404 Điều**."
+            return await self._answer_article_count(request)
 
         if (
             request.action == "summary"
@@ -430,6 +464,100 @@ class LegalCatalogService:
             f"Kho VLegal hiện có {total} {type_label}{qualifier}."
             f"{scope_note}{as_of_text}"
         )
+
+    async def _answer_article_count(self, request: CatalogRequest) -> str:
+        """Count Điều for a specific legal document, filtering by law_code.
+
+        Resolution order:
+        1. If request.law_code is set → normalize and query directly.
+        2. If request.law_name_hint is set → ILIKE title search in legal_catalog_corpus
+           to find the law_code_normalized, then query.
+        3. If neither is set → ask user to clarify.
+        """
+        # --- Step 1: resolve law_code_normalized ---
+        normalized_code: str | None = None
+        resolved_title: str | None = None
+
+        if request.law_code:
+            # Normalize the code the same way the index does
+            raw = re.sub(r"[\s]+", "", request.law_code.strip()).upper()
+            normalized_code = raw
+        elif request.law_name_hint:
+            # Search by title similarity in legal_catalog_corpus
+            try:
+                res = await self.db.execute(
+                    text(
+                        """
+                        SELECT law_code_normalized,
+                               coalesce(nullif(title, ''), law_code_normalized) AS title
+                        FROM legal_catalog_corpus
+                        WHERE title ILIKE :pattern
+                        ORDER BY law_code_normalized DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"pattern": f"%{request.law_name_hint}%"},
+                )
+                row = res.mappings().all()
+                if row:
+                    normalized_code = str(row[0]["law_code_normalized"])
+                    resolved_title = str(row[0]["title"])
+            except Exception:
+                pass
+
+        if not normalized_code:
+            return (
+                "VLegal chưa xác định được văn bản cụ thể bạn hỏi. "
+                "Vui lòng cung cấp mã số văn bản (ví dụ: `45/2019/QH14`) để tra chính xác."
+            )
+
+        # --- Step 2: count articles filtered by law_code_normalized ---
+        try:
+            res = await self.db.execute(
+                text(
+                    """
+                    SELECT
+                        lc.law_code_normalized,
+                        coalesce(nullif(d.title, ''), lc.title) AS title,
+                        count(DISTINCT gc.node_id)::bigint AS article_count
+                    FROM legal_catalog_corpus AS lc
+                    LEFT JOIN legal_document AS d
+                        ON upper(
+                            regexp_replace(btrim(d.code), '[[:space:]]+', '', 'g')
+                        ) = lc.law_code_normalized
+                    JOIN graphrag_chunk AS gc
+                        ON upper(
+                            regexp_replace(btrim(gc.law_code), '[[:space:]]+', '', 'g')
+                        ) = lc.law_code_normalized
+                    WHERE gc.chunk_type = 'article'
+                      AND lc.law_code_normalized = :normalized_code
+                    GROUP BY lc.law_code_normalized, coalesce(nullif(d.title, ''), lc.title)
+                    """
+                ),
+                {"normalized_code": normalized_code},
+            )
+            row = res.mappings().all()
+            if row:
+                total = int(row[0]["article_count"])
+                title = resolved_title or str(row[0]["title"])
+                code_display = request.law_code or normalized_code
+                return (
+                    f"Theo dữ liệu đã index trong kho VLegal, **{title}** "
+                    f"(Mã số: `{code_display}`) hiện có tổng cộng **{total} Điều**.\n\n"
+                    "*Số liệu phản ánh corpus VLegal đã index, không thay thế văn bản chính thức.*"
+                )
+            # Văn bản có trong catalog nhưng chưa index chunk
+            title = resolved_title or normalized_code
+            return (
+                f"**{title}** có trong kho VLegal nhưng chưa được index ở dạng từng Điều riêng lẻ. "
+                "Số lượng Điều chưa thể thống kê."
+            )
+        except Exception:
+            title = resolved_title or request.law_code or normalized_code or "văn bản này"
+            return (
+                f"Dữ liệu đếm số Điều của **{title}** tạm thời không truy cập được. "
+                "Vui lòng thử lại sau."
+            )
 
     async def _execute(self, statement, parameters=None):
         try:
