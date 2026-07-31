@@ -359,16 +359,11 @@ def test_postgres_vector_and_bm25_paths_use_latest_indexed_versions(
     bm25_store.config = SimpleNamespace(bm25_k1=1.5, bm25_b=0.75)
 
     assert bm25_store._bm25_candidates("thuế", 5)
-    candidate_query, frequency_query, statistics_query = [
-        query for query, _ in bm25_cursor.queries
-    ]
+    # BM25 now uses the indexed PostgreSQL rank directly; the old correlated
+    # frequency/statistics scans were removed from the request path.
+    (candidate_query,) = [query for query, _ in bm25_cursor.queries]
     assert "current_chunk.law_status IN" not in candidate_query
-    assert "frequency_chunk.law_status IN" not in frequency_query
-    assert "current_chunk.law_status IN" not in statistics_query
-    assert all(
-        "graphrag_law_version AS latest_law" in query
-        for query in (candidate_query, frequency_query, statistics_query)
-    )
+    assert "graphrag_law_version AS latest_law" in candidate_query
 
 
 def test_neo4j_candidate_and_expansion_paths_use_latest_indexed_versions() -> None:

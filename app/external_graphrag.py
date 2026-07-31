@@ -1001,7 +1001,7 @@ def validate_postgres_embeddings(connection, config: ExternalGraphRAGConfig) -> 
         int(row.get("embedding_dimensions", row.get("dimensions", 0))),
     )
     expected = (
-        config.embedding_provider,
+        getattr(config, "embedding_provider", "vertex"),
         config.embedding_model,
         config.embedding_config.model_revision,
         config.postgres_vector_size,
