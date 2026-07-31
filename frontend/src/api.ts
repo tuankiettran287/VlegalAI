@@ -230,7 +230,9 @@ export function askLegalQuestion(
     conversation_id: conversationId || null,
     regenerate_from_message_id:
       options.regenerateFromMessageId || null,
-    effort,
+    // The public effort selector is removed; always use the bounded fast path
+    // even when an older browser bundle passes a stale value.
+    effort: "instant",
   });
 }
 
