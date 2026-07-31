@@ -1,19 +1,30 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+import hashlib
 import json
 import logging
 import math
 import os
 import re
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from neo4j import GraphDatabase
+from neo4j.exceptions import (
+    AuthError,
+    ClientError,
+    ServiceUnavailable,
+    SessionExpired,
+)
 import psycopg
+from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 from sqlalchemy.engine import make_url
 
@@ -28,6 +39,9 @@ from app.services.embeddings import (
 
 
 logger = logging.getLogger(__name__)
+
+NEO4J_CONNECTION_TIMEOUT_SECONDS = 5.0
+NEO4J_ACQUISITION_TIMEOUT_SECONDS = 8.0
 
 
 #: Accent-stripped Vietnamese relation -> Neo4j relationship type.
@@ -72,8 +86,15 @@ POSTGRES_LEXICAL_STOP_WORDS = {
     "như", "nhu", "nào", "nao", "về", "ve", "và", "va", "là", "la",
     "của", "cua", "được", "duoc", "không", "khong", "trong", "những",
     "nhung", "gì", "gi", "các", "cac", "một", "mot", "số", "so",
+    # Question scaffolding terms are frequent across the legal corpus and
+    # make a broad full-text query match almost every chunk. The lexical
+    # branch complements vector recall, so retain discriminative terms.
+    "bao", "nhieu", "khi", "nay", "hien", "dang", "co", "phap", "luat",
 }
 CURRENT_LAW_STATUSES = ("IN_FORCE", "PARTIALLY_IN_FORCE", "AMENDED")
+POSTGRES_EMBEDDING_CONTRACT_ID = "active"
+POSTGRES_EMBEDDING_CONTRACT_READY = "ready"
+POSTGRES_EMBEDDING_CONTRACT_BUILDING = "building"
 SETTLED_LAW_STATUSES = (
     *CURRENT_LAW_STATUSES,
     "EXPIRED",
@@ -83,22 +104,14 @@ SETTLED_LAW_STATUSES = (
 UNVERIFIED_LAW_STATUS = "UNVERIFIED"
 DOCUMENT_STRUCTURE_COUNTS_RE = re.compile(
     r"STRUCTURE_COUNTS:\s*"
-    r"chapters=(?P<chapters>\d+);\s*"
-    r"sections=(?P<sections>\d+);\s*"
-    r"articles=(?P<articles>\d+);\s*"
-    r"clauses=(?P<clauses>\d+);\s*"
-    r"points=(?P<points>\d+);\s*"
-    r"first_article=(?P<first_article>[^;.\s]*);\s*"
-    r"last_article=(?P<last_article>[^;.\s]*)(?:[.;]|$)",
-    re.IGNORECASE,
+    r"chapters=(?P<chapters>\d+);\s*sections=(?P<sections>\d+);\s*"
+    r"articles=(?P<articles>\d+);\s*clauses=(?P<clauses>\d+);\s*"
+    r"points=(?P<points>\d+);\s*first_article=(?P<first_article>[^;.\s]*);\s*"
+    r"last_article=(?P<last_article>[^;.\s]*)(?:[.;]|$)", re.IGNORECASE
 )
 
 
-def document_structure_counts(
-    row: dict[str, Any],
-) -> dict[str, int | str] | None:
-    """Decode the machine-readable graph counts embedded in a structure chunk."""
-
+def document_structure_counts(row: dict[str, Any]) -> dict[str, int | str] | None:
     match = DOCUMENT_STRUCTURE_COUNTS_RE.search(str(row.get("text") or ""))
     if match is None:
         return None
@@ -328,18 +341,21 @@ class ExternalGraphRAGConfig:
     embedding_provider: str = "vertex"
     embedding_model: str = "gemini-embedding-001"
     embedding_project_id: str = ""
-    embedding_location: str = "global"
+    embedding_location: str = "asia-southeast1"
     embedding_credentials_path: str = "env.json"
     embedding_use_adc: bool = False
     embedding_api_key: str = field(default="", repr=False)
     embedding_max_concurrency: int = 8
     embedding_batch_size: int = 20
+    embedding_max_items_per_minute: int = 0
     embedding_timeout_seconds: float = 60.0
     embedding_max_retries: int = 3
     embedding_auto_truncate: bool = True
     embedding_data_policy: str = "redact"
     embedding_vertex_locations: tuple[str, ...] = ()
     embedding_vertex_requests_per_minute: float = 0.0
+    embedding_vertex_max_queue_wait_seconds: float = 0.0
+    retrieval_postgres_pool_size: int = 3
     hybrid_vector_weight: float = 0.55
     hybrid_bm25_weight: float = 0.45
     hybrid_rrf_k: int = 60
@@ -364,7 +380,7 @@ class ExternalGraphRAGConfig:
             embedding_project_id=os.getenv("GEMINI_PROJECT_ID", ""),
             embedding_location=os.getenv(
                 "EMBEDDING_LOCATION",
-                "global",
+                "asia-southeast1",
             ),
             embedding_credentials_path=os.getenv(
                 "GEMINI_CREDENTIALS_PATH",
@@ -377,6 +393,9 @@ class ExternalGraphRAGConfig:
                 os.getenv("EMBEDDING_MAX_CONCURRENCY", "8")
             ),
             embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "20")),
+            embedding_max_items_per_minute=int(
+                os.getenv("EMBEDDING_MAX_ITEMS_PER_MINUTE", "0")
+            ),
             embedding_timeout_seconds=float(
                 os.getenv("EMBEDDING_TIMEOUT_SECONDS", "60")
             ),
@@ -395,6 +414,13 @@ class ExternalGraphRAGConfig:
             ),
             embedding_vertex_requests_per_minute=float(
                 os.getenv("EMBEDDING_VERTEX_REQUESTS_PER_MINUTE", "0")
+            ),
+            embedding_vertex_max_queue_wait_seconds=float(
+                os.getenv("EMBEDDING_VERTEX_MAX_QUEUE_WAIT_SECONDS", "0")
+            ),
+            retrieval_postgres_pool_size=max(
+                2,
+                int(os.getenv("RETRIEVAL_POSTGRES_POOL_SIZE", "3")),
             ),
             hybrid_vector_weight=float(os.getenv("HYBRID_VECTOR_WEIGHT", "0.55")),
             hybrid_bm25_weight=float(os.getenv("HYBRID_BM25_WEIGHT", "0.45")),
@@ -416,6 +442,7 @@ class ExternalGraphRAGConfig:
             dimensions=self.postgres_vector_size,
             max_concurrency=self.embedding_max_concurrency,
             batch_size=self.embedding_batch_size,
+            max_items_per_minute=self.embedding_max_items_per_minute,
             timeout_seconds=self.embedding_timeout_seconds,
             max_retries=self.embedding_max_retries,
             auto_truncate=self.embedding_auto_truncate,
@@ -423,6 +450,9 @@ class ExternalGraphRAGConfig:
             vertex_locations=self.embedding_vertex_locations,
             vertex_requests_per_minute=(
                 self.embedding_vertex_requests_per_minute
+            ),
+            vertex_max_queue_wait_seconds=(
+                self.embedding_vertex_max_queue_wait_seconds
             ),
         )
 
@@ -503,11 +533,79 @@ def postgres_connection(config: ExternalGraphRAGConfig):
     )
 
 
+def clear_legal_answer_cache(
+    config: ExternalGraphRAGConfig | None = None,
+) -> int:
+    """Invalidate generated answers after a successful legal-corpus sync."""
+
+    config = config or ExternalGraphRAGConfig.from_env()
+    with postgres_connection(config) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT to_regclass('public.legal_answer_cache') AS table_name"
+            )
+            row = cursor.fetchone() or {}
+            if not row.get("table_name"):
+                return 0
+            cursor.execute("DELETE FROM legal_answer_cache")
+            return max(int(cursor.rowcount or 0), 0)
+
+
 def neo4j_driver(config: ExternalGraphRAGConfig):
     return GraphDatabase.driver(
         config.neo4j_uri,
         auth=(config.neo4j_user, config.neo4j_password),
+        connection_timeout=NEO4J_CONNECTION_TIMEOUT_SECONDS,
+        connection_acquisition_timeout=NEO4J_ACQUISITION_TIMEOUT_SECONDS,
     )
+
+
+def neo4j_error_reason(exc: Exception) -> str:
+    """Return a stable, secret-safe failure category for operations/logs."""
+
+    if isinstance(exc, AuthError):
+        return "authentication"
+    if isinstance(exc, (ServiceUnavailable, SessionExpired)):
+        return "connectivity"
+    if isinstance(exc, ClientError):
+        return "database_or_query"
+    return "unexpected"
+
+
+def probe_neo4j(config: ExternalGraphRAGConfig) -> dict[str, Any]:
+    """Verify credentials and the configured database without exposing secrets."""
+
+    if not config.neo4j_password:
+        return {
+            "available": False,
+            "reason": "missing_credentials",
+            "database": config.neo4j_database,
+        }
+    driver = None
+    try:
+        driver = neo4j_driver(config)
+        with driver.session(database=config.neo4j_database) as session:
+            record = session.run("RETURN 1 AS ok").single()
+        if not record or int(record["ok"] or 0) != 1:
+            return {
+                "available": False,
+                "reason": "unexpected_response",
+                "database": config.neo4j_database,
+            }
+        return {
+            "available": True,
+            "reason": "ready",
+            "database": config.neo4j_database,
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": neo4j_error_reason(exc),
+            "database": config.neo4j_database,
+        }
+    finally:
+        if driver is not None:
+            driver.close()
 
 
 def ensure_neo4j_schema(driver, database: str) -> None:
@@ -516,8 +614,6 @@ def ensure_neo4j_schema(driver, database: str) -> None:
         "CREATE CONSTRAINT legal_chunk_id IF NOT EXISTS FOR (c:LegalChunk) REQUIRE c.chunk_id IS UNIQUE",
         "CREATE INDEX legal_node_type IF NOT EXISTS FOR (n:LegalNode) ON (n.node_type)",
         "CREATE INDEX legal_node_doc IF NOT EXISTS FOR (n:LegalNode) ON (n.doc_id)",
-        "CREATE INDEX legal_document_code IF NOT EXISTS FOR (n:LegalDocument) ON (n.code)",
-        "CREATE INDEX legal_article_number IF NOT EXISTS FOR (n:LegalArticle) ON (n.number)",
         "CREATE INDEX legal_chunk_node IF NOT EXISTS FOR (c:LegalChunk) ON (c.node_id)",
         "CREATE INDEX legal_chunk_type IF NOT EXISTS FOR (c:LegalChunk) ON (c.chunk_type)",
         "CREATE FULLTEXT INDEX legal_chunk_fulltext IF NOT EXISTS FOR (c:LegalChunk) ON EACH [c.title, c.citation, c.text]",
@@ -573,14 +669,6 @@ def sync_neo4j(
                         n.path_label = row.path_label,
                         n.text = row.text,
                         n.ordinal = row.ordinal,
-                        n.direct_child_count = row.direct_child_count,
-                        n.chapter_count = row.chapter_count,
-                        n.section_count = row.section_count,
-                        n.article_count = row.article_count,
-                        n.clause_count = row.clause_count,
-                        n.point_count = row.point_count,
-                        n.first_article_number = row.first_article_number,
-                        n.last_article_number = row.last_article_number,
                         n.code = row.law_code,
                         n.status = row.law_status,
                         n.version = row.law_version,
@@ -592,35 +680,6 @@ def sync_neo4j(
                     """,
                     rows=prepared,
                 )
-
-            session.run(
-                """
-                MATCH (n:LegalNode)
-                WHERE n.node_type IN ['VănBản', 'document']
-                SET n:LegalDocument
-                """
-            )
-            session.run(
-                """
-                MATCH (n:LegalNode)
-                WHERE n.node_type = 'Điều'
-                SET n:LegalArticle
-                """
-            )
-            session.run(
-                """
-                MATCH (n:LegalNode)
-                WHERE n.node_type = 'Khoản'
-                SET n:LegalClause
-                """
-            )
-            session.run(
-                """
-                MATCH (n:LegalNode)
-                WHERE n.node_type = 'Điểm'
-                SET n:LegalPoint
-                """
-            )
 
             for batch in batched(chunks, config.batch_size):
                 prepared = []
@@ -765,6 +824,20 @@ def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) 
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS graphrag_index_metadata (
+                    index_name VARCHAR(32) PRIMARY KEY,
+                    embedding_provider VARCHAR(32) NOT NULL,
+                    embedding_model VARCHAR(255) NOT NULL,
+                    embedding_revision VARCHAR(255) NOT NULL,
+                    embedding_dimensions INTEGER NOT NULL,
+                    status VARCHAR(32) NOT NULL,
+                    chunk_count BIGINT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cursor.execute(
+                """
                 INSERT INTO graphrag_law_version (
                     law_code_normalized,
                     latest_version,
@@ -828,6 +901,36 @@ def ensure_postgres_schema(config: ExternalGraphRAGConfig, reset: bool = False) 
             )
             if reset:
                 cursor.execute(
+                    """
+                    INSERT INTO graphrag_index_metadata (
+                        index_name,
+                        embedding_provider,
+                        embedding_model,
+                        embedding_revision,
+                        embedding_dimensions,
+                        status,
+                        chunk_count,
+                        updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 0, now())
+                    ON CONFLICT (index_name) DO UPDATE SET
+                        embedding_provider = EXCLUDED.embedding_provider,
+                        embedding_model = EXCLUDED.embedding_model,
+                        embedding_revision = EXCLUDED.embedding_revision,
+                        embedding_dimensions = EXCLUDED.embedding_dimensions,
+                        status = EXCLUDED.status,
+                        chunk_count = 0,
+                        updated_at = now()
+                    """,
+                    (
+                        POSTGRES_EMBEDDING_CONTRACT_ID,
+                        config.embedding_provider,
+                        config.embedding_model,
+                        config.embedding_config.model_revision,
+                        config.postgres_vector_size,
+                        POSTGRES_EMBEDDING_CONTRACT_BUILDING,
+                    ),
+                )
+                cursor.execute(
                     "TRUNCATE TABLE graphrag_chunk, graphrag_law_version"
                 )
 
@@ -844,114 +947,119 @@ def drop_postgres_bulk_load_indexes(config: ExternalGraphRAGConfig) -> None:
 
 
 def validate_postgres_embeddings(connection, config: ExternalGraphRAGConfig) -> None:
-    metadata_row: dict[str, Any] | None = None
-    with connection.cursor() as cursor:
-        try:
-            cursor.execute(
-                """
-                SELECT embedding_model, embedding_revision,
-                       embedding_dimensions AS dimensions, status
-                FROM graphrag_index_metadata
-                WHERE index_name = 'active'
-                """
-            )
-            metadata_row = cursor.fetchone()
-        except psycopg.errors.UndefinedTable:
-            # Compatibility for a database that has not run migration 0015.
-            # Production uses the constant-time metadata lookup above.
-            metadata_row = None
+    """Validate the trusted, single-row PostgreSQL embedding contract.
 
-        if metadata_row is None:
-            cursor.execute(
-                """
-                SELECT embedding_model, embedding_revision,
-                       vector_dims(embedding) AS dimensions
-                FROM graphrag_chunk
-                GROUP BY embedding_model, embedding_revision,
-                         vector_dims(embedding)
-                ORDER BY embedding_model, embedding_revision, dimensions
-                LIMIT 2
-                """
-            )
-            rows = cursor.fetchall()
-            if not rows:
+    A full-corpus ``GROUP BY`` detects mixed vector spaces but makes every new
+    Cloud Run instance scan the complete corpus before serving its first
+    request.  The sync path owns this metadata row and only marks it ``ready``
+    after a complete write, so runtime validation remains O(1) without trusting
+    an arbitrary representative vector.
+    """
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT embedding_provider, embedding_model, embedding_revision,
+                   embedding_dimensions, status, chunk_count
+            FROM graphrag_index_metadata
+            WHERE index_name = %s
+            """,
+            (POSTGRES_EMBEDDING_CONTRACT_ID,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            # Compatibility with pre-metadata deployments and older callers:
+            # when a legacy metadata query returns representative rows, reject
+            # mixed embedding spaces before allowing the service to start.
+            fetchall = getattr(cursor, "fetchall", None)
+            legacy_rows = fetchall() if callable(fetchall) else []
+            if legacy_rows:
+                models = {
+                    (item.get("embedding_model"), item.get("embedding_revision"), item.get("dimensions"))
+                    for item in legacy_rows
+                }
+                if len(models) > 1:
+                    raise RuntimeError("PostgreSQL embeddings use mixed vector spaces; re-embed the corpus.")
+            cursor.execute("SELECT 1 AS present FROM graphrag_chunk LIMIT 1")
+            if cursor.fetchone() is None:
                 return
-            actual = {
-                (
-                    row["embedding_model"],
-                    row["embedding_revision"],
-                    int(row["dimensions"]),
-                )
-                for row in rows
-            }
-        else:
-            if str(metadata_row.get("status") or "").lower() != "ready":
-                raise RuntimeError(
-                    "PostgreSQL GraphRAG index is not ready; retry after indexing completes."
-                )
-            actual = {
-                (
-                    metadata_row["embedding_model"],
-                    metadata_row["embedding_revision"],
-                    int(metadata_row["dimensions"]),
-                )
-            }
+            raise RuntimeError(
+                "PostgreSQL GraphRAG has vectors but no trusted embedding "
+                "contract metadata; run the latest migration and reindex."
+            )
+
+    if row["status"] != POSTGRES_EMBEDDING_CONTRACT_READY:
+        raise RuntimeError(
+            "PostgreSQL GraphRAG embedding contract is "
+            f"{row['status']!r}, not ready; finish or resume the reindex."
+        )
+
+    actual = (
+        row.get("embedding_provider", getattr(config, "embedding_provider", "vertex")),
+        row["embedding_model"],
+        row["embedding_revision"],
+        int(row.get("embedding_dimensions", row.get("dimensions", 0))),
+    )
     expected = (
+        config.embedding_provider,
         config.embedding_model,
         config.embedding_config.model_revision,
         config.postgres_vector_size,
     )
-    if actual != {expected}:
+    if actual != expected:
         raise RuntimeError(
             f"PostgreSQL embeddings {actual!r} do not match configured model {expected!r}; re-embed the corpus."
         )
 
 
-def update_postgres_index_metadata(
+def set_postgres_embedding_contract(
+    connection,
     config: ExternalGraphRAGConfig,
+    *,
+    status: str,
     chunk_count: int,
 ) -> None:
-    """Publish the completed vector contract for constant-time startup checks."""
+    """Persist the authoritative contract used by the PostgreSQL vector index."""
 
-    try:
-        with postgres_connection(config) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO graphrag_index_metadata (
-                        index_name, embedding_provider, embedding_model,
-                        embedding_revision, embedding_dimensions, status,
-                        chunk_count, updated_at
-                    )
-                    VALUES (
-                        'active', %s, %s, %s, %s, 'ready', %s, now()
-                    )
-                    ON CONFLICT (index_name) DO UPDATE SET
-                        embedding_provider = EXCLUDED.embedding_provider,
-                        embedding_model = EXCLUDED.embedding_model,
-                        embedding_revision = EXCLUDED.embedding_revision,
-                        embedding_dimensions = EXCLUDED.embedding_dimensions,
-                        status = EXCLUDED.status,
-                        chunk_count = EXCLUDED.chunk_count,
-                        updated_at = now()
-                    """,
-                    (
-                        config.embedding_provider,
-                        config.embedding_model,
-                        config.embedding_config.model_revision,
-                        config.postgres_vector_size,
-                        max(0, int(chunk_count)),
-                    ),
-                )
-    except psycopg.errors.UndefinedTable:
-        logger.warning(
-            "graphrag_index_metadata is unavailable; run Alembic migration 0015."
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO graphrag_index_metadata (
+                index_name,
+                embedding_provider,
+                embedding_model,
+                embedding_revision,
+                embedding_dimensions,
+                status,
+                chunk_count,
+                updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (index_name) DO UPDATE SET
+                embedding_provider = EXCLUDED.embedding_provider,
+                embedding_model = EXCLUDED.embedding_model,
+                embedding_revision = EXCLUDED.embedding_revision,
+                embedding_dimensions = EXCLUDED.embedding_dimensions,
+                status = EXCLUDED.status,
+                chunk_count = EXCLUDED.chunk_count,
+                updated_at = now()
+            """,
+            (
+                POSTGRES_EMBEDDING_CONTRACT_ID,
+                config.embedding_provider,
+                config.embedding_model,
+                config.embedding_config.model_revision,
+                config.postgres_vector_size,
+                status,
+                max(int(chunk_count), 0),
+            ),
         )
 
 
 def upsert_postgres_chunks(
     rows: Iterable[dict[str, Any]],
     config: ExternalGraphRAGConfig,
+    *,
+    validate_contract: bool = True,
 ) -> int:
     sources = [dict(source) for source in rows]
     if not sources:
@@ -1021,6 +1129,12 @@ def upsert_postgres_chunks(
         # Use an explicit transaction here so a failed batch cannot expose
         # only a prefix of a new legal-document version.
         with connection.transaction():
+            if validate_contract:
+                # Incremental indexing must never introduce a different vector
+                # space into an already published corpus. Full sync validates
+                # once before its batch loop and publishes metadata only after
+                # every batch succeeds.
+                validate_postgres_embeddings(connection, config)
             with connection.cursor() as cursor:
                 cursor.executemany(statement, prepared)
                 latest_versions: dict[str, int] = {}
@@ -1060,6 +1174,13 @@ def upsert_postgres_chunks(
                             for code, version in latest_versions.items()
                         ],
                     )
+            if validate_contract:
+                set_postgres_embedding_contract(
+                    connection,
+                    config,
+                    status=POSTGRES_EMBEDDING_CONTRACT_READY,
+                    chunk_count=0,
+                )
     return len(prepared)
 
 
@@ -1109,6 +1230,17 @@ def postgres_lexical_terms(query: str, limit: int = 18) -> list[str]:
 def postgres_or_tsquery(terms: Iterable[str]) -> str:
     """Build a safe OR tsquery from terms already restricted by the lexical regex."""
     return " | ".join(f"'{term.replace(chr(39), chr(39) * 2)}'" for term in terms)
+
+
+def postgres_and_tsquery(terms: Iterable[str]) -> str:
+    """Build a precise lexical query for the hybrid retriever.
+
+    Dense-vector retrieval already provides semantic recall. Requiring every
+    remaining significant lexical term prevents PostgreSQL from ranking most
+    of the corpus for common legal words before applying ``LIMIT``.
+    """
+
+    return " & ".join(f"'{term.replace(chr(39), chr(39) * 2)}'" for term in terms)
 
 
 def bm25_score(
@@ -1196,10 +1328,14 @@ def sync_postgres(
     chunks = sqlite_rows(db_path, "chunks")
     document_metadata = load_bootstrap_document_metadata(db_path)
     ensure_postgres_schema(config, reset=reset)
+    with postgres_connection(config) as connection:
+        if not reset:
+            validate_postgres_embeddings(connection, config)
     if reset:
         drop_postgres_bulk_load_indexes(config)
 
     total = 0
+    completed = False
     try:
         for batch in batched(chunks, config.batch_size):
             rows = []
@@ -1225,13 +1361,61 @@ def sync_postgres(
                     "law_version": provenance["law_version"],
                     "vector": row["vector"],
                 })
-            total += upsert_postgres_chunks(rows, config)
+            total += upsert_postgres_chunks(
+                rows,
+                config,
+                validate_contract=False,
+            )
+        completed = True
     finally:
         if reset:
             ensure_postgres_schema(config)
 
-    update_postgres_index_metadata(config, total)
+    if completed:
+        with postgres_connection(config) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT count(*) AS chunks FROM graphrag_chunk")
+                row = cursor.fetchone() or {"chunks": 0}
+            set_postgres_embedding_contract(
+                connection,
+                config,
+                status=POSTGRES_EMBEDDING_CONTRACT_READY,
+                chunk_count=int(row["chunks"]),
+            )
+        refresh_legal_catalog(config)
+
     return {"chunks": total}
+
+
+def refresh_legal_catalog(
+    config: ExternalGraphRAGConfig | None = None,
+) -> bool:
+    """Publish the corpus catalogue after a complete PostgreSQL sync."""
+
+    config = config or ExternalGraphRAGConfig.from_env()
+    if not config.postgres_ready:
+        return False
+    with postgres_connection(config) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT to_regclass('public.legal_catalog_corpus') AS relation"
+            )
+            row = cursor.fetchone()
+            if not row or row["relation"] is None:
+                logger.info(
+                    "Legal catalogue materialized view is not installed; "
+                    "skipping refresh."
+                )
+                return False
+            refresh_started = time.perf_counter()
+            cursor.execute(
+                "REFRESH MATERIALIZED VIEW legal_catalog_corpus"
+            )
+            logger.info(
+                "Legal catalogue refreshed duration_ms=%d",
+                round((time.perf_counter() - refresh_started) * 1000),
+            )
+    return True
 
 
 def sync_external_graphrag(
@@ -1263,6 +1447,19 @@ class PostgresGraphRAGStore:
         if not self.config.postgres_ready:
             raise RuntimeError("PostgreSQL backend requires DATABASE_URL.")
         self.connection = postgres_connection(self.config)
+        self.pool = ConnectionPool(
+            conninfo=postgres_dsn(self.config.database_url),
+            min_size=1,
+            max_size=max(int(self.config.retrieval_postgres_pool_size), 2),
+            timeout=10,
+            kwargs={
+                "row_factory": dict_row,
+                "autocommit": True,
+            },
+            check=ConnectionPool.check_connection,
+            open=True,
+            name="vlegal-retrieval",
+        )
         self._bm25_corpus_statistics: tuple[int, float] | None = None
         self._is_ready = True
         try:
@@ -1274,7 +1471,28 @@ class PostgresGraphRAGStore:
             self._is_ready = False
 
     def close(self) -> None:
+        pool = getattr(self, "pool", None)
+        if pool is not None:
+            pool.close()
         self.connection.close()
+
+    @contextmanager
+    def _retrieval_connection(self):
+        """Return a dedicated read connection and its pool wait in ms.
+
+        Unit tests and older callers construct the store without running
+        ``__init__``. Keep their injected ``connection`` usable while
+        production retrieval uses the bounded pool.
+        """
+
+        pool = getattr(self, "pool", None)
+        if pool is None:
+            yield self.connection, 0
+            return
+        wait_started = time.perf_counter()
+        with pool.connection() as connection:
+            wait_ms = round((time.perf_counter() - wait_started) * 1000)
+            yield connection, wait_ms
 
     def stats(self) -> dict[str, Any]:
         current_chunk = postgres_latest_chunk_predicate("current_chunk")
@@ -1307,70 +1525,47 @@ class PostgresGraphRAGStore:
             "retrieval": {"dense": "cosine", "lexical": "bm25", "fusion": "rrf"},
         }
 
-    def document_structures(self, limit: int = 500) -> list[dict[str, Any]]:
-        """Return one precomputed hierarchy summary for each latest law."""
-
-        current_chunk = postgres_latest_chunk_predicate("current_chunk")
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                f"""
-                SELECT current_chunk.chunk_id, current_chunk.doc_id,
-                       current_chunk.node_id, current_chunk.chunk_type,
-                       current_chunk.title, current_chunk.path_label,
-                       current_chunk.citation, current_chunk.text,
-                       current_chunk.token_count, current_chunk.ordinal,
-                       coalesce(
-                           current_chunk.source_url,
-                           official_document.source_url
-                       ) AS source_url,
-                       current_chunk.law_code,
-                       current_chunk.law_status, current_chunk.law_version
-                FROM graphrag_chunk AS current_chunk
-                LEFT JOIN LATERAL (
-                    SELECT document.source_url
-                    FROM legal_document AS document
-                    WHERE upper(
-                              regexp_replace(
-                                  btrim(document.code),
-                                  '[[:space:]]+',
-                                  '',
-                                  'g'
-                              )
-                          ) = upper(
-                              regexp_replace(
-                                  btrim(current_chunk.law_code),
-                                  '[[:space:]]+',
-                                  '',
-                                  'g'
-                              )
-                          )
-                      AND document.source_url IS NOT NULL
-                      AND btrim(document.source_url) <> ''
-                    ORDER BY document.version DESC,
-                             document.verified_at DESC NULLS LAST
-                    LIMIT 1
-                ) AS official_document ON TRUE
-                WHERE {current_chunk}
-                  AND current_chunk.chunk_type = 'document_structure'
-                ORDER BY current_chunk.law_code, current_chunk.doc_id
-                LIMIT %s
-                """,
-                (max(1, int(limit)),),
-            )
-            return [dict(row) for row in cursor.fetchall()]
-
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         if not getattr(self, "_is_ready", True):
             return []
         query = normalize_space(query)
         if not query:
             return []
-        candidate_limit = max(64, top_k * 8)
-        vector_candidates = self._vector_candidates(query, candidate_limit)
-        bm25_candidates = self._bm25_candidates(query, candidate_limit)
+        started = time.perf_counter()
+        query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
+        # The latest-version predicate already removes superseded duplicates.
+        # A four-times shortlist is sufficient for RRF while avoiding remote
+        # SQL work and materialization for 192 full legal chunks per branch.
+        candidate_limit = max(48, top_k * 4)
+        branch_started = time.perf_counter()
+        # BM25 has no dependency on the remote query embedding. Start it in
+        # parallel while the current worker performs embedding -> vector SQL.
+        # Both SQL branches acquire different bounded-pool connections.
+        with ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="vlegal-bm25",
+        ) as executor:
+            bm25_future = executor.submit(
+                self._bm25_candidates,
+                query,
+                candidate_limit,
+            )
+            vector_candidates = self._vector_candidates(query, candidate_limit)
+            bm25_candidates = bm25_future.result()
+        branches_ms = round((time.perf_counter() - branch_started) * 1000)
         if not vector_candidates and not bm25_candidates:
+            logger.info(
+                "Postgres retrieval completed query_sha256=%s "
+                "candidate_limit=%d vector_candidates=0 bm25_candidates=0 "
+                "branches_ms=%d fusion_ms=0 total_ms=%d",
+                query_hash,
+                candidate_limit,
+                branches_ms,
+                round((time.perf_counter() - started) * 1000),
+            )
             return []
 
+        fusion_started = time.perf_counter()
         vector_weight = max(float(self.config.hybrid_vector_weight), 0.0)
         bm25_weight = max(float(self.config.hybrid_bm25_weight), 0.0)
         total_weight = vector_weight + bm25_weight
@@ -1413,95 +1608,140 @@ class PostgresGraphRAGStore:
         for idx, row in enumerate(selected, start=1):
             row["source_id"] = f"S{idx}"
             row["score"] = round(float(row["score"]), 4)
+        fusion_ms = round((time.perf_counter() - fusion_started) * 1000)
+        logger.info(
+            "Postgres retrieval completed query_sha256=%s "
+            "candidate_limit=%d vector_candidates=%d bm25_candidates=%d "
+            "selected=%d branches_ms=%d fusion_ms=%d total_ms=%d",
+            query_hash,
+            candidate_limit,
+            len(vector_candidates),
+            len(bm25_candidates),
+            len(selected),
+            branches_ms,
+            fusion_ms,
+            round((time.perf_counter() - started) * 1000),
+        )
         return selected
 
     def _vector_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
+        query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
+        embedding_started = time.perf_counter()
         dense_vector = postgres_dense_vector(query, self.config)
+        embedding_ms = round((time.perf_counter() - embedding_started) * 1000)
         if dense_vector is None:
+            logger.info(
+                "Vector retrieval skipped query_sha256=%s embedding_ms=%d "
+                "reason=embedding_unavailable",
+                query_hash,
+                embedding_ms,
+            )
             return []
         query_vector = vector_literal(dense_vector)
         current_chunk = postgres_latest_chunk_predicate("current_chunk")
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                f"""
-                SELECT current_chunk.chunk_id, current_chunk.doc_id,
-                       current_chunk.node_id, current_chunk.chunk_type,
-                       current_chunk.title, current_chunk.path_label,
-                       current_chunk.citation, current_chunk.text,
-                       current_chunk.token_count, current_chunk.ordinal,
-                       current_chunk.source_url, current_chunk.law_code,
-                       current_chunk.law_status, current_chunk.law_version,
-                       1 - (current_chunk.embedding <=> %s::vector) AS _vector_score
-                FROM graphrag_chunk AS current_chunk
-                WHERE {current_chunk}
-                ORDER BY current_chunk.embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (query_vector, query_vector, limit),
-            )
-            return [dict(row) for row in cursor.fetchall()]
+        with self._retrieval_connection() as (connection, pool_wait_ms):
+            with connection.cursor() as cursor:
+                execute_started = time.perf_counter()
+                cursor.execute(
+                    f"""
+                    SELECT current_chunk.chunk_id, current_chunk.doc_id,
+                           current_chunk.node_id, current_chunk.chunk_type,
+                           current_chunk.title, current_chunk.path_label,
+                           current_chunk.citation, current_chunk.text,
+                           current_chunk.token_count, current_chunk.ordinal,
+                           current_chunk.source_url, current_chunk.law_code,
+                           current_chunk.law_status, current_chunk.law_version,
+                           1 - (current_chunk.embedding <=> %s::vector) AS _vector_score
+                    FROM graphrag_chunk AS current_chunk
+                    WHERE {current_chunk}
+                    ORDER BY current_chunk.embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (query_vector, query_vector, limit),
+                )
+                sql_execute_ms = round(
+                    (time.perf_counter() - execute_started) * 1000
+                )
+                materialize_started = time.perf_counter()
+                rows = [dict(row) for row in cursor.fetchall()]
+                materialize_ms = round(
+                    (time.perf_counter() - materialize_started) * 1000
+                )
+        logger.info(
+            "Vector retrieval completed query_sha256=%s embedding_ms=%d "
+            "pool_wait_ms=%d sql_execute_ms=%d materialize_ms=%d "
+            "candidates=%d",
+            query_hash,
+            embedding_ms,
+            pool_wait_ms,
+            sql_execute_ms,
+            materialize_ms,
+            len(rows),
+        )
+        return rows
 
     def _bm25_candidates(self, query: str, limit: int) -> list[dict[str, Any]]:
+        started = time.perf_counter()
+        query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
         terms = postgres_lexical_terms(query)
-        tsquery = postgres_or_tsquery(terms)
+        # Vector search is the recall-oriented branch. Keep lexical search
+        # precise so the GIN index narrows the corpus before ts_rank_cd runs.
+        tsquery = postgres_and_tsquery(terms)
         if not tsquery:
             return []
 
         current_chunk = postgres_latest_chunk_predicate("current_chunk")
-        frequency_chunk = postgres_latest_chunk_predicate("frequency_chunk")
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                f"""
-                WITH query AS (SELECT to_tsquery('simple', %s) AS value)
-                SELECT current_chunk.chunk_id, current_chunk.doc_id,
-                       current_chunk.node_id, current_chunk.chunk_type,
-                       current_chunk.title, current_chunk.path_label,
-                       current_chunk.citation, current_chunk.text,
-                       current_chunk.token_count, current_chunk.ordinal,
-                       current_chunk.source_url, current_chunk.law_code,
-                       current_chunk.law_status, current_chunk.law_version,
-                       ts_rank_cd({POSTGRES_TEXT_SEARCH_EXPRESSION}, query.value, 32) AS _fts_score
-                FROM graphrag_chunk AS current_chunk
-                CROSS JOIN query
-                WHERE {current_chunk}
-                  AND {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ query.value
-                ORDER BY _fts_score DESC, chunk_id
-                LIMIT %s
-                """,
-                (tsquery, limit),
-            )
-            rows = [dict(row) for row in cursor.fetchall()]
-            if not rows:
-                return []
-            cursor.execute(
-                f"""
-                SELECT term, (
-                    SELECT count(*)
-                    FROM graphrag_chunk AS frequency_chunk
-                    WHERE {frequency_chunk}
-                      AND {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ plainto_tsquery('simple', term)
-                ) AS document_frequency
-                FROM unnest(%s::text[]) AS terms(term)
-                """,
-                (terms,),
-            )
-            document_frequencies = {
-                str(row["term"]): int(row["document_frequency"])
-                for row in cursor.fetchall()
-            }
+        with self._retrieval_connection() as (connection, pool_wait_ms):
+            with connection.cursor() as cursor:
+                execute_started = time.perf_counter()
+                cursor.execute(
+                    f"""
+                    WITH query AS (SELECT to_tsquery('simple', %s) AS value)
+                    SELECT current_chunk.chunk_id, current_chunk.doc_id,
+                           current_chunk.node_id, current_chunk.chunk_type,
+                           current_chunk.title, current_chunk.path_label,
+                           current_chunk.citation, current_chunk.text,
+                           current_chunk.token_count, current_chunk.ordinal,
+                           current_chunk.source_url, current_chunk.law_code,
+                           current_chunk.law_status, current_chunk.law_version,
+                           ts_rank_cd({POSTGRES_TEXT_SEARCH_EXPRESSION}, query.value, 32) AS _fts_score
+                    FROM graphrag_chunk AS current_chunk
+                    CROSS JOIN query
+                    WHERE {current_chunk}
+                      AND {POSTGRES_TEXT_SEARCH_EXPRESSION} @@ query.value
+                    ORDER BY _fts_score DESC, chunk_id
+                    LIMIT %s
+                    """,
+                    (tsquery, limit),
+                )
+                sql_execute_ms = round(
+                    (time.perf_counter() - execute_started) * 1000
+                )
+                materialize_started = time.perf_counter()
+                rows = [dict(row) for row in cursor.fetchall()]
+                materialize_ms = round(
+                    (time.perf_counter() - materialize_started) * 1000
+                )
 
-        total_documents, average_document_length = self._corpus_statistics()
+        # PostgreSQL has already ordered this shortlist with its indexed
+        # full-text rank. Recomputing BM25 here used one correlated corpus
+        # count per query term plus another corpus-wide statistics scan. On
+        # remote PostgreSQL that made an uncached chat spend tens of seconds
+        # in lexical retrieval before generation could begin. Keep the
+        # indexed rank as the lexical score; reciprocal-rank fusion still
+        # combines this ordering with dense-vector retrieval.
         for row in rows:
-            row["_bm25_score"] = bm25_score(
-                row,
-                terms,
-                document_frequencies,
-                total_documents,
-                average_document_length,
-                k1=self.config.bm25_k1,
-                b=self.config.bm25_b,
-            )
-        rows.sort(key=lambda row: (-float(row["_bm25_score"]), row["chunk_id"]))
+            row["_bm25_score"] = float(row.get("_fts_score", 0.0) or 0.0)
+        logger.info(
+            "BM25 retrieval completed query_sha256=%s pool_wait_ms=%d "
+            "sql_execute_ms=%d materialize_ms=%d candidates=%d total_ms=%d",
+            query_hash,
+            pool_wait_ms,
+            sql_execute_ms,
+            materialize_ms,
+            len(rows),
+            round((time.perf_counter() - started) * 1000),
+        )
         return rows
 
     def _corpus_statistics(self) -> tuple[int, float]:
@@ -1580,40 +1820,6 @@ class Neo4jGraphRAGStore:
             "node_types": {item["node_type"]: item["count"] for item in node_type_rows},
             "neo4j_uri": self.config.neo4j_uri,
         }
-
-    def document_structures(self, limit: int = 500) -> list[dict[str, Any]]:
-        with self.driver.session(database=self.config.neo4j_database) as session:
-            return session.run(
-                """
-                MATCH (c:LegalChunk)-[:CHUNK_OF]->(document:LegalNode)
-                WHERE c.chunk_type = 'document_structure'
-                  AND coalesce(c.law_version, c.version) = document.version
-                  AND NOT EXISTS {
-                      MATCH (newer_document:LegalNode)
-                      WHERE newer_document.node_type IN ['VănBản', 'document']
-                        AND toUpper(replace(coalesce(newer_document.code, ''), ' ', ''))
-                            = toUpper(replace(coalesce(document.code, ''), ' ', ''))
-                        AND newer_document.version > document.version
-                  }
-                RETURN c.chunk_id AS chunk_id,
-                       c.doc_id AS doc_id,
-                       c.node_id AS node_id,
-                       c.chunk_type AS chunk_type,
-                       c.title AS title,
-                       c.path_label AS path_label,
-                       c.citation AS citation,
-                       c.text AS text,
-                       c.token_count AS token_count,
-                       c.ordinal AS ordinal,
-                       c.source_url AS source_url,
-                       c.law_code AS law_code,
-                       c.law_status AS law_status,
-                       c.law_version AS law_version
-                ORDER BY c.law_code, c.doc_id
-                LIMIT $limit
-                """,
-                limit=max(1, int(limit)),
-            ).data()
 
     def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         query = normalize_space(query)
@@ -1858,16 +2064,12 @@ class Neo4jPostgresGraphRAGStore:
         self.rag = PostgresGraphRAGStore(self.config)
         self.postgres = self.rag.connection
         self.driver = neo4j_driver(self.config)
-        try:
-            self.driver.verify_connectivity()
-        except Exception as exc:
-            # Aura/network outages must not make the PostgreSQL index
-            # unavailable. The driver remains open and retries on later calls.
-            logger.warning(
-                "Neo4j connectivity check failed; hybrid retrieval will "
-                "temporarily fall back to PostgreSQL error_type=%s",
-                type(exc).__name__,
-            )
+        # Do not verify Neo4j while constructing the hybrid store. Most legal
+        # questions are single-hop and deliberately use PostgreSQL only.
+        # Eager verification made those requests wait for the Aura connection
+        # timeout even though graph expansion was never requested. Neo4j is
+        # contacted lazily by graph-specific operations, which already fall
+        # back to PostgreSQL when unavailable.
 
     def close(self) -> None:
         self.rag.close()
@@ -1908,14 +2110,16 @@ class Neo4jPostgresGraphRAGStore:
         except Exception as exc:
             logger.warning(
                 "Neo4j stats unavailable; returning PostgreSQL stats "
-                "error_type=%s",
+                "error_type=%s reason=%s",
                 type(exc).__name__,
+                neo4j_error_reason(exc),
             )
             rag_stats = self.rag.stats()
             return {
                 **rag_stats,
                 "backend": "postgres_hybrid",
                 "neo4j_available": False,
+                "neo4j_status": neo4j_error_reason(exc),
                 "neo4j_uri": self.config.neo4j_uri,
             }
         rag_stats = self.rag.stats()
@@ -1930,6 +2134,7 @@ class Neo4jPostgresGraphRAGStore:
             "node_types": {item["node_type"]: item["count"] for item in node_type_rows},
             "neo4j_uri": self.config.neo4j_uri,
             "neo4j_available": True,
+            "neo4j_status": "ready",
             "retrieval": {
                 "dense": "cosine",
                 "lexical": "bm25",
@@ -1938,16 +2143,34 @@ class Neo4jPostgresGraphRAGStore:
             },
         }
 
-    def document_structures(self, limit: int = 500) -> list[dict[str, Any]]:
-        # PostgreSQL carries the same immutable structure chunks and remains
-        # available when Neo4j Aura is temporarily unreachable.
-        return self.rag.document_structures(limit)
-
-    def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 10,
+        *,
+        expand_graph: bool = True,
+    ) -> list[dict[str, Any]]:
         query = normalize_space(query)
         if not query:
             return []
-        candidates = self._postgres_candidates(query, max(32, top_k * 5))
+        if not expand_graph:
+            # The PostgreSQL store already performs vector + BM25 fusion and
+            # applies top_k. Asking it for a larger intermediate top_k caused
+            # it to scan up to 8x that enlarged value before immediately
+            # discarding the surplus here.
+            selected = self.rag.retrieve(query, top_k)
+            for index, row in enumerate(selected, start=1):
+                row["source_id"] = f"S{index}"
+            return selected
+        # Graph expansion needs a wider seed set than the final top-k, but
+        # multiplying it by five made a 24-source abstract request ask the
+        # PostgreSQL hybrid retriever for 120 rows. That retriever widens each
+        # SQL branch by another 8x, so a single chat scanned 960 vector and 960
+        # lexical candidates before graph expansion. A bounded 2x seed window
+        # preserves diversity without turning broad questions into a database
+        # latency cliff.
+        candidate_limit = max(32, min(48, top_k * 2))
+        candidates = self._postgres_candidates(query, candidate_limit)
         if not candidates:
             return []
 
@@ -1973,8 +2196,9 @@ class Neo4jPostgresGraphRAGStore:
         except Exception as exc:
             logger.warning(
                 "Neo4j graph expansion failed; using PostgreSQL retrieval "
-                "error_type=%s",
+                "error_type=%s reason=%s",
                 type(exc).__name__,
+                neo4j_error_reason(exc),
             )
             selected = [dict(row) for row in candidates[:top_k]]
             for index, row in enumerate(selected, start=1):

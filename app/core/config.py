@@ -103,6 +103,7 @@ class Settings(BaseSettings):
     embedding_location: str = "global"
     embedding_max_concurrency: int = Field(default=8, ge=1, le=64)
     embedding_batch_size: int = Field(default=20, ge=1, le=100)
+    embedding_max_items_per_minute: int = Field(default=0, ge=0, le=100_000)
     embedding_timeout_seconds: int = Field(default=60, ge=5, le=600)
     embedding_max_retries: int = Field(default=3, ge=1, le=10)
     embedding_auto_truncate: bool = True
@@ -112,6 +113,7 @@ class Settings(BaseSettings):
         ge=0,
         le=10_000,
     )
+    embedding_vertex_max_queue_wait_seconds: float = Field(default=0, ge=0, le=600)
 
     tavily_api_key: str = ""
     tavily_search_depth: Literal["basic", "advanced"] = "advanced"

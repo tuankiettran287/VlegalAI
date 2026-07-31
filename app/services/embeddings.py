@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import math
 import os
 import random
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -33,6 +36,7 @@ GEMINI_API_SERVICE = "generativelanguage.googleapis.com"
 RETRYABLE_STATUS_CODES = {408, 417, 429, 500, 502, 503, 504}
 VERTEX_LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 EMBEDDING_PROVIDERS = {"vertex", "gemini-api"}
+LOGGER = logging.getLogger(__name__)
 
 
 class EmbeddingModelError(RuntimeError):
@@ -47,7 +51,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def parse_vertex_locations(value: Any) -> tuple[str, ...]:
-    """Parse an ordered, de-duplicated Vertex location pool."""
+    """Parse an ordered, de-duplicated Vertex AI location pool."""
 
     if value is None:
         return ()
@@ -74,19 +78,21 @@ class EmbeddingConfig:
     provider: str = "vertex"
     model: str = DEFAULT_EMBEDDING_MODEL
     project_id: str = ""
-    location: str = "global"
+    location: str = "asia-southeast1"
     credentials_path: str = str(PROJECT_ROOT / "env.json")
     use_adc: bool = False
     api_key: str = field(default="", repr=False)
     dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS
     max_concurrency: int = 8
     batch_size: int = 20
+    max_items_per_minute: int = 0
     timeout_seconds: float = 60.0
     max_retries: int = 3
     auto_truncate: bool = True
     data_policy: str = "redact"
     vertex_locations: tuple[str, ...] = ()
     vertex_requests_per_minute: float = 0.0
+    vertex_max_queue_wait_seconds: float = 0.0
 
     @classmethod
     def from_env(cls) -> "EmbeddingConfig":
@@ -96,7 +102,7 @@ class EmbeddingConfig:
             project_id=os.getenv("GEMINI_PROJECT_ID", ""),
             location=os.getenv(
                 "EMBEDDING_LOCATION",
-                "global",
+                "asia-southeast1",
             ),
             credentials_path=os.getenv(
                 "GEMINI_CREDENTIALS_PATH",
@@ -109,6 +115,9 @@ class EmbeddingConfig:
             ),
             max_concurrency=int(os.getenv("EMBEDDING_MAX_CONCURRENCY", "8")),
             batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "20")),
+            max_items_per_minute=int(
+                os.getenv("EMBEDDING_MAX_ITEMS_PER_MINUTE", "0")
+            ),
             timeout_seconds=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "60")),
             max_retries=int(os.getenv("EMBEDDING_MAX_RETRIES", "3")),
             auto_truncate=_env_bool("EMBEDDING_AUTO_TRUNCATE", True),
@@ -120,6 +129,9 @@ class EmbeddingConfig:
             ),
             vertex_requests_per_minute=float(
                 os.getenv("EMBEDDING_VERTEX_REQUESTS_PER_MINUTE", "0")
+            ),
+            vertex_max_queue_wait_seconds=float(
+                os.getenv("EMBEDDING_VERTEX_MAX_QUEUE_WAIT_SECONDS", "0")
             ),
         )
 
@@ -173,9 +185,16 @@ class EmbeddingConfig:
             )
             and 128 <= self.dimensions <= 3072
             and self.max_concurrency >= 1
-            and 1 <= self.batch_size <= 100
+            and 1 <= self.batch_size <= 250
+            and self.max_items_per_minute >= 0
+            and (
+                provider == "vertex"
+                or self.max_items_per_minute == 0
+                or self.batch_size <= self.max_items_per_minute
+            )
             and self.timeout_seconds > 0
             and self.max_retries >= 1
+            and self.vertex_max_queue_wait_seconds >= 0
             and self.data_policy in {"allow", "redact", "deny"}
             and credentials_configured
         )
@@ -195,6 +214,7 @@ def embedding_config_from_settings(settings: Any) -> EmbeddingConfig:
         dimensions=settings.postgres_vector_size,
         max_concurrency=settings.embedding_max_concurrency,
         batch_size=settings.embedding_batch_size,
+        max_items_per_minute=settings.embedding_max_items_per_minute,
         timeout_seconds=settings.embedding_timeout_seconds,
         max_retries=settings.embedding_max_retries,
         auto_truncate=settings.embedding_auto_truncate,
@@ -204,6 +224,9 @@ def embedding_config_from_settings(settings: Any) -> EmbeddingConfig:
         ),
         vertex_requests_per_minute=(
             settings.embedding_vertex_requests_per_minute
+        ),
+        vertex_max_queue_wait_seconds=(
+            settings.embedding_vertex_max_queue_wait_seconds
         ),
     )
 
@@ -231,6 +254,9 @@ class VertexAIEmbeddingService:
             )
         }
         self._vertex_ready = False
+        self._rate_lock = threading.Lock()
+        self._rate_events: deque[tuple[float, int]] = deque()
+        self._rate_total = 0
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(config.timeout_seconds, connect=15.0),
@@ -364,7 +390,7 @@ class VertexAIEmbeddingService:
         return self._predict_url_for_location(self.config.location.strip())
 
     def _reserve_vertex_location(self) -> str:
-        """Reserve one location while respecting its configured request rate."""
+        """Reserve one endpoint using a per-region request-rate budget."""
 
         locations = self._vertex_locations
         rate = self.config.vertex_requests_per_minute
@@ -387,6 +413,14 @@ class VertexAIEmbeddingService:
 
                 next_ready = min(self._location_next_ready.values())
                 delay = max(next_ready - now, 0.001)
+                max_queue_wait = (
+                    self.config.vertex_max_queue_wait_seconds
+                )
+                if max_queue_wait > 0 and delay > max_queue_wait:
+                    raise EmbeddingModelError(
+                        "Vertex AI embedding rate queue is busy; "
+                        "falling back to lexical retrieval."
+                    )
             time.sleep(delay)
 
     def _gemini_api_url(self, action: str) -> str:
@@ -449,6 +483,7 @@ class VertexAIEmbeddingService:
         response: httpx.Response,
         *,
         expected_count: int,
+        texts: list[str],
     ) -> list[list[float]]:
         try:
             payload = response.json()
@@ -463,6 +498,23 @@ class VertexAIEmbeddingService:
             raise EmbeddingModelError(
                 "Vertex AI embedding response has an invalid structure."
             ) from exc
+        for index, (prediction, text) in enumerate(
+            zip(predictions, texts, strict=True)
+        ):
+            statistics = prediction.get("embeddings", {}).get(
+                "statistics",
+                {},
+            )
+            if not isinstance(statistics, dict):
+                continue
+            if statistics.get("truncated") is True:
+                LOGGER.warning(
+                    "Vertex AI truncated embedding input "
+                    "index=%d token_count=%s content_sha256=%s",
+                    index,
+                    statistics.get("token_count", "unknown"),
+                    hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                )
         return [
             self._normalize_vector(values, provider_label="Vertex AI")
             for values in values_list
@@ -531,15 +583,23 @@ class VertexAIEmbeddingService:
     ) -> list[list[float]]:
         if not texts:
             return []
+        request_started = time.perf_counter()
+        auth_ms = 0
+        queue_ms = 0
+        http_ms = 0
+        parse_ms = 0
+        credential_refresh = False
+        selected_location = ""
         last_error: EmbeddingModelError | None = None
         force_refresh = False
+        prepared_texts = [self._prepare_text(text) for text in texts]
         payload = {
             "instances": [
                 {
-                    "content": self._prepare_text(text),
+                    "content": text,
                     "task_type": task_type,
                 }
-                for text in texts
+                for text in prepared_texts
             ],
             "parameters": {
                 "autoTruncate": self.config.auto_truncate,
@@ -548,10 +608,33 @@ class VertexAIEmbeddingService:
         }
         for attempt in range(self.config.max_retries):
             response: httpx.Response | None = None
+            # New deployments use a per-region request budget. Preserve the
+            # legacy single-endpoint limiter when no pool/rate is configured.
+            if (
+                not self.config.vertex_locations
+                and self.config.vertex_requests_per_minute <= 0
+            ):
+                self._throttle_items(1)
+            auth_started = time.perf_counter()
+            credentials = self._ensure_credentials()
+            credential_refresh = (
+                credential_refresh
+                or force_refresh
+                or not credentials.valid
+            )
             token = self._access_token(force_refresh=force_refresh)
+            auth_ms += round(
+                (time.perf_counter() - auth_started) * 1000
+            )
+            queue_started = time.perf_counter()
             location = self._reserve_vertex_location()
+            selected_location = location
+            queue_ms += round(
+                (time.perf_counter() - queue_started) * 1000
+            )
             force_refresh = False
             try:
+                http_started = time.perf_counter()
                 response = self._client.post(
                     self._predict_url_for_location(location),
                     headers={
@@ -559,6 +642,9 @@ class VertexAIEmbeddingService:
                         "Content-Type": "application/json; charset=utf-8",
                     },
                     json=payload,
+                )
+                http_ms += round(
+                    (time.perf_counter() - http_started) * 1000
                 )
             except httpx.HTTPError as exc:
                 last_error = EmbeddingModelError(
@@ -568,14 +654,54 @@ class VertexAIEmbeddingService:
                     raise last_error from exc
             else:
                 if response.status_code == 200:
-                    return self._parse_vertex_vectors(
+                    parse_started = time.perf_counter()
+                    vectors = self._parse_vertex_vectors(
                         response,
                         expected_count=len(texts),
+                        texts=prepared_texts,
                     )
+                    parse_ms += round(
+                        (time.perf_counter() - parse_started) * 1000
+                    )
+                    if task_type == "RETRIEVAL_QUERY":
+                        LOGGER.info(
+                            "Vertex embedding completed task_type=%s "
+                            "location=%s input_count=%d attempts=%d "
+                            "credential_refresh=%s auth_ms=%d queue_ms=%d "
+                            "http_ms=%d parse_ms=%d total_ms=%d",
+                            task_type,
+                            selected_location,
+                            len(texts),
+                            attempt + 1,
+                            credential_refresh,
+                            auth_ms,
+                            queue_ms,
+                            http_ms,
+                            parse_ms,
+                            round(
+                                (time.perf_counter() - request_started)
+                                * 1000
+                            ),
+                        )
+                    return vectors
                 last_error = EmbeddingModelError(
                     f"Vertex AI embedding returned HTTP {response.status_code}: "
                     f"{self._response_detail(response)}"
                 )
+                if response.status_code == 400 and len(texts) > 1:
+                    # Vertex also enforces a request-wide token ceiling.
+                    # Split oversized batches while preserving input order.
+                    midpoint = len(texts) // 2
+                    return (
+                        self._request_vertex_batch(
+                            texts[:midpoint],
+                            task_type,
+                        )
+                        + self._request_vertex_batch(
+                            texts[midpoint:],
+                            task_type,
+                        )
+                    )
                 if (
                     response.status_code == 401
                     and attempt + 1 < self.config.max_retries
@@ -606,6 +732,39 @@ class VertexAIEmbeddingService:
             "outputDimensionality": self.config.dimensions,
         }
 
+    def _throttle_items(self, item_count: int) -> None:
+        limit = self.config.max_items_per_minute
+        if limit <= 0:
+            return
+        if item_count > limit:
+            raise EmbeddingModelError(
+                "One embedding request cannot exceed "
+                "EMBEDDING_MAX_ITEMS_PER_MINUTE."
+            )
+
+        while True:
+            wait_seconds = 0.0
+            with self._rate_lock:
+                now = time.monotonic()
+                cutoff = now - 60.0
+                while (
+                    self._rate_events
+                    and self._rate_events[0][0] <= cutoff
+                ):
+                    _, expired_count = self._rate_events.popleft()
+                    self._rate_total -= expired_count
+
+                if self._rate_total + item_count <= limit:
+                    self._rate_events.append((now, item_count))
+                    self._rate_total += item_count
+                    return
+
+                wait_seconds = max(
+                    self._rate_events[0][0] + 60.0 - now,
+                    0.01,
+                )
+            time.sleep(wait_seconds)
+
     def _request_gemini_batch(
         self,
         texts: list[str],
@@ -624,6 +783,7 @@ class VertexAIEmbeddingService:
 
         for attempt in range(self.config.max_retries):
             response: httpx.Response | None = None
+            self._throttle_items(len(requests))
             try:
                 response = self._client.post(
                     self._gemini_api_url(action),
@@ -675,53 +835,27 @@ class VertexAIEmbeddingService:
         del show_progress
         if not texts:
             return []
-        if self._provider == "gemini-api":
-            batches = [
-                texts[offset : offset + self.config.batch_size]
-                for offset in range(0, len(texts), self.config.batch_size)
-            ]
-            if len(batches) == 1 or self.config.max_concurrency == 1:
-                return [
-                    vector
-                    for batch in batches
-                    for vector in self._request_gemini_batch(batch, task_type)
-                ]
-            with ThreadPoolExecutor(
-                max_workers=min(self.config.max_concurrency, len(batches))
-            ) as executor:
-                batch_vectors = list(
-                    executor.map(
-                        lambda batch: self._request_gemini_batch(
-                            batch,
-                            task_type,
-                        ),
-                        batches,
-                    )
-                )
-            return [
-                vector
-                for vectors in batch_vectors
-                for vector in vectors
-            ]
         batches = [
             texts[offset : offset + self.config.batch_size]
             for offset in range(0, len(texts), self.config.batch_size)
         ]
+        request_batch = (
+            self._request_gemini_batch
+            if self._provider == "gemini-api"
+            else self._request_vertex_batch
+        )
         if len(batches) == 1 or self.config.max_concurrency == 1:
             return [
                 vector
                 for batch in batches
-                for vector in self._request_vertex_batch(batch, task_type)
+                for vector in request_batch(batch, task_type)
             ]
         with ThreadPoolExecutor(
             max_workers=min(self.config.max_concurrency, len(batches))
         ) as executor:
             batch_vectors = list(
                 executor.map(
-                    lambda batch: self._request_vertex_batch(
-                        batch,
-                        task_type,
-                    ),
+                    lambda batch: request_batch(batch, task_type),
                     batches,
                 )
             )

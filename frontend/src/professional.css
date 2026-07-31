@@ -553,6 +553,13 @@ main:focus-visible {
   grid-column: 1;
 }
 
+/* Effort selection was removed from the public chat flow. The backend keeps
+   the fast policy for compatibility with older clients. */
+.effort-control,
+.effort-description {
+  display: none !important;
+}
+
 .composer-home .effort-options {
   width: fit-content;
   padding: 2px;

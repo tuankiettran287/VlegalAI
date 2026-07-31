@@ -205,14 +205,22 @@ export type ChatResponse = {
   temporary: boolean;
   cache_hit: boolean;
   cache_similarity: number | null;
-  cache_mode: "miss" | "exact" | "semantic_draft";
+  cache_mode:
+    | "miss"
+    | "exact"
+    | "semantic_draft"
+    | "scope_clarification"
+    | "catalog"
+    | "greeting"
+    | "unsupported_official_catalog"
+    | "injection_blocked";
   effort: ChatEffort;
 };
 
 export function askLegalQuestion(
   message: string,
   conversationId?: string | null,
-  effort: ChatEffort = "medium",
+  effort: ChatEffort = "instant",
   options: {
     regenerateFromMessageId?: string | null;
   } = {},

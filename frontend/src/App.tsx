@@ -547,7 +547,9 @@ function ChatPage({
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [effort, setEffort] = useState<ChatEffort>("medium");
+  // Chat always uses the fast, citation-safe policy. Keep the request field
+  // only for backwards compatibility with older API deployments.
+  const [effort, setEffort] = useState<ChatEffort>("instant");
   const [loading, setLoading] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState("");
@@ -646,7 +648,7 @@ function ChatPage({
     if (!trimmed || loading || loadingConversationId) return;
     setError("");
     setLoading(true);
-    const submittedEffort = effort;
+    const submittedEffort: ChatEffort = "instant";
     const pendingCopy: Record<ChatEffort, string> = {
       instant: "Thinking · Instant…",
       medium: "Thinking · Medium…",

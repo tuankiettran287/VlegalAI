@@ -70,6 +70,43 @@ class VerificationReport(BaseModel):
     note: str = ""
 
 
+class LegalCatalogDocument(BaseModel):
+    law_code_normalized: str
+    code: str
+    title: str
+    document_type: str
+    issuer: str = ""
+    source_url: str | None = None
+    corpus_status: str
+    resolved_status: str
+    status_source: str
+    status_conflict: bool = False
+    metadata_verified: bool = False
+    effective_from: datetime | None = None
+    effective_to: datetime | None = None
+    replaced_by_code: str | None = None
+    verified_at: datetime | None = None
+    law_version: int | None = None
+    chunk_count: int = 0
+    indexed_at: datetime | None = None
+    refreshed_at: datetime | None = None
+
+
+class LegalCatalogList(BaseModel):
+    items: list[LegalCatalogDocument] = Field(default_factory=list)
+    total: int
+    page: int
+    page_size: int
+
+
+class LegalCatalogStats(BaseModel):
+    total: int
+    by_type: dict[str, int] = Field(default_factory=dict)
+    by_status: dict[str, int] = Field(default_factory=dict)
+    metadata_quality: dict[str, int] = Field(default_factory=dict)
+    as_of: datetime | None = None
+
+
 class ConversationCreate(BaseModel):
     title: str = Field(default="Cuộc trò chuyện mới", min_length=1, max_length=220)
 
@@ -116,10 +153,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=2, max_length=5000)
     conversation_id: uuid.UUID | None = None
     regenerate_from_message_id: uuid.UUID | None = None
-    effort: ChatEffort = Field(
-        default="medium",
-        description="Answer depth: instant is fastest, medium is balanced, high is most thorough.",
-    )
+    effort: ChatEffort = Field(default="medium", description="Deprecated compatibility field; new clients send instant.")
     history: list[ChatTurn] = Field(
         default_factory=list,
         max_length=12,
@@ -130,15 +164,24 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     conversation_id: uuid.UUID | None = None
     message_id: uuid.UUID
-    replaces_message_id: uuid.UUID | None = None
     answer: str
     sources: list[SourceOut]
     verification: VerificationReport
     temporary: bool = False
     cache_hit: bool = False
     cache_similarity: float | None = None
-    cache_mode: Literal["miss", "exact", "semantic_draft"] = "miss"
-    effort: ChatEffort = "medium"
+    replaces_message_id: uuid.UUID | None = None
+    cache_mode: Literal[
+        "miss",
+        "exact",
+        "semantic_draft",
+        "scope_clarification",
+        "catalog",
+        "greeting",
+        "unsupported_official_catalog",
+        "injection_blocked",
+    ] = "miss"
+    effort: ChatEffort = "instant"
 
 
 class ChatAnswerFeedbackRequest(BaseModel):
@@ -158,6 +201,7 @@ class ChatAnswerFeedbackOut(BaseModel):
     message_id: uuid.UUID
     rating: Literal["good", "bad"]
     regeneration_available: bool = False
+
 
 
 class DraftContractRequest(BaseModel):

@@ -8,8 +8,11 @@ _GREETING_LANGUAGES = {
     # Vietnamese
     "xin chào": "vi",
     "xin chao": "vi",
+    "xin cho": "vi",
+    "xinchao": "vi",
     "chào": "vi",
     "chao": "vi",
+    "cho": "vi",
     "chào bạn": "vi",
     "chao ban": "vi",
     "chào buổi sáng": "vi",
@@ -19,6 +22,7 @@ _GREETING_LANGUAGES = {
     "chào buổi tối": "vi",
     "chao buoi toi": "vi",
     "alo": "vi",
+    "alô": "vi",
     # English
     "hi": "en",
     "hello": "en",
@@ -219,7 +223,7 @@ def greeting_response(value: str, preferred_name: str) -> str | None:
     if language is None:
         return None
     template = _GREETING_RESPONSES.get(language, _GREETING_RESPONSES["en"])
-    return template.format(name=preferred_name.strip())
+    return template.format(name=preferred_name.strip() or "bạn")
 
 
 __all__ = ["detect_greeting_language", "greeting_response"]

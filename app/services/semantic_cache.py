@@ -28,7 +28,7 @@ from app.services.embeddings import (
 )
 
 
-LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v5-explanatory-chatbot"
+LEGAL_ANSWER_PROMPT_VERSION = "legal-answer-v6-concise-public-cache"
 _PRIVATE_CONTEXT_RE = re.compile(
     r"\b("
     r"tôi|mình|chúng tôi|của tôi|của mình|công ty tôi|gia đình tôi|"
@@ -45,13 +45,8 @@ _PUBLIC_LEGAL_RE = re.compile(
     r"\b("
     r"pháp luật|quy định|bộ luật|luật|nghị định|thông tư|điều kiện|"
     r"thủ tục|hồ sơ|thời hạn|mức phạt|xử phạt|cơ quan|nghĩa vụ|"
-    r"quyền|được phép|hiệu lực"
+    r"quyền|được phép|hiệu lực|hợp đồng|chấm dứt|lao động"
     r")\b",
-    re.IGNORECASE,
-)
-_ORGANIZATION_CONTEXT_RE = re.compile(
-    r"\b(?:công ty|doanh nghiệp|hộ kinh doanh|tập đoàn|ngân hàng|"
-    r"hợp tác xã|văn phòng luật|chi nhánh|đơn vị sử dụng lao động)\b",
     re.IGNORECASE,
 )
 _PERSON_TITLE_RE = re.compile(
@@ -94,7 +89,12 @@ _PUBLIC_ACRONYMS = {
 def _contains_likely_private_entity(query: str) -> bool:
     """Conservatively exclude named people/organizations from answer caching."""
 
-    if _ORGANIZATION_CONTEXT_RE.search(query) or _PERSON_TITLE_RE.search(query):
+    # Generic actor words such as "doanh nghiệp" and "người lao động" are
+    # common in public legal questions. Named organizations are already
+    # rejected by redact_sensitive_text() above and by the proper-name scan
+    # below, so treating every generic organization noun as private disabled
+    # the cache for a large share of ordinary labour-law questions.
+    if _PERSON_TITLE_RE.search(query):
         return True
 
     words = re.findall(r"[^\W\d_]+", query, flags=re.UNICODE)
@@ -207,7 +207,7 @@ class CacheLookup:
 
 
 class SemanticAnswerCacheService:
-    """Per-user/guest cache restricted to context-free public legal questions."""
+    """Scoped cache restricted to context-free public legal questions."""
 
     def __init__(
         self,
@@ -247,41 +247,13 @@ class SemanticAnswerCacheService:
             exact_match=exact_match,
         )
 
-    async def lookup_exact(self, query: str, *, scope: str) -> CacheLookup:
-        """Look up only an identical question without requesting an embedding."""
-
-        if not scope.strip():
-            raise ValueError("Semantic answer cache scope must not be blank.")
-        scope_hash = hashlib.sha256(scope.encode("utf-8")).hexdigest()
-        normalized_query = normalize_public_query(query)
-        query_hash = hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
-        now = datetime.now(UTC)
-        async with SessionFactory() as db:
-            exact = await db.scalar(
-                select(LegalAnswerCache).where(
-                    LegalAnswerCache.cache_scope_hash == scope_hash,
-                    LegalAnswerCache.query_hash == query_hash,
-                    LegalAnswerCache.expires_at > now,
-                    LegalAnswerCache.model_name == self.settings.gemini_model,
-                    LegalAnswerCache.prompt_version == LEGAL_ANSWER_PROMPT_VERSION,
-                    LegalAnswerCache.embedding_model == self.embedding_config.model,
-                    LegalAnswerCache.embedding_revision
-                    == self.embedding_config.model_revision,
-                )
-            )
-        return CacheLookup(
-            scope_hash=scope_hash,
-            query_hash=query_hash,
-            normalized_query=normalized_query,
-            embedding=None,
-            hit=(
-                self._cached_answer(exact, 1.0, exact_match=True)
-                if exact
-                else None
-            ),
-        )
-
-    async def lookup(self, query: str, *, scope: str) -> CacheLookup:
+    async def lookup(
+        self,
+        query: str,
+        *,
+        scope: str,
+        allow_semantic: bool = True,
+    ) -> CacheLookup:
         if not scope.strip():
             raise ValueError("Semantic answer cache scope must not be blank.")
         scope_hash = hashlib.sha256(scope.encode("utf-8")).hexdigest()
@@ -312,6 +284,15 @@ class SemanticAnswerCacheService:
                     embedding=None,
                     hit=self._cached_answer(exact, 1.0, exact_match=True),
                 )
+
+        if not allow_semantic:
+            return CacheLookup(
+                scope_hash=scope_hash,
+                query_hash=query_hash,
+                normalized_query=normalized_query,
+                embedding=None,
+                hit=None,
+            )
 
         try:
             embedding = await run_in_threadpool(
@@ -362,13 +343,22 @@ class SemanticAnswerCacheService:
         answer: str,
         sources: list[dict[str, Any]],
         verification: dict[str, Any],
+        *,
+        embed_missing: bool = True,
     ) -> None:
         embedding = lookup.embedding
         if embedding is None:
-            embedding = await run_in_threadpool(
-                self.embeddings.embed_similarity,
-                lookup.normalized_query,
-            )
+            if embed_missing:
+                embedding = await run_in_threadpool(
+                    self.embeddings.embed_similarity,
+                    lookup.normalized_query,
+                )
+            else:
+                # A zero vector is intentionally not indexed by pgvector's
+                # cosine HNSW index. The row remains immediately reusable by
+                # its exact query hash without spending another scarce Vertex
+                # embedding request or competing with the next chat query.
+                embedding = [0.0] * self.embedding_config.dimensions
         now = datetime.now(UTC)
         values = {
             "id": uuid.uuid4(),
@@ -437,35 +427,6 @@ class SemanticAnswerCacheService:
             await db.execute(
                 update(LegalAnswerCache)
                 .where(LegalAnswerCache.id == cache_id)
-                .values(expires_at=func.now(), updated_at=func.now())
-            )
-            await db.commit()
-
-    async def invalidate_feedback_answer(
-        self,
-        query: str,
-        answer: str,
-        *,
-        scope: str,
-    ) -> None:
-        """Expire exact and semantically reused copies of a rejected answer."""
-
-        normalized_query = normalize_public_query(query)
-        scope_hash = hashlib.sha256(scope.encode("utf-8")).hexdigest()
-        query_hash = hashlib.sha256(
-            normalized_query.encode("utf-8")
-        ).hexdigest()
-        answer_hash = hashlib.sha256(answer.encode("utf-8")).hexdigest()
-        async with SessionFactory() as db:
-            await db.execute(
-                update(LegalAnswerCache)
-                .where(
-                    LegalAnswerCache.cache_scope_hash == scope_hash,
-                    (
-                        (LegalAnswerCache.query_hash == query_hash)
-                        | (LegalAnswerCache.answer_hash == answer_hash)
-                    ),
-                )
                 .values(expires_at=func.now(), updated_at=func.now())
             )
             await db.commit()
