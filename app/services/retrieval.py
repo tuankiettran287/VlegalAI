@@ -1371,6 +1371,44 @@ def select_context_sources(
     return selected
 
 
+def compact_context_sources(
+    sources: list[dict[str, Any]],
+    query: str,
+    *,
+    max_chars: int = 14000,
+    per_source_chars: int = 1800,
+) -> list[dict[str, Any]]:
+    """Trim retrieval text for generation without changing displayed sources."""
+    terms = _accented_significant_terms(query)
+    compacted: list[dict[str, Any]] = []
+    used_chars = 0
+    for source in sources:
+        row = dict(source)
+        text = str(row.get("text") or "")
+        metadata_chars = len(str(row.get("source_id") or "")) + len(str(row.get("citation") or ""))
+        remaining = max_chars - used_chars - metadata_chars
+        if remaining <= 0:
+            break
+        budget = min(per_source_chars, remaining)
+        if len(text) > budget:
+            step = max(budget // 2, 1)
+            starts = range(0, max(len(text) - budget + 1, 1), step)
+
+            def score(start: int) -> tuple[int, int]:
+                window = text[start : start + budget].casefold()
+                return (sum(term in window for term in terms), -start)
+
+            start = max(starts, key=score, default=0)
+            row["text"] = text[start : start + budget].strip()
+            if start > 0:
+                row["text"] = "…" + row["text"].lstrip()
+            if start + budget < len(text):
+                row["text"] = row["text"].rstrip() + "…"
+        compacted.append(row)
+        used_chars += metadata_chars + len(str(row.get("text") or ""))
+    return compacted
+
+
 def format_source_locator(source: dict[str, Any]) -> str:
     citation = " ".join(str(source.get("citation") or "").split())
     segments = [segment.strip() for segment in citation.split(">") if segment.strip()]
