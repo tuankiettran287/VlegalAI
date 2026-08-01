@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -842,10 +843,15 @@ async def _legal_sources(
             source_count=len(sources),
         )
         try:
-            verification, updated = await freshness.verify_sources(sources)
-        except FreshnessUnavailable as exc:
+            freshness_settings = getattr(freshness, "settings", None)
+            freshness_timeout = float(getattr(freshness_settings, "legal_freshness_timeout_seconds", 10.0) or 10.0)
+            verification, updated = await asyncio.wait_for(
+                freshness.verify_sources(sources),
+                timeout=freshness_timeout,
+            )
+        except (FreshnessUnavailable, asyncio.TimeoutError) as exc:
             logger.warning(
-                "Freshness verification unavailable error_type=%s",
+                "Freshness verification unavailable or timed out error_type=%s",
                 type(exc).__name__,
             )
             return freshness_unavailable_result(sources)
