@@ -825,12 +825,11 @@ async def _legal_sources(
     retrieval_query = query
     followed_replacements: set[str] = set()
     verification: Any = None
-    require_freshness = bool(
-        getattr(
-            getattr(freshness, "settings", None),
-            "require_freshness_check",
-            True,
-        )
+    freshness_settings = getattr(freshness, "settings", None)
+    require_freshness = (
+        bool(getattr(freshness_settings, "require_freshness_check", True))
+        if freshness_settings is not None
+        else True
     )
     if not require_freshness:
         log_progress(
