@@ -239,7 +239,7 @@ class LegalFreshnessService:
             return VerificationReport(checked=False, all_current=False, note="Chưa cấu hình công cụ kiểm tra hiệu lực."), False
 
         timeout_seconds = float(
-            getattr(self.settings, "legal_freshness_timeout_seconds", 90)
+            getattr(self.settings, "legal_freshness_timeout_seconds", 3.5) or 3.5
         )
         log_progress(
             logger,
