@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     legal_freshness_timeout_seconds: float = Field(default=3.5, ge=1.0, le=300.0)
     tavily_timeout_seconds: float = Field(default=3.5, ge=1.0, le=30.0)
     freshness_lock_wait_seconds: int = Field(default=120, ge=1, le=600)
-    require_freshness_check: bool = True
+    require_freshness_check: bool = False
     legal_search_require_both: bool = True
     legal_verdict_min_confidence: float = Field(default=0.75, ge=0.5, le=1)
     max_laws_verified_per_request: int = Field(default=16, ge=1, le=64)
