@@ -1330,6 +1330,7 @@ async def _complete_with_citation_repair(
     max_tokens: int,
     temperature: float = 0.1,
     thinking_budget: int | None = None,
+    skip_soft_repair: bool = False,
 ) -> str:
     operation_started = time.perf_counter()
     log_progress(
@@ -1374,6 +1375,16 @@ async def _complete_with_citation_repair(
         return answer
     except GeminiError as draft_validation_exc:
         validation_kind = _answer_validation_kind(draft_validation_exc)
+        if draft_safety_valid and skip_soft_repair:
+            log_progress(
+                logger,
+                "answer_generation",
+                "completed",
+                operation_started,
+                outcome="grounded_draft_retained",
+                validation_kind=validation_kind,
+            )
+            return answer
         log_progress(
             logger,
             "answer_generation",
@@ -2291,6 +2302,7 @@ async def chat(
                     answer_plan=answer_plan,
                     max_tokens=effort_profile.max_output_tokens,
                     thinking_budget=effort_profile.thinking_budget,
+                    skip_soft_repair=(effort_profile.name == "instant"),
                 )
             except GeminiError as exc:
                 logger.warning(
