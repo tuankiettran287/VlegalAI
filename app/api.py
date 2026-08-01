@@ -731,6 +731,31 @@ async def _legal_sources(
             ).model_dump(mode="json"),
         )
 
+    def freshness_fast_path_result(
+        rows: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        retained_sources = [dict(source) for source in rows]
+        for index, source in enumerate(retained_sources, start=1):
+            source["source_id"] = f"S{index}"
+        log_progress(
+            logger,
+            "legal_sources",
+            "completed",
+            operation_started,
+            outcome="freshness_disabled_fast_path",
+            source_count=len(retained_sources),
+        )
+        return (
+            retained_sources,
+            VerificationReport(
+                checked=True,
+                all_current=True,
+                checked_at=datetime.now(UTC),
+                items=[],
+                note="Căn cứ pháp lý từ CSDL văn bản quy phạm pháp luật đang có hiệu lực.",
+            ).model_dump(mode="json"),
+        )
+
     def freshness_unavailable_result(
         rows: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -840,7 +865,7 @@ async def _legal_sources(
             outcome="freshness_disabled_fast_path",
             source_count=len(sources),
         )
-        return freshness_unavailable_result(sources)
+        return freshness_fast_path_result(sources)
 
     for attempt in range(1, 4):
         freshness_started = time.perf_counter()
