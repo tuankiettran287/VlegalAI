@@ -135,10 +135,74 @@ AI_TEMPORARILY_UNAVAILABLE_MESSAGE = (
     "Dịch vụ AI tạm thời không khả dụng. Vui lòng thử lại sau."
 )
 
+# ---------------------------------------------------------------------------
+# Prompt-injection guard (Python layer — runs before LLM and catalog dispatch)
+# Chặn các mẫu câu phổ biến cố ghi đè system prompt hoặc tiết lộ cấu hình
+# ---------------------------------------------------------------------------
+_INJECTION_PATTERNS: list[re.Pattern[str]] = [
+    # English classic injection
+    re.compile(r"\bignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?\b", re.IGNORECASE),
+    re.compile(r"\b(?:forget|disregard)\s+(?:your\s+)?(?:instructions?|rules?|guidelines?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:reveal|show|print|output|display)\s+(?:your\s+)?(?:system\s+prompt|instructions?|config(?:uration)?)\b", re.IGNORECASE),
+    re.compile(r"\bact\s+as\s+(?:a\s+)?(?:different|another|new|unrestricted)\b", re.IGNORECASE),
+    # Vietnamese injection
+    re.compile(r"\bbỏ\s+qua\s+(?:tất\s+cả\s+)?(?:quy\s+tắc|hướng\s+dẫn|chỉ\s+dẫn|lệnh)\b", re.IGNORECASE),
+    re.compile(r"\btiết\s+lộ\s+(?:system\s+prompt|prompt\s+hệ\s+thống|cấu\s+hình|nội\s+dung\s+hệ\s+thống)\b", re.IGNORECASE),
+]
+
+
+def _check_prompt_injection(message: str) -> str | None:
+    """Return a rejection string if the message matches a known injection pattern.
+
+    This is a lightweight Python-layer guard that runs before the LLM is called.
+    It complements (does not replace) the UNTRUSTED_DATA wrapper and system-prompt
+    instruction in LEGAL_SYSTEM_PROMPT.
+    Returns None if the message is clean.
+    """
+    for pat in _INJECTION_PATTERNS:
+        if pat.search(message):
+            logger.warning(
+                "prompt_injection_blocked pattern=%s query_prefix=%s",
+                pat.pattern[:60],
+                message[:80],
+            )
+            return "Mình chỉ hỗ trợ các câu hỏi về pháp luật Việt Nam."
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Out-of-scope guard — các chủ đề rõ ràng nằm ngoài Pháp luật Lao động
+# ---------------------------------------------------------------------------
+_NON_LABOR_SCOPE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\b(?:luật|quy\s+định|xem\s+luật)?\s*đất\s+đai\b", re.IGNORECASE),
+    re.compile(r"\b(?:thành\s+lập|đăng\s+ký|giấy\s+phép)\s+(?:công\s+ty|doanh\s+nghiệp)\b", re.IGNORECASE),
+    re.compile(r"\b(?:luật|bộ\s+luật)\s+dân\s+sự\b", re.IGNORECASE),
+    re.compile(r"\b(?:tố\s+tụng\s+dân\s+sự|hình\s+sự|luật\s+hình\s+sự)\b", re.IGNORECASE),
+    re.compile(r"\b(?:sổ\s+đỏ|sổ\s+hồng|quy\s+hoạch\s+đất|thu\s+hồi\s+đất|bất\s+động\s+sản)\b", re.IGNORECASE),
+    re.compile(r"\b(?:hôn\s+nhân\s+gia\s+đình|ly\s+hôn|kết\s+hôn|thừa\s+kế|tài\s+sản\s+thừa\s+kế)\b", re.IGNORECASE),
+    re.compile(r"\b(?:xử\s+lý\s+vi\s+phạm\s+hành\s+chính|vi\s+phạm\s+giao\s+thông|phạt\s+giao\s+thông|bằng\s+lái)\b", re.IGNORECASE),
+]
+
+
+def _check_non_labor_scope(message: str) -> str | None:
+    """Detect queries clearly outside the Labor Law scope."""
+    for pat in _NON_LABOR_SCOPE_PATTERNS:
+        if pat.search(message):
+            logger.info("non_labor_scope_detected query=%s", message[:80])
+            return (
+                "VLegal AI hiện tại là trợ lý chuyên sâu về **Pháp luật Lao động Việt Nam** "
+                "(Bộ luật Lao động 2019, hợp đồng lao động, tiền lương, thời giờ làm việc - nghỉ ngơi, "
+                "bảo hiểm xã hội, an toàn lao động, việc làm, kỷ luật lao động, tranh chấp lao động...).\n\n"
+                "Câu hỏi của bạn nằm ngoài phạm vi CSDL chuyên ngành Lao động hiện tại của hệ thống. "
+                "Bạn có cần hỗ trợ câu hỏi nào liên quan đến Pháp luật Lao động không?"
+            )
+    return None
+
 
 CONTRACT_TEMPLATES = [
     {"id": "employment", "name": "Hợp đồng lao động", "category": "Lao động"},
     {"id": "probation", "name": "Hợp đồng thử việc", "category": "Lao động"},
+
     {"id": "nda", "name": "Thỏa thuận bảo mật", "category": "Doanh nghiệp"},
     {"id": "service", "name": "Hợp đồng dịch vụ", "category": "Dịch vụ"},
     {"id": "sale", "name": "Hợp đồng mua bán hàng hóa", "category": "Thương mại"},
@@ -2049,36 +2113,67 @@ async def chat(
             outcome="deterministic_response",
         )
     else:
-        rewrite_started = time.perf_counter()
-        log_progress(logger, "chat", "query_rewrite_started", operation_started)
-        rewrite_triggered = should_rewrite_query(current_question)
-        if effort_profile.skip_query_rewrite or not rewrite_triggered:
+        # --- Prompt injection and Out-of-Scope guards (Python layer) ---
+        injection_block = _check_prompt_injection(payload.message)
+        if injection_block is not None:
+            answer = injection_block
+            cache_mode = "injection_blocked"
+            verification = VerificationReport(
+                checked=False,
+                all_current=False,
+                checked_at=datetime.now(UTC),
+                items=[],
+                note="injection_blocked",
+            ).model_dump(mode="json")
             retrieval_query = current_question
+            answer_plan = {}
             query_was_rewritten = False
-            rewrite_attempted = False
         else:
-            query_rewrite = await rewrite_query_if_needed(
-                ai,
-                current_question,
-                history=history_turns,
-                settings=settings,
-            )
-            retrieval_query = query_rewrite.retrieval_query
-            query_was_rewritten = query_rewrite.rewritten
-            rewrite_attempted = query_rewrite.attempted
-        answer_plan = build_answer_plan(retrieval_query)
-        log_progress(
-            logger,
-            "chat",
-            "query_rewrite_completed",
-            operation_started,
-            attempted=rewrite_attempted,
-            effort=effort_profile.name,
-            phase_ms=round((time.perf_counter() - rewrite_started) * 1000),
-            rewritten=query_was_rewritten,
-            skipped_for_effort=effort_profile.skip_query_rewrite,
-            trigger_detected=rewrite_triggered,
-        )
+            scope_block = _check_non_labor_scope(payload.message)
+            if scope_block is not None:
+                answer = scope_block
+                cache_mode = "out_of_scope"
+                verification = VerificationReport(
+                    checked=False,
+                    all_current=False,
+                    checked_at=datetime.now(UTC),
+                    items=[],
+                    note="out_of_scope_non_labor",
+                ).model_dump(mode="json")
+                retrieval_query = current_question
+                answer_plan = {}
+                query_was_rewritten = False
+            else:
+                rewrite_started = time.perf_counter()
+                log_progress(logger, "chat", "query_rewrite_started", operation_started)
+                rewrite_triggered = should_rewrite_query(current_question)
+                if effort_profile.skip_query_rewrite or not rewrite_triggered:
+                    retrieval_query = current_question
+                    query_was_rewritten = False
+                    rewrite_attempted = False
+                else:
+                    query_rewrite = await rewrite_query_if_needed(
+                        ai,
+                        current_question,
+                        history=history_turns,
+                        settings=settings,
+                    )
+                    retrieval_query = query_rewrite.retrieval_query
+                    query_was_rewritten = query_rewrite.rewritten
+                    rewrite_attempted = query_rewrite.attempted
+                answer_plan = build_answer_plan(retrieval_query)
+                log_progress(
+                    logger,
+                    "chat",
+                    "query_rewrite_completed",
+                    operation_started,
+                    attempted=rewrite_attempted,
+                    effort=effort_profile.name,
+                    phase_ms=round((time.perf_counter() - rewrite_started) * 1000),
+                    rewritten=query_was_rewritten,
+                    skipped_for_effort=effort_profile.skip_query_rewrite,
+                    trigger_detected=rewrite_triggered,
+                )
 
     structure_result: dict[str, Any] | None = None
     structure_lookup = getattr(

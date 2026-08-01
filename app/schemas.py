@@ -166,6 +166,18 @@ class ChatResponse(BaseModel):
     message_id: uuid.UUID
     answer: str
     sources: list[SourceOut]
+    history: list[ChatTurn] = Field(
+        default_factory=list,
+        max_length=12,
+        description="Temporary guest history only; authenticated history is loaded from PostgreSQL.",
+    )
+
+
+class ChatResponse(BaseModel):
+    conversation_id: uuid.UUID | None = None
+    message_id: uuid.UUID
+    answer: str
+    sources: list[SourceOut]
     verification: VerificationReport
     temporary: bool = False
     cache_hit: bool = False
@@ -180,6 +192,7 @@ class ChatResponse(BaseModel):
         "greeting",
         "unsupported_official_catalog",
         "injection_blocked",
+        "out_of_scope",
     ] = "miss"
     effort: ChatEffort = "instant"
 
