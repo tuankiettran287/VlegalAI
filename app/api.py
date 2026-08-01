@@ -1538,9 +1538,19 @@ async def _complete_with_citation_repair(
         return repaired
     except Exception as exc:
         logger.warning(
-            "Citation validation failed closed error_type=%s",
+            "Citation validation failed closed error_type=%s draft_safety_valid=%s",
             type(exc).__name__,
+            draft_safety_valid,
         )
+        if draft_safety_valid:
+            log_progress(
+                logger,
+                "answer_generation",
+                "completed",
+                operation_started,
+                outcome="grounded_draft_fallback",
+            )
+            return answer
         raise GeminiError(
             "Không thể xác minh căn cứ của câu trả lời."
         ) from exc
