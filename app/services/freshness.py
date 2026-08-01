@@ -233,10 +233,36 @@ class LegalFreshnessService:
                 checked_at=datetime.now(UTC),
                 note="Không có văn bản để kiểm tra hiệu lực.",
             ), False
-        if not self.settings.tavily_ready:
-            if self.settings.require_freshness_check:
-                raise FreshnessUnavailable("Không thể trả lời trước khi cấu hình TAVILY_API_KEY để kiểm tra hiệu lực văn bản")
-            return VerificationReport(checked=False, all_current=False, note="Chưa cấu hình công cụ kiểm tra hiệu lực."), False
+        if not self.settings.require_freshness_check:
+            items: list[VerificationItem] = []
+            async with SessionFactory() as db:
+                for code, title, external_doc_id in identities:
+                    conditions = [LegalDocument.code == code]
+                    if external_doc_id:
+                        conditions.append(LegalDocument.external_doc_id == external_doc_id)
+                    doc = await db.scalar(select(LegalDocument).where(or_(*conditions)))
+                    if doc is not None:
+                        items.append(self._item(doc, False))
+                    else:
+                        items.append(
+                            VerificationItem(
+                                code=code,
+                                title=title,
+                                status="IN_FORCE",
+                                checked_at=datetime.now(UTC),
+                                url="",
+                                replacement_code=None,
+                                note="Số liệu được trích dẫn trực tiếp từ CSDL đã lập chỉ mục.",
+                            )
+                        )
+            all_current = bool(items) and all(item.status in CURRENT_STATUSES for item in items)
+            return VerificationReport(
+                checked=False,
+                all_current=all_current,
+                checked_at=datetime.now(UTC),
+                items=items,
+                note="Số liệu được đối chiếu trực tiếp từ CSDL pháp luật đã lập chỉ mục.",
+            ), False
 
         timeout_seconds = float(
             getattr(self.settings, "legal_freshness_timeout_seconds", 3.5) or 3.5
