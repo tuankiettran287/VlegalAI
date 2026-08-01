@@ -1110,6 +1110,11 @@ def _validate_grounded_legal_references(
     }
     unknown_codes = referenced_codes - allowed_codes
     if unknown_codes:
+        logger.warning(
+            "legal_reference validation rejected unknown_codes=%s allowed_codes=%s",
+            unknown_codes,
+            allowed_codes,
+        )
         raise GeminiError(
             "Câu trả lời nhắc đến số hiệu văn bản không có trong nguồn: "
             + ", ".join(sorted(unknown_codes))
@@ -1154,6 +1159,12 @@ def _validate_grounded_legal_references(
         ):
             continue
         excerpt = " ".join(value[start : start + 80].split())
+        logger.warning(
+            "legal_reference validation rejected excerpt=%s allowed_titles=%s allowed_codes=%s",
+            excerpt,
+            allowed_titles,
+            allowed_codes,
+        )
         raise GeminiError(
             f"Câu trả lời nhắc đến văn bản không có trong nguồn: {excerpt}"
         )
