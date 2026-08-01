@@ -844,7 +844,7 @@ async def _legal_sources(
         )
         try:
             freshness_settings = getattr(freshness, "settings", None)
-            freshness_timeout = float(getattr(freshness_settings, "legal_freshness_timeout_seconds", 10.0) or 10.0)
+            freshness_timeout = float(getattr(freshness_settings, "legal_freshness_timeout_seconds", 3.5) or 3.5)
             verification, updated = await asyncio.wait_for(
                 freshness.verify_sources(sources),
                 timeout=freshness_timeout,

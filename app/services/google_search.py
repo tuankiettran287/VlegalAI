@@ -300,7 +300,7 @@ class GoogleSearchService:
             )
         try:
             async with httpx.AsyncClient(
-                timeout=min(self.settings.gemini_timeout_seconds, 20),
+                timeout=min(float(getattr(self.settings, "tavily_timeout_seconds", 3.5) or 3.5), 3.5),
                 follow_redirects=False,
                 headers={"User-Agent": "VLegalAI/3.0 (+google-search-grounding)"},
             ) as client:

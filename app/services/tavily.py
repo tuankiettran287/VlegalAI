@@ -39,7 +39,8 @@ class TavilyService:
             "include_raw_content": include_raw_content,
             "include_domains": include_domains or [],
         }
-        async with httpx.AsyncClient(timeout=self.settings.tavily_timeout_seconds) as client:
+        timeout = float(getattr(self.settings, "tavily_timeout_seconds", 3.5) or 3.5)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(self.SEARCH_URL, json=payload)
         if response.is_error:
             raise TavilyError(f"Tavily trả về HTTP {response.status_code}: {response.text[:300]}")
@@ -54,7 +55,8 @@ class TavilyService:
             "extract_depth": "advanced",
             "include_images": False,
         }
-        async with httpx.AsyncClient(timeout=self.settings.tavily_timeout_seconds) as client:
+        timeout = float(getattr(self.settings, "tavily_timeout_seconds", 3.5) or 3.5)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(self.EXTRACT_URL, json=payload)
         if response.is_error:
             raise TavilyError(f"Tavily extract trả về HTTP {response.status_code}: {response.text[:300]}")

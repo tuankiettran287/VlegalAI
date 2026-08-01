@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -357,6 +358,41 @@ def test_legal_sources_keeps_sources_after_second_freshness_failure() -> None:
 
     asyncio.run(scenario())
     assert freshness.calls == 2
+
+
+def test_legal_sources_freshness_timeout_fallback_within_bounded_time() -> None:
+    source = {
+        "doc_id": "doc-1",
+        "title": "Luật 100/2020/QH14",
+        "citation": "100/2020/QH14",
+        "text": "Nội dung nguồn",
+    }
+
+    class _Retrieval:
+        async def retrieve(self, _: str) -> list[dict]:
+            return [dict(source)]
+
+    class _HangingFreshness:
+        settings = SimpleNamespace(legal_freshness_timeout_seconds=0.1)
+
+        async def verify_sources(self, _: list[dict]) -> tuple[object, bool]:
+            await asyncio.sleep(2.0)
+            return SimpleNamespace(), True
+
+    async def scenario() -> None:
+        start = time.perf_counter()
+        sources, verification = await _legal_sources(
+            "query",
+            _Retrieval(),
+            _HangingFreshness(),
+        )
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0
+        assert [item["source_id"] for item in sources] == ["S1"]
+        assert verification["checked"] is False
+        assert "Chưa thể kiểm tra hiệu lực" in verification["note"]
+
+    asyncio.run(scenario())
 
 
 def test_legal_sources_keeps_retrieved_data_when_freshness_fails_for_chat() -> None:
@@ -829,7 +865,7 @@ def test_chat_persists_greeting_without_retrieval_cache_or_ai() -> None:
         {"legal_freshness_ttl_hours": -1},
         {"legal_verification_concurrency": 0},
         {"legal_verification_concurrency": 33},
-        {"legal_freshness_timeout_seconds": 9},
+        {"legal_freshness_timeout_seconds": 0.5},
         {"legal_freshness_timeout_seconds": 301},
         {"max_laws_verified_per_request": 0},
         {"retrieval_top_k": 0},
