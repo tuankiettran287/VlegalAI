@@ -832,6 +832,17 @@ async def _legal_sources(
             True,
         )
     )
+    if not require_freshness:
+        log_progress(
+            logger,
+            "legal_sources",
+            "completed",
+            operation_started,
+            outcome="freshness_disabled_fast_path",
+            source_count=len(sources),
+        )
+        return freshness_unavailable_result(sources)
+
     for attempt in range(1, 4):
         freshness_started = time.perf_counter()
         log_progress(
