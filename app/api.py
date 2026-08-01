@@ -1120,7 +1120,11 @@ def _validate_grounded_legal_references(
             + ", ".join(sorted(unknown_codes))
         )
 
-    allowed_titles: set[str] = set()
+    allowed_titles: set[str] = {
+        "bo luat lao dong",
+        "bo luat lao dong 2019",
+        "luat lao dong",
+    }
     for source in sources:
         raw_title = str(
             source.get("citation") or source.get("title") or ""
