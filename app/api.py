@@ -2235,7 +2235,7 @@ async def chat(
                     "KẾ HOẠCH PHỦ CÂU HỎI:\n"
                     f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
                     f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-                    f"NGUỒN:\n{build_context(compact_context_sources(sources, retrieval_query, max_chars=9000, per_source_chars=1200))}\n\n"
+                    f"NGUỒN:\n{build_context(compact_context_sources(sources, retrieval_query, max_chars=(4500 if effort_profile.name == 'instant' else 9000), per_source_chars=(900 if effort_profile.name == 'instant' else 1200)))}\n\n"
                     f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', current_question)}"
                     "\n\nCÁCH HIỂU ĐÃ CHUẨN HÓA:\n"
                     f"{untrusted_data_block('REWRITTEN_QUERY', retrieval_query) if query_was_rewritten else '(Không cần chuẩn hóa)'}"
