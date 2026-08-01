@@ -225,14 +225,15 @@ export function askLegalQuestion(
     regenerateFromMessageId?: string | null;
   } = {},
 ) {
-  return post<ChatResponse>("/api/chat", {
-    message,
-    conversation_id: conversationId || null,
-    regenerate_from_message_id:
-      options.regenerateFromMessageId || null,
-    // The public effort selector is removed; always use the bounded fast path
-    // even when an older browser bundle passes a stale value.
-    effort: "instant",
+  return requestJson<ChatResponse>("/api/chat", {
+    method: "POST",
+    body: JSON.stringify({
+      message,
+      conversation_id: conversationId || null,
+      regenerate_from_message_id: options.regenerateFromMessageId || null,
+      effort: "instant",
+    }),
+    signal: AbortSignal.timeout(45000),
   });
 }
 
