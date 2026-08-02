@@ -1463,6 +1463,7 @@ async def _complete_with_citation_repair(
     skip_soft_repair: bool = False,
     generation_timeout: float | None = None,
     citation_repair_timeout: float | None = None,
+    telemetry: dict[str, Any] | None = None,
 ) -> str:
     operation_started = time.perf_counter()
     log_progress(
@@ -1474,6 +1475,12 @@ async def _complete_with_citation_repair(
         source_count=len(allowed_ids),
         thinking_budget=thinking_budget or 0,
     )
+    if telemetry is not None:
+        telemetry["citation_repair_called"] = False
+        telemetry["generation_initial_ms"] = 0.0
+        telemetry["citation_normalize_ms"] = 0.0
+        telemetry["citation_repair_ms"] = 0.0
+
     try:
         if generation_timeout and generation_timeout > 0:
             async with asyncio.timeout(generation_timeout):
@@ -1492,10 +1499,24 @@ async def _complete_with_citation_repair(
                 temperature=temperature,
                 thinking_budget=thinking_budget,
             )
-    except TimeoutError as _te:
-        raise GeminiError(
-            f"Generation timed out after {generation_timeout:.1f}s"
-        ) from _te
+    except Exception as _te:
+        gen_ms = round((time.perf_counter() - operation_started) * 1000, 1)
+        if telemetry is not None:
+            telemetry["failed_stage"] = "generation_initial"
+            telemetry["exception_type"] = type(_te).__name__
+            telemetry["timeout_configured"] = generation_timeout or 0.0
+            telemetry["elapsed_actual_ms"] = gen_ms
+            telemetry["generation_initial_ms"] = gen_ms
+        if isinstance(_te, TimeoutError):
+            raise GeminiError(
+                f"Generation timed out after {generation_timeout:.1f}s"
+            ) from _te
+        raise
+
+    gen_ms = round((time.perf_counter() - operation_started) * 1000, 1)
+    if telemetry is not None:
+        telemetry["generation_initial_ms"] = gen_ms
+
     log_progress(
         logger,
         "answer_generation",
@@ -1526,7 +1547,12 @@ async def _complete_with_citation_repair(
         validation_kind = _answer_validation_kind(draft_validation_exc)
 
         # Attempt deterministic normalization before invoking expensive LLM repair!
+        norm_start = time.perf_counter()
         normalized_draft = _normalize_citations_deterministically(answer, allowed_ids)
+        norm_ms = round((time.perf_counter() - norm_start) * 1000, 1)
+        if telemetry is not None:
+            telemetry["citation_normalize_ms"] = norm_ms
+
         if normalized_draft != answer:
             try:
                 _validate_answer_safety(
@@ -1560,6 +1586,10 @@ async def _complete_with_citation_repair(
                 validation_kind=validation_kind,
             )
             return answer
+
+        if telemetry is not None:
+            telemetry["citation_repair_called"] = True
+
         log_progress(
             logger,
             "answer_generation",
@@ -1613,6 +1643,7 @@ async def _complete_with_citation_repair(
             },
         }
         _repair_timeout = citation_repair_timeout or 0
+        repair_start = time.perf_counter()
         try:
             if _repair_timeout > 0:
                 async with asyncio.timeout(_repair_timeout):
@@ -1633,7 +1664,17 @@ async def _complete_with_citation_repair(
                     temperature=0,
                     thinking_budget=thinking_budget,
                 )
-        except TimeoutError as _cte:
+            repair_ms = round((time.perf_counter() - repair_start) * 1000, 1)
+            if telemetry is not None:
+                telemetry["citation_repair_ms"] = repair_ms
+        except Exception as _cte:
+            repair_ms = round((time.perf_counter() - repair_start) * 1000, 1)
+            if telemetry is not None:
+                telemetry["citation_repair_ms"] = repair_ms
+                telemetry["failed_stage"] = "citation_repair"
+                telemetry["exception_type"] = type(_cte).__name__
+                telemetry["timeout_configured"] = _repair_timeout
+                telemetry["elapsed_actual_ms"] = repair_ms
             logger.warning(
                 "Citation repair timed out after %.1fs; retaining grounded draft",
                 _repair_timeout,
@@ -1647,9 +1688,11 @@ async def _complete_with_citation_repair(
                     outcome="citation_repair_timeout_draft_retained",
                 )
                 return answer
-            raise GeminiError(
-                f"Citation repair timed out after {_repair_timeout:.1f}s and draft was not grounded."
-            ) from _cte
+            if isinstance(_cte, TimeoutError):
+                raise GeminiError(
+                    f"Citation repair timed out after {_repair_timeout:.1f}s and draft was not grounded."
+                ) from _cte
+            raise
         log_progress(
             logger,
             "answer_generation",
@@ -2084,6 +2127,7 @@ async def rate_chat_answer(
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
     settings: Settings = Depends(get_settings),
@@ -2093,10 +2137,34 @@ async def chat(
     memory: ConversationMemoryService = Depends(conversation_memory_service),
     answer_cache: SemanticAnswerCacheService = Depends(semantic_answer_cache_service),
 ) -> ChatResponse:
-    # A rollback expires ORM instances even when the session factory uses
-    # expire_on_commit=False. Snapshot every user field needed after the
-    # read transaction is released so later access cannot trigger implicit
-    # async database IO (and therefore MissingGreenlet).
+    request_id = str(uuid.uuid4())
+    response.headers["X-Request-ID"] = request_id
+
+    timings: dict[str, float] = {
+        "auth": 0.0,
+        "routing": 0.0,
+        "cache": 0.0,
+        "rewrite": 0.0,
+        "embedding": 0.0,
+        "postgres": 0.0,
+        "bm25": 0.0,
+        "neo4j": 0.0,
+        "freshness": 0.0,
+        "generation_initial": 0.0,
+        "citation_normalize": 0.0,
+        "citation_repair": 0.0,
+        "persistence": 0.0,
+        "total": 0.0,
+    }
+    telemetry_details: dict[str, Any] = {
+        "failed_stage": "none",
+        "exception_type": "none",
+        "timeout_configured": 0.0,
+        "elapsed_actual_ms": 0.0,
+        "citation_repair_called": False,
+    }
+
+    t_auth0 = time.perf_counter()
     authenticated_user_id = user.id
     preferred_name = user.preferred_name
     if not preferred_name:
@@ -2104,6 +2172,7 @@ async def chat(
             status_code=status.HTTP_409_CONFLICT,
             detail="Vui lòng chọn tên gọi trước khi bắt đầu trò chuyện",
         )
+    timings["auth"] = round((time.perf_counter() - t_auth0) * 1000, 1)
 
     current_question = payload.message
     regeneration_target_id = payload.regenerate_from_message_id
@@ -2582,6 +2651,7 @@ async def chat(
                     skip_soft_repair=(effort_profile.name == "instant"),
                     generation_timeout=_gen_timeout,
                     citation_repair_timeout=_repair_timeout,
+                    telemetry=telemetry_details,
                 )
             except GeminiError as exc:
                 generation_ms = round((time.perf_counter() - generation_started) * 1000)
@@ -2752,52 +2822,85 @@ async def chat(
         try:
             await memory.refresh(conversation_id)
         except Exception:
-            # The full encrypted transcript is already durable. A later turn
-            # retries every message after last_message_sequence automatically.
             logger.exception(
                 "Cannot refresh conversation summary for %s",
                 conversation_id,
             )
-    log_progress(
-        logger,
-        "chat",
-        "persistence_completed",
-        operation_started,
-        phase_ms=round((time.perf_counter() - persistence_started) * 1000),
+    timings["persistence"] = round((time.perf_counter() - persistence_started) * 1000, 1)
+
+    total_ms = round((time.perf_counter() - operation_started) * 1000, 1)
+    timings["total"] = total_ms
+
+    server_timing_parts = [f"{k};dur={v:.1f}" for k, v in timings.items()]
+    response.headers["Server-Timing"] = ", ".join(server_timing_parts)
+
+    outcome = (
+        "greeting"
+        if greeting_answer is not None
+        else "catalog"
+        if catalog_answer is not None
+        else "cache_hit"
+        if cache_hit
+        else "fallback"
+        if answer == AI_TEMPORARILY_UNAVAILABLE_MESSAGE
+        else "draft_valid"
     )
-    total_ms = round((time.perf_counter() - operation_started) * 1000)
-    log_progress(
-        logger,
-        "chat",
-        "completed",
-        operation_started,
-        cache_mode=cache_mode,
-        effort=effort_profile.name,
-        source_count=len(sources),
-        greeting=greeting_answer is not None,
-        temporary=False,
-        total_ms=total_ms,
-    )
-    # ── Aggregate telemetry ── searchable single-line summary for dashboards ──
-    logger.info(
-        "Legal chat completed "
-        "effort=%s "
-        "cache_mode=%s "
-        "total_ms=%d "
-        "source_count=%d "
-        "answer_chars=%d "
-        "thinking_budget=%d "
-        "model=%s "
-        "greeting=%s",
-        effort_profile.name,
-        cache_mode,
-        total_ms,
-        len(sources),
-        len(answer),
-        effort_profile.thinking_budget,
-        settings.gemini_model,
-        str(greeting_answer is not None).lower(),
-    )
+
+    if outcome == "fallback":
+        logger.warning(
+            "Legal chat failed request_id=%s outcome=fallback effort=%s total_ms=%.1f "
+            "failed_stage=%s exception_type=%s timeout_configured=%.1f elapsed_actual_ms=%.1f "
+            "citation_repair_called=%s auth_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f "
+            "embedding_ms=%.1f postgres_ms=%.1f bm25_ms=%.1f neo4j_ms=%.1f freshness_ms=%.1f "
+            "generation_initial_ms=%.1f citation_normalize_ms=%.1f citation_repair_ms=%.1f persistence_ms=%.1f",
+            request_id,
+            effort_profile.name,
+            total_ms,
+            telemetry_details.get("failed_stage", "unknown"),
+            telemetry_details.get("exception_type", "unknown"),
+            telemetry_details.get("timeout_configured", 0.0),
+            telemetry_details.get("elapsed_actual_ms", 0.0),
+            telemetry_details.get("citation_repair_called", False),
+            timings["auth"],
+            timings["routing"],
+            timings["cache"],
+            timings["rewrite"],
+            timings["embedding"],
+            timings["postgres"],
+            timings["bm25"],
+            timings["neo4j"],
+            timings["freshness"],
+            timings["generation_initial"],
+            timings["citation_normalize"],
+            timings["citation_repair"],
+            timings["persistence"],
+        )
+    else:
+        logger.info(
+            "Legal chat completed request_id=%s outcome=%s effort=%s total_ms=%.1f "
+            "auth_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f embedding_ms=%.1f "
+            "postgres_ms=%.1f bm25_ms=%.1f neo4j_ms=%.1f freshness_ms=%.1f generation_initial_ms=%.1f "
+            "citation_normalize_ms=%.1f citation_repair_ms=%.1f persistence_ms=%.1f source_count=%d answer_chars=%d",
+            request_id,
+            outcome,
+            effort_profile.name,
+            total_ms,
+            timings["auth"],
+            timings["routing"],
+            timings["cache"],
+            timings["rewrite"],
+            timings["embedding"],
+            timings["postgres"],
+            timings["bm25"],
+            timings["neo4j"],
+            timings["freshness"],
+            timings["generation_initial"],
+            timings["citation_normalize"],
+            timings["citation_repair"],
+            timings["persistence"],
+            len(sources),
+            len(answer),
+        )
     return ChatResponse(
         conversation_id=conversation_id,
         message_id=message_id,

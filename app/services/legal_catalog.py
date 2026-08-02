@@ -42,7 +42,10 @@ _TYPE_PATTERNS = (
     ("LAW", re.compile(r"\bluat\b")),
 )
 _COUNT_RE = re.compile(r"\b(?:co\s+)?bao\s+nhieu\b|\btong\s+so\b")
-_LIST_RE = re.compile(r"\bliet\s+ke\b|\bdanh\s+sach\b|\bgom\s+nhung\b")
+_LIST_RE = re.compile(
+    r"\bliet\s+ke\b|\bdanh\s+sach\b|\bgom\s+nhung\b|\bdang\s+co\b|\bco\s+nhung\b",
+    re.IGNORECASE,
+)
 _SUMMARY_RE = re.compile(
     r"\bthong\s+ke\b|\bphan\s+bo\b|\bthong\s+tin\s+tong\s+quan\b"
 )
