@@ -129,7 +129,20 @@ def _extract_law_info(normalized_query: str, original_query: str) -> tuple[str |
     # Thử trích tên tự nhiên từ câu đã normalize
     name_match = _LAW_NAME_HINT_RE.search(normalized_query)
     if name_match:
-        return None, name_match.group(1).strip()
+        raw_name = name_match.group(1).strip()
+        cleaned_name = re.sub(
+            r"\s+(?:co|gom)\s+(?:bao\s+nhieu|may)\s*(?:dieu)?.*$",
+            "",
+            raw_name,
+            flags=re.IGNORECASE,
+        ).strip()
+        cleaned_name = re.sub(
+            r"\s+(?:co|gom|may|bao|nhieu|dieu)+$",
+            "",
+            cleaned_name,
+            flags=re.IGNORECASE,
+        ).strip()
+        return None, cleaned_name or raw_name
 
     return None, None
 
@@ -484,26 +497,33 @@ class LegalCatalogService:
             normalized_code = raw
         elif request.law_name_hint:
             # Search by title similarity in legal_catalog_corpus
-            try:
-                res = await self.db.execute(
-                    text(
-                        """
-                        SELECT law_code_normalized,
-                               coalesce(nullif(title, ''), law_code_normalized) AS title
-                        FROM legal_catalog_corpus
-                        WHERE title ILIKE :pattern
-                        ORDER BY law_code_normalized DESC
-                        LIMIT 1
-                        """
-                    ),
-                    {"pattern": f"%{request.law_name_hint}%"},
-                )
-                row = res.mappings().all()
-                if row:
-                    normalized_code = str(row[0]["law_code_normalized"])
-                    resolved_title = str(row[0]["title"])
-            except Exception:
-                pass
+            hints_to_try = [request.law_name_hint]
+            no_year = re.sub(r"\s+\d{4}$", "", request.law_name_hint).strip()
+            if no_year != request.law_name_hint:
+                hints_to_try.append(no_year)
+
+            for hint in hints_to_try:
+                try:
+                    res = await self.db.execute(
+                        text(
+                            """
+                            SELECT law_code_normalized,
+                                   coalesce(nullif(title, ''), law_code_normalized) AS title
+                            FROM legal_catalog_corpus
+                            WHERE title ILIKE :pattern
+                            ORDER BY law_code_normalized DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {"pattern": f"%{hint}%"},
+                    )
+                    row = res.mappings().all()
+                    if row:
+                        normalized_code = str(row[0]["law_code_normalized"])
+                        resolved_title = str(row[0]["title"])
+                        break
+                except Exception:
+                    pass
 
         if not normalized_code:
             return (
