@@ -137,6 +137,37 @@ def test_instant_chat_generates_structured_citations_in_one_model_call() -> None
     ai.complete.assert_not_awaited()
 
 
+def test_structured_generation_normalizes_malformed_inline_citation() -> None:
+    ai = SimpleNamespace(
+        complete=AsyncMock(),
+        complete_json=AsyncMock(
+            return_value={
+                "statements": [
+                    {
+                        "text": "Mức lương làm thêm giờ ít nhất bằng 200% [S3.",
+                        "citations": ["S3"],
+                    }
+                ]
+            }
+        ),
+    )
+
+    answer = asyncio.run(
+        _complete_with_citation_repair(
+            ai,
+            "system",
+            "prompt",
+            allowed_ids=["S3"],
+            max_tokens=900,
+            structured_initial=True,
+        )
+    )
+
+    assert answer == "- Mức lương làm thêm giờ ít nhất bằng 200% [S3]."
+    ai.complete_json.assert_awaited_once()
+    ai.complete.assert_not_awaited()
+
+
 class _FreshnessMustNotRun:
     async def verify_sources(self, _: list[dict]) -> tuple[object, bool]:
         raise AssertionError("Freshness must not run when retrieval has no legal source")

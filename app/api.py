@@ -1504,13 +1504,39 @@ def _render_citation_statements(
 ) -> str:
     """Render schema-constrained claims with a citation on every sentence."""
 
-    validate_citations(structured, allowed_ids)
+    normalized_statements: list[dict[str, Any]] = []
+    for raw_statement in structured.get("statements", []):
+        text = str(raw_statement.get("text") or "")
+        # The schema's citations array is authoritative. Gemini occasionally
+        # repeats a citation in text, including malformed tails such as
+        # ``[S3.``. Remove both complete and truncated copies before validating
+        # and rendering the selected IDs ourselves.
+        text = re.sub(
+            r"\s*,?\s*\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"\s*,?\s*\[\s*S\d+\s*(?=$|[.,;:!?])",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        normalized_statements.append(
+            {
+                "text": text,
+                "citations": raw_statement.get("citations", []),
+            }
+        )
+    normalized = {"statements": normalized_statements}
+    validate_citations(normalized, allowed_ids)
     sources_by_id = {
         str(source.get("source_id") or "").strip().upper(): source
         for source in sources or []
     }
     rendered_units: list[str] = []
-    for statement in structured["statements"]:
+    for statement in normalized["statements"]:
         citations = list(
             dict.fromkeys(
                 str(item).strip().upper()
@@ -1518,12 +1544,7 @@ def _render_citation_statements(
             )
         )
         suffix = " ".join(f"[{item}]" for item in citations)
-        text = re.sub(
-            r"(?:\s*,?\s*\[(?:S\d+)\])+",
-            "",
-            str(statement["text"]),
-            flags=re.IGNORECASE,
-        ).strip()
+        text = str(statement["text"])
         text = re.sub(r"\s+([,.!?;:])", r"\1", text)
         for unit in re.split(r"(?<=[.!?;])\s+|\n+", text):
             unit = unit.strip()
