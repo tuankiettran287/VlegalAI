@@ -193,11 +193,35 @@ _NON_LABOR_SCOPE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(?:xử\s+lý\s+vi\s+phạm\s+hành\s+chính|vi\s+phạm\s+giao\s+thông|phạt\s+giao\s+thông|bằng\s+lái)\b", re.IGNORECASE),
 ]
 
+_NON_LABOR_SCOPE_PHRASES = (
+    "hop dong dan su",
+    "tranh chap dan su",
+    "khoi kien dan su",
+    "to tung dan su",
+    "bo luat dan su",
+    "luat dan su",
+)
+
+
+def _normalize_scope_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "").casefold())
+    without_marks = "".join(
+        character
+        for character in normalized
+        if not unicodedata.combining(character)
+    )
+    return " ".join(re.findall(r"[a-z0-9]+", without_marks))
+
 
 def _check_non_labor_scope(message: str) -> str | None:
     """Detect queries clearly outside the Labor Law scope."""
+    normalized_message = _normalize_scope_text(message)
+    phrase_match = any(
+        phrase in normalized_message
+        for phrase in _NON_LABOR_SCOPE_PHRASES
+    )
     for pat in _NON_LABOR_SCOPE_PATTERNS:
-        if pat.search(message):
+        if phrase_match or pat.search(message):
             logger.info("non_labor_scope_detected query=%s", message[:80])
             return (
                 "VLegal AI hiện tại là trợ lý chuyên sâu về **Pháp luật Lao động Việt Nam** "
