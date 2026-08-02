@@ -179,6 +179,10 @@ _NON_LABOR_SCOPE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(?:luật|quy\s+định|xem\s+luật)?\s*đất\s+đai\b", re.IGNORECASE),
     re.compile(r"\b(?:thành\s+lập|đăng\s+ký|giấy\s+phép)\s+(?:công\s+ty|doanh\s+nghiệp)\b", re.IGNORECASE),
     re.compile(r"\b(?:luật|bộ\s+luật)\s+dân\s+sự\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:hợp\s+đồng|tranh\s+chấp|khởi\s+kiện)\s+dân\s+sự\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(?:tố\s+tụng\s+dân\s+sự|hình\s+sự|luật\s+hình\s+sự)\b", re.IGNORECASE),
     re.compile(r"\b(?:sổ\s+đỏ|sổ\s+hồng|quy\s+hoạch\s+đất|thu\s+hồi\s+đất|bất\s+động\s+sản)\b", re.IGNORECASE),
     re.compile(r"\b(?:hôn\s+nhân\s+gia\s+đình|ly\s+hôn|kết\s+hôn|thừa\s+kế|tài\s+sản\s+thừa\s+kế)\b", re.IGNORECASE),
@@ -2240,6 +2244,7 @@ async def chat(
         "elapsed_actual_ms": 0.0,
         "citation_repair_called": False,
     }
+    generation_fallback = False
 
     t_auth0 = time.perf_counter()
     authenticated_user_id = user.id
@@ -2770,6 +2775,7 @@ async def chat(
                     _gen_timeout,
                 )
                 answer = AI_TEMPORARILY_UNAVAILABLE_MESSAGE
+                generation_fallback = True
                 sources = []
                 verification = VerificationReport(
                     checked=False,
@@ -2959,7 +2965,7 @@ async def chat(
         else "cache_hit"
         if cache_hit
         else "fallback"
-        if answer == AI_TEMPORARILY_UNAVAILABLE_MESSAGE
+        if generation_fallback
         else "draft_valid"
     )
 

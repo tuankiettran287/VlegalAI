@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from app.api import (
     AI_TEMPORARILY_UNAVAILABLE_MESSAGE,
+    _check_non_labor_scope,
     _complete_with_citation_repair,
     _legal_sources,
     _summary_prompt,
@@ -504,7 +505,9 @@ def test_legal_sources_keeps_retrieved_data_when_freshness_fails_for_chat() -> N
     assert "private provider detail" not in str(verification)
 
 
-def test_chat_returns_http_success_payload_when_generation_is_unavailable() -> None:
+def test_chat_returns_http_success_payload_when_generation_is_unavailable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class _Db:
         def __init__(self) -> None:
             self.added: list[object] = []
@@ -603,6 +606,17 @@ def test_chat_returns_http_success_payload_when_generation_is_unavailable() -> N
     assert result.verification.note == AI_TEMPORARILY_UNAVAILABLE_MESSAGE
     assert result.temporary is False
     memory.refresh.assert_awaited_once()
+    assert "Legal chat failed" in caplog.text
+    assert "outcome=fallback" in caplog.text
+
+
+def test_non_labor_scope_catches_civil_contract_disputes() -> None:
+    answer = _check_non_labor_scope(
+        "Thời hiệu khởi kiện tranh chấp hợp đồng dân sự được tính thế nào?"
+    )
+
+    assert answer is not None
+    assert "Pháp luật Lao động Việt Nam" in answer
 
 
 def test_gemini_error_handler_does_not_expose_internal_details() -> None:
