@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from app.api import (
     AI_TEMPORARILY_UNAVAILABLE_MESSAGE,
     _check_non_labor_scope,
+    _normalize_scope_text,
     _complete_with_citation_repair,
     _legal_sources,
     _summary_prompt,
@@ -611,6 +612,7 @@ def test_chat_returns_http_success_payload_when_generation_is_unavailable(
 
 
 def test_non_labor_scope_catches_civil_contract_disputes() -> None:
+    assert _normalize_scope_text("Hợp đồng dân sự") == "hop dong dan su"
     answer = _check_non_labor_scope(
         "Thời hiệu khởi kiện tranh chấp hợp đồng dân sự được tính thế nào?"
     )

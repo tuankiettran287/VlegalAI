@@ -209,7 +209,7 @@ def _normalize_scope_text(value: str) -> str:
         character
         for character in normalized
         if not unicodedata.combining(character)
-    )
+    ).replace("đ", "d")
     return " ".join(re.findall(r"[a-z0-9]+", without_marks))
 
 
