@@ -180,7 +180,11 @@ _NON_LABOR_SCOPE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(?:thành\s+lập|đăng\s+ký|giấy\s+phép)\s+(?:công\s+ty|doanh\s+nghiệp)\b", re.IGNORECASE),
     re.compile(r"\b(?:luật|bộ\s+luật)\s+dân\s+sự\b", re.IGNORECASE),
     re.compile(
-        r"\b(?:hợp\s+đồng|tranh\s+chấp|khởi\s+kiện)\s+dân\s+sự\b",
+        r"\b(?:(?:tranh\s+chấp|khởi\s+kiện)\s+)?hợp\s+đồng\s+dân\s+sự\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:tranh\s+chấp|khởi\s+kiện)\s+dân\s+sự\b",
         re.IGNORECASE,
     ),
     re.compile(r"\b(?:tố\s+tụng\s+dân\s+sự|hình\s+sự|luật\s+hình\s+sự)\b", re.IGNORECASE),

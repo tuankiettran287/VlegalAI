@@ -618,6 +618,11 @@ def test_non_labor_scope_catches_civil_contract_disputes() -> None:
     assert answer is not None
     assert "Pháp luật Lao động Việt Nam" in answer
 
+    direct_dispute = _check_non_labor_scope(
+        "Thời hiệu khởi kiện tranh chấp dân sự là bao lâu?"
+    )
+    assert direct_dispute is not None
+
 
 def test_gemini_error_handler_does_not_expose_internal_details() -> None:
     from app.main import gemini_error
