@@ -2425,6 +2425,9 @@ async def chat(
     timings["context"] = round((time.perf_counter() - context_started) * 1000, 1)
     routing_started = time.perf_counter()
     catalog_answer: str | None = None
+    guard_answer: str | None = None
+    guard_cache_mode: str | None = None
+    guard_verification: dict[str, Any] | None = None
     catalog_req = (
         parse_catalog_request(current_question)
         if greeting_answer is None
@@ -2463,9 +2466,9 @@ async def chat(
         # --- Prompt injection and Out-of-Scope guards (Python layer) ---
         injection_block = _check_prompt_injection(payload.message)
         if injection_block is not None:
-            answer = injection_block
-            cache_mode = "injection_blocked"
-            verification = VerificationReport(
+            guard_answer = injection_block
+            guard_cache_mode = "injection_blocked"
+            guard_verification = VerificationReport(
                 checked=False,
                 all_current=False,
                 checked_at=datetime.now(UTC),
@@ -2478,9 +2481,9 @@ async def chat(
         else:
             scope_block = _check_non_labor_scope(payload.message)
             if scope_block is not None:
-                answer = scope_block
-                cache_mode = "out_of_scope"
-                verification = VerificationReport(
+                guard_answer = scope_block
+                guard_cache_mode = "out_of_scope"
+                guard_verification = VerificationReport(
                     checked=False,
                     all_current=False,
                     checked_at=datetime.now(UTC),
@@ -2542,7 +2545,12 @@ async def chat(
         None,
     )
     structure_started = time.perf_counter()
-    if greeting_answer is None and catalog_answer is None and callable(structure_lookup):
+    if (
+        greeting_answer is None
+        and catalog_answer is None
+        and guard_answer is None
+        and callable(structure_lookup)
+    ):
         structure_result = await structure_lookup(retrieval_query)
         if structure_result is not None:
             log_progress(
@@ -2560,11 +2568,12 @@ async def chat(
     cache_lookup: CacheLookup | None = None
     cache_hit = False
     cache_similarity: float | None = None
-    cache_mode = "miss"
+    cache_mode = guard_cache_mode or "miss"
     cached_draft = ""
     answer = (
         greeting_answer
         or catalog_answer
+        or guard_answer
         or str((structure_result or {}).get("answer") or "")
     )
     structure_source = (structure_result or {}).get("source")
@@ -2581,6 +2590,8 @@ async def chat(
             items=[],
             note="catalog_deterministic",
         ).model_dump(mode="json")
+    elif guard_verification is not None:
+        verification = guard_verification
     elif structure_result is not None:
         verification = VerificationReport(
             checked=False,
@@ -2601,6 +2612,7 @@ async def chat(
     answer_ready = (
         greeting_answer is not None
         or catalog_answer is not None
+        or guard_answer is not None
         or structure_result is not None
     )
     cache_eligible = (

@@ -867,7 +867,24 @@ def test_chat_returns_and_persists_data_unavailable_without_calling_ai() -> None
     memory.refresh.assert_awaited_once()
 
 
-def test_chat_persists_greeting_without_retrieval_cache_or_ai() -> None:
+@pytest.mark.parametrize(
+    ("message", "answer_fragment", "expected_cache_mode", "expected_note"),
+    [
+        ("Hi", "Hello Minh!", "miss", ""),
+        (
+            "Thời hiệu khởi kiện tranh chấp hợp đồng dân sự được tính thế nào?",
+            "Pháp luật Lao động Việt Nam",
+            "out_of_scope",
+            "out_of_scope_non_labor",
+        ),
+    ],
+)
+def test_chat_persists_deterministic_answer_without_retrieval_cache_or_ai(
+    message: str,
+    answer_fragment: str,
+    expected_cache_mode: str,
+    expected_note: str,
+) -> None:
     class _Db:
         def __init__(self) -> None:
             self.added: list[object] = []
@@ -924,7 +941,7 @@ def test_chat_persists_greeting_without_retrieval_cache_or_ai() -> None:
 
     result = asyncio.run(
         chat(
-            ChatRequest(message="Hi"),
+            ChatRequest(message=message),
             db=db,
             user=SimpleNamespace(id=uuid.uuid4(), preferred_name="Minh"),
             settings=Settings(
@@ -939,19 +956,22 @@ def test_chat_persists_greeting_without_retrieval_cache_or_ai() -> None:
         )
     )
 
-    assert result.answer.startswith("Hello Minh!")
+    assert answer_fragment in result.answer
     assert result.sources == []
     assert result.verification.checked is False
     assert result.verification.items == []
-    assert result.verification.note == ""
+    assert result.verification.note == expected_note
     assert result.cache_hit is False
-    assert result.cache_mode == "miss"
+    assert result.cache_mode == expected_cache_mode
     assert len([value for value in db.added if isinstance(value, ChatMessage)]) == 2
     assert db.commits == 1
     ai.complete.assert_not_awaited()
     ai.complete_json.assert_not_awaited()
     memory.get_summary.assert_not_awaited()
-    memory.refresh.assert_not_awaited()
+    if expected_note:
+        memory.refresh.assert_awaited_once()
+    else:
+        memory.refresh.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
