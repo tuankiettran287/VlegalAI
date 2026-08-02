@@ -115,6 +115,7 @@ from app.services.retrieval import (
     build_answer_plan,
     build_context,
     compact_context_sources,
+    format_source_locator,
     select_context_sources,
 )
 from app.services.semantic_cache import (
@@ -1462,6 +1463,88 @@ def _validate_answer_plan_coverage(
         )
 
 
+def _citation_response_schema(allowed_ids: list[str]) -> dict[str, Any]:
+    """Constrain one model response to grounded, individually cited claims."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["statements"],
+        "properties": {
+            "statements": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["text", "citations"],
+                    "properties": {
+                        "text": {"type": "string"},
+                        "citations": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "string",
+                                "enum": allowed_ids,
+                            },
+                        },
+                    },
+                },
+            }
+        },
+    }
+
+
+def _render_citation_statements(
+    structured: dict[str, Any],
+    allowed_ids: list[str],
+    *,
+    sources: list[dict[str, Any]] | None = None,
+) -> str:
+    """Render schema-constrained claims with a citation on every sentence."""
+
+    validate_citations(structured, allowed_ids)
+    sources_by_id = {
+        str(source.get("source_id") or "").strip().upper(): source
+        for source in sources or []
+    }
+    rendered_units: list[str] = []
+    for statement in structured["statements"]:
+        citations = list(
+            dict.fromkeys(
+                str(item).strip().upper()
+                for item in statement["citations"]
+            )
+        )
+        suffix = " ".join(f"[{item}]" for item in citations)
+        text = re.sub(
+            r"(?:\s*,?\s*\[(?:S\d+)\])+",
+            "",
+            str(statement["text"]),
+            flags=re.IGNORECASE,
+        ).strip()
+        text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+        for unit in re.split(r"(?<=[.!?;])\s+|\n+", text):
+            unit = unit.strip()
+            if not unit:
+                continue
+            terminal = unit[-1] if unit[-1] in ".!?;" else ""
+            body = unit[:-1].rstrip() if terminal else unit
+            if sources is not None and not rendered_units:
+                if not body.lstrip().startswith("Theo "):
+                    source = sources_by_id.get(citations[0])
+                    if source is not None:
+                        body = f"Theo {format_source_locator(source)}, {body}"
+                prefix = ""
+            else:
+                prefix = "- "
+            rendered_units.append(f"{prefix}{body} {suffix}{terminal}")
+    if not rendered_units:
+        raise GeminiError("Gemini không trả về nhận định pháp lý có trích dẫn.")
+    return "\n".join(rendered_units)
+
+
 async def _complete_with_citation_repair(
     ai: GeminiService,
     system: str,
@@ -1473,6 +1556,7 @@ async def _complete_with_citation_repair(
     max_tokens: int,
     temperature: float = 0.1,
     thinking_budget: int | None = None,
+    structured_initial: bool = False,
     skip_soft_repair: bool = False,
     generation_timeout: float | None = None,
     citation_repair_timeout: float | None = None,
@@ -1494,24 +1578,35 @@ async def _complete_with_citation_repair(
         telemetry["citation_normalize_ms"] = 0.0
         telemetry["citation_repair_ms"] = 0.0
 
-    try:
-        if generation_timeout and generation_timeout > 0:
-            async with asyncio.timeout(generation_timeout):
-                answer = await ai.complete(
-                    system,
-                    prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    thinking_budget=thinking_budget,
-                )
-        else:
-            answer = await ai.complete(
+    async def _generate_initial_answer() -> str:
+        if structured_initial:
+            structured = await ai.complete_json(
                 system,
                 prompt,
+                schema=_citation_response_schema(allowed_ids),
                 max_tokens=max_tokens,
                 temperature=temperature,
                 thinking_budget=thinking_budget,
             )
+            return _render_citation_statements(
+                structured,
+                allowed_ids,
+                sources=sources,
+            )
+        return await ai.complete(
+            system,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking_budget=thinking_budget,
+        )
+
+    try:
+        if generation_timeout and generation_timeout > 0:
+            async with asyncio.timeout(generation_timeout):
+                answer = await _generate_initial_answer()
+        else:
+            answer = await _generate_initial_answer()
     except Exception as _te:
         gen_ms = round((time.perf_counter() - operation_started) * 1000, 1)
         if telemetry is not None:
@@ -1628,33 +1723,7 @@ async def _complete_with_citation_repair(
             "nêu và giải thích cách áp dụng.\n"
             f"{untrusted_data_block('DRAFT_WITH_INVALID_CITATIONS', answer)}"
         )
-        repair_schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["statements"],
-            "properties": {
-                "statements": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["text", "citations"],
-                        "properties": {
-                            "text": {"type": "string"},
-                            "citations": {
-                                "type": "array",
-                                "minItems": 1,
-                                "items": {
-                                    "type": "string",
-                                    "enum": allowed_ids,
-                                },
-                            },
-                        },
-                    },
-                }
-            },
-        }
+        repair_schema = _citation_response_schema(allowed_ids)
         _repair_timeout = citation_repair_timeout or 0
         repair_start = time.perf_counter()
         try:
@@ -1712,35 +1781,11 @@ async def _complete_with_citation_repair(
             "citation_repair_response_received",
             operation_started,
         )
-        validate_citations(structured, allowed_ids)
-        repaired_units: list[str] = []
-        for statement in structured["statements"]:
-            citations = list(dict.fromkeys(
-                str(item).strip().upper()
-                for item in statement["citations"]
-            ))
-            suffix = " ".join(f"[{item}]" for item in citations)
-            text = re.sub(
-                r"(?:\s*,?\s*\[(?:S\d+)\])+",
-                "",
-                str(statement["text"]),
-                flags=re.IGNORECASE,
-            ).strip()
-            text = re.sub(r"\s+([,.!?;:])", r"\1", text)
-            for unit in re.split(r"(?<=[.!?;])\s+|\n+", text):
-                unit = unit.strip()
-                if unit:
-                    terminal = unit[-1] if unit[-1] in ".!?;" else ""
-                    body = unit[:-1].rstrip() if terminal else unit
-                    prefix = (
-                        ""
-                        if sources is not None and not repaired_units
-                        else "- "
-                    )
-                    repaired_units.append(
-                        f"{prefix}{body} {suffix}{terminal}"
-                    )
-        repaired = "\n".join(repaired_units)
+        repaired = _render_citation_statements(
+            structured,
+            allowed_ids,
+            sources=sources,
+        )
         try:
             _validate_answer_safety(
                 repaired,
@@ -2686,6 +2731,7 @@ async def chat(
                     answer_plan=answer_plan,
                     max_tokens=effort_profile.max_output_tokens,
                     thinking_budget=effort_profile.thinking_budget,
+                    structured_initial=(effort_profile.name == "instant"),
                     skip_soft_repair=(effort_profile.name == "instant"),
                     generation_timeout=_gen_timeout,
                     citation_repair_timeout=_repair_timeout,
@@ -2752,15 +2798,16 @@ async def chat(
     if is_new_conversation and greeting_answer is None:
         answer = f"Chào {preferred_name},\n\n{answer}"
 
-    for timing_name in (
-        "generation_initial",
-        "citation_normalize",
-        "citation_repair",
-    ):
+    for timing_name, telemetry_name in {
+        "generation_initial": "generation_initial_ms",
+        "citation_normalize": "citation_normalize_ms",
+        "citation_repair": "citation_repair_ms",
+    }.items():
         timings[timing_name] = round(
-            float(telemetry_details.get(timing_name, 0.0) or 0.0),
+            float(telemetry_details.get(telemetry_name, 0.0) or 0.0),
             1,
         )
+
 
     message_id = uuid.uuid4()
     persistence_started = time.perf_counter()

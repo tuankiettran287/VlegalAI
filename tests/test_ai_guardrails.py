@@ -93,6 +93,50 @@ def test_chat_answer_repairs_missing_claim_citations_once() -> None:
     assert "DRAFT_WITH_INVALID_CITATIONS" in ai.prompts[1]
 
 
+def test_instant_chat_generates_structured_citations_in_one_model_call() -> None:
+    ai = SimpleNamespace(
+        complete=AsyncMock(),
+        complete_json=AsyncMock(
+            return_value={
+                "statements": [
+                    {
+                        "text": "Người sử dụng lao động chỉ được đơn phương chấm dứt hợp đồng trong trường hợp được quy định.",
+                        "citations": ["S1"],
+                    },
+                    {
+                        "text": "Người lao động phải thường xuyên không hoàn thành công việc theo tiêu chí hợp lệ.",
+                        "citations": ["S1"],
+                    },
+                ]
+            }
+        ),
+    )
+    source = {
+        "source_id": "S1",
+        "citation": "Bộ luật Lao động (45/2019/QH14) > Điều 36",
+        "title": "Bộ luật Lao động",
+        "article": "Điều 36",
+        "text": "Điều 36 quy định quyền đơn phương chấm dứt hợp đồng lao động.",
+    }
+
+    answer = asyncio.run(
+        _complete_with_citation_repair(
+            ai,
+            "system",
+            "prompt",
+            allowed_ids=["S1"],
+            sources=[source],
+            max_tokens=900,
+            structured_initial=True,
+        )
+    )
+
+    assert answer.startswith("Theo ")
+    assert answer.count("[S1]") == 2
+    ai.complete_json.assert_awaited_once()
+    ai.complete.assert_not_awaited()
+
+
 class _FreshnessMustNotRun:
     async def verify_sources(self, _: list[dict]) -> tuple[object, bool]:
         raise AssertionError("Freshness must not run when retrieval has no legal source")

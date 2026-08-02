@@ -134,6 +134,17 @@ class _AI:
             "đây là quy định pháp luật thử nghiệm."
         )
 
+    async def complete_json(self, *_: object, **__: object) -> dict:
+        assert self.db.rolled_back
+        return {
+            "statements": [
+                {
+                    "text": "Đây là quy định pháp luật thử nghiệm.",
+                    "citations": ["S1"],
+                }
+            ]
+        }
+
 
 class _Cache:
     @staticmethod

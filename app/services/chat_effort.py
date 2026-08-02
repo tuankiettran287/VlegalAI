@@ -21,7 +21,7 @@ CHAT_EFFORT_PROFILES: dict[ChatEffort, ChatEffortProfile] = {
     "instant": ChatEffortProfile(
         name="instant",
         thinking_budget=0,
-        max_output_tokens=1_200,
+        max_output_tokens=900,
         retrieval_top_k=5,
         retrieval_query_limit=1,
         skip_query_rewrite=True,
