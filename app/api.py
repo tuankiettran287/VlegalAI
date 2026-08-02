@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import current_user, optional_user, require_roles
 from app.auth import router as auth_router
 from app.core.config import Settings, get_settings
-from app.core.observability import log_progress
+from app.core.observability import current_request_id, log_progress
 from app.core.security import decrypt_text, encrypt_text
 from app.db import get_db
 from app.models import (
@@ -759,8 +759,15 @@ async def _legal_sources(
     *,
     allow_empty: bool = False,
     effort: ChatEffort = "medium",
+    telemetry: dict[str, float] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     operation_started = time.perf_counter()
+
+    def add_timing(name: str, started_at: float) -> None:
+        if telemetry is None:
+            return
+        elapsed = round((time.perf_counter() - started_at) * 1000, 1)
+        telemetry[name] = round(float(telemetry.get(name, 0.0)) + elapsed, 1)
     log_progress(
         logger,
         "legal_sources",
@@ -893,6 +900,7 @@ async def _legal_sources(
     except Exception as exc:
         logger.warning("Retrieval failed: %s", exc)
         sources = []
+    add_timing("retrieval", retrieval_started)
     log_progress(
         logger,
         "legal_sources",
@@ -950,17 +958,21 @@ async def _legal_sources(
                 timeout=freshness_timeout,
             )
         except (FreshnessUnavailable, asyncio.TimeoutError) as exc:
+            add_timing("freshness", freshness_started)
             logger.warning(
                 "Freshness verification unavailable or timed out error_type=%s",
                 type(exc).__name__,
             )
             return freshness_unavailable_result(sources)
         except Exception as exc:
+            add_timing("freshness", freshness_started)
             logger.warning(
                 "Freshness verification failed error_type=%s",
                 type(exc).__name__,
             )
             return freshness_unavailable_result(sources)
+
+        add_timing("freshness", freshness_started)
 
         raw_items = getattr(verification, "items", [])
         verification_items = (
@@ -1015,6 +1027,7 @@ async def _legal_sources(
                 replacement_count=len(followed_replacements),
             )
             sources = usable_sources(await retrieve_sources(retrieval_query))
+            add_timing("retrieval", replacement_retrieval_started)
             log_progress(
                 logger,
                 "legal_sources",
@@ -2127,7 +2140,6 @@ async def rate_chat_answer(
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
-    response: Response,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
     settings: Settings = Depends(get_settings),
@@ -2136,19 +2148,18 @@ async def chat(
     ai: GeminiService = Depends(ai_service),
     memory: ConversationMemoryService = Depends(conversation_memory_service),
     answer_cache: SemanticAnswerCacheService = Depends(semantic_answer_cache_service),
+    response: Response = None,
 ) -> ChatResponse:
-    request_id = str(uuid.uuid4())
-    response.headers["X-Request-ID"] = request_id
+    request_id = current_request_id()
 
     timings: dict[str, float] = {
         "auth": 0.0,
+        "context": 0.0,
         "routing": 0.0,
         "cache": 0.0,
         "rewrite": 0.0,
-        "embedding": 0.0,
-        "postgres": 0.0,
-        "bm25": 0.0,
-        "neo4j": 0.0,
+        "structure": 0.0,
+        "retrieval": 0.0,
         "freshness": 0.0,
         "generation_initial": 0.0,
         "citation_normalize": 0.0,
@@ -2187,6 +2198,7 @@ async def chat(
         )
 
     operation_started = time.perf_counter()
+    context_started = time.perf_counter()
     effort_profile = chat_effort_profile(payload.effort)
     conversation: Conversation | None = None
     conversation_id: uuid.UUID | None = None
@@ -2311,6 +2323,8 @@ async def chat(
         history_turn_count=len(history_turns),
         summary_available=bool(summary_context),
     )
+    timings["context"] = round((time.perf_counter() - context_started) * 1000, 1)
+    routing_started = time.perf_counter()
     catalog_answer: str | None = None
     catalog_req = (
         parse_catalog_request(current_question)
@@ -2408,6 +2422,19 @@ async def chat(
                     skipped_for_effort=effort_profile.skip_query_rewrite,
                     trigger_detected=rewrite_triggered,
                 )
+                timings["rewrite"] = round(
+                    (time.perf_counter() - rewrite_started) * 1000,
+                    1,
+                )
+
+    timings["routing"] = max(
+        0.0,
+        round(
+            (time.perf_counter() - routing_started) * 1000
+            - timings["rewrite"],
+            1,
+        ),
+    )
 
     structure_result: dict[str, Any] | None = None
     structure_lookup = getattr(
@@ -2415,7 +2442,8 @@ async def chat(
         "lookup_document_structure",
         None,
     )
-    if greeting_answer is None and callable(structure_lookup):
+    structure_started = time.perf_counter()
+    if greeting_answer is None and catalog_answer is None and callable(structure_lookup):
         structure_result = await structure_lookup(retrieval_query)
         if structure_result is not None:
             log_progress(
@@ -2425,6 +2453,10 @@ async def chat(
                 operation_started,
                 outcome="deterministic_graph_count",
             )
+    timings["structure"] = round(
+        (time.perf_counter() - structure_started) * 1000,
+        1,
+    )
 
     cache_lookup: CacheLookup | None = None
     cache_hit = False
@@ -2511,6 +2543,10 @@ async def chat(
         candidate_found=bool(cache_lookup and cache_lookup.hit),
         phase_ms=round((time.perf_counter() - cache_lookup_started) * 1000),
     )
+    timings["cache"] = round(
+        (time.perf_counter() - cache_lookup_started) * 1000,
+        1,
+    )
 
     if cache_lookup and cache_lookup.hit:
         cached = cache_lookup.hit
@@ -2529,6 +2565,7 @@ async def chat(
                 freshness,
                 allow_empty=True,
                 effort=effort_profile.name,
+                telemetry=timings,
             )
             fingerprint_matches = (
                 legal_fingerprint(current_sources, current_verification)
@@ -2591,6 +2628,7 @@ async def chat(
                 freshness,
                 allow_empty=True,
                 effort=effort_profile.name,
+                telemetry=timings,
             )
         if not sources:
             answer = LEGAL_DATA_UNAVAILABLE_MESSAGE
@@ -2714,6 +2752,16 @@ async def chat(
     if is_new_conversation and greeting_answer is None:
         answer = f"Chào {preferred_name},\n\n{answer}"
 
+    for timing_name in (
+        "generation_initial",
+        "citation_normalize",
+        "citation_repair",
+    ):
+        timings[timing_name] = round(
+            float(telemetry_details.get(timing_name, 0.0) or 0.0),
+            1,
+        )
+
     message_id = uuid.uuid4()
     persistence_started = time.perf_counter()
     log_progress(logger, "chat", "persistence_started", operation_started)
@@ -2832,7 +2880,8 @@ async def chat(
     timings["total"] = total_ms
 
     server_timing_parts = [f"{k};dur={v:.1f}" for k, v in timings.items()]
-    response.headers["Server-Timing"] = ", ".join(server_timing_parts)
+    if response is not None:
+        response.headers["Server-Timing"] = ", ".join(server_timing_parts)
 
     outcome = (
         "greeting"
@@ -2850,8 +2899,8 @@ async def chat(
         logger.warning(
             "Legal chat failed request_id=%s outcome=fallback effort=%s total_ms=%.1f "
             "failed_stage=%s exception_type=%s timeout_configured=%.1f elapsed_actual_ms=%.1f "
-            "citation_repair_called=%s auth_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f "
-            "embedding_ms=%.1f postgres_ms=%.1f bm25_ms=%.1f neo4j_ms=%.1f freshness_ms=%.1f "
+            "citation_repair_called=%s auth_ms=%.1f context_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f "
+            "structure_ms=%.1f retrieval_ms=%.1f freshness_ms=%.1f "
             "generation_initial_ms=%.1f citation_normalize_ms=%.1f citation_repair_ms=%.1f persistence_ms=%.1f",
             request_id,
             effort_profile.name,
@@ -2862,13 +2911,12 @@ async def chat(
             telemetry_details.get("elapsed_actual_ms", 0.0),
             telemetry_details.get("citation_repair_called", False),
             timings["auth"],
+            timings["context"],
             timings["routing"],
             timings["cache"],
             timings["rewrite"],
-            timings["embedding"],
-            timings["postgres"],
-            timings["bm25"],
-            timings["neo4j"],
+            timings["structure"],
+            timings["retrieval"],
             timings["freshness"],
             timings["generation_initial"],
             timings["citation_normalize"],
@@ -2878,21 +2926,20 @@ async def chat(
     else:
         logger.info(
             "Legal chat completed request_id=%s outcome=%s effort=%s total_ms=%.1f "
-            "auth_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f embedding_ms=%.1f "
-            "postgres_ms=%.1f bm25_ms=%.1f neo4j_ms=%.1f freshness_ms=%.1f generation_initial_ms=%.1f "
+            "auth_ms=%.1f context_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f "
+            "structure_ms=%.1f retrieval_ms=%.1f freshness_ms=%.1f generation_initial_ms=%.1f "
             "citation_normalize_ms=%.1f citation_repair_ms=%.1f persistence_ms=%.1f source_count=%d answer_chars=%d",
             request_id,
             outcome,
             effort_profile.name,
             total_ms,
             timings["auth"],
+            timings["context"],
             timings["routing"],
             timings["cache"],
             timings["rewrite"],
-            timings["embedding"],
-            timings["postgres"],
-            timings["bm25"],
-            timings["neo4j"],
+            timings["structure"],
+            timings["retrieval"],
             timings["freshness"],
             timings["generation_initial"],
             timings["citation_normalize"],
