@@ -132,7 +132,6 @@ jobs:
           platforms: linux/amd64
           push: false
           tags: vlegal-app:ci
-          cache-from: type=gha,scope=vlegal-app
 
   deploy:
     name: Build images and deploy production
@@ -329,8 +328,6 @@ jobs:
           push: true
           tags: |
             ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GCP_REPOSITORY }}/vlegal-app:${{ env.IMAGE_TAG }}
-          cache-from: type=gha,scope=vlegal-app
-          cache-to: type=gha,mode=max,scope=vlegal-app
 
       - name: Deploy Cloud Run services, jobs and worker pools
         shell: pwsh
