@@ -1395,6 +1395,8 @@ async def _complete_with_citation_repair(
     temperature: float = 0.1,
     thinking_budget: int | None = None,
     skip_soft_repair: bool = False,
+    generation_timeout: float | None = None,
+    citation_repair_timeout: float | None = None,
 ) -> str:
     operation_started = time.perf_counter()
     log_progress(
@@ -1402,15 +1404,32 @@ async def _complete_with_citation_repair(
         "answer_generation",
         "draft_started",
         operation_started,
+        generation_timeout=generation_timeout,
         source_count=len(allowed_ids),
+        thinking_budget=thinking_budget or 0,
     )
-    answer = await ai.complete(
-        system,
-        prompt,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        thinking_budget=thinking_budget,
-    )
+    try:
+        if generation_timeout and generation_timeout > 0:
+            async with asyncio.timeout(generation_timeout):
+                answer = await ai.complete(
+                    system,
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    thinking_budget=thinking_budget,
+                )
+        else:
+            answer = await ai.complete(
+                system,
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                thinking_budget=thinking_budget,
+            )
+    except TimeoutError as _te:
+        raise GeminiError(
+            f"Generation timed out after {generation_timeout:.1f}s"
+        ) from _te
     log_progress(
         logger,
         "answer_generation",
@@ -1501,14 +1520,44 @@ async def _complete_with_citation_repair(
                 }
             },
         }
-        structured = await ai.complete_json(
-            system,
-            repair_prompt,
-            schema=repair_schema,
-            max_tokens=max_tokens,
-            temperature=0,
-            thinking_budget=thinking_budget,
-        )
+        _repair_timeout = citation_repair_timeout or 0
+        try:
+            if _repair_timeout > 0:
+                async with asyncio.timeout(_repair_timeout):
+                    structured = await ai.complete_json(
+                        system,
+                        repair_prompt,
+                        schema=repair_schema,
+                        max_tokens=max_tokens,
+                        temperature=0,
+                        thinking_budget=thinking_budget,
+                    )
+            else:
+                structured = await ai.complete_json(
+                    system,
+                    repair_prompt,
+                    schema=repair_schema,
+                    max_tokens=max_tokens,
+                    temperature=0,
+                    thinking_budget=thinking_budget,
+                )
+        except TimeoutError as _cte:
+            logger.warning(
+                "Citation repair timed out after %.1fs; retaining grounded draft",
+                _repair_timeout,
+            )
+            if draft_safety_valid:
+                log_progress(
+                    logger,
+                    "answer_generation",
+                    "completed",
+                    operation_started,
+                    outcome="citation_repair_timeout_draft_retained",
+                )
+                return answer
+            raise GeminiError(
+                f"Citation repair timed out after {_repair_timeout:.1f}s and draft was not grounded."
+            ) from _cte
         log_progress(
             logger,
             "answer_generation",
@@ -2366,6 +2415,13 @@ async def chat(
                 operation_started,
                 source_count=len(sources),
             )
+            generation_started = time.perf_counter()
+            _gen_timeout = (
+                settings.legal_chat_fast_timeout_seconds
+                if effort_profile.name == "instant"
+                else settings.legal_chat_generation_timeout_seconds
+            )
+            _repair_timeout = settings.legal_chat_citation_repair_timeout_seconds
             try:
                 answer = await _complete_with_citation_repair(
                     ai,
@@ -2398,11 +2454,19 @@ async def chat(
                     max_tokens=effort_profile.max_output_tokens,
                     thinking_budget=effort_profile.thinking_budget,
                     skip_soft_repair=(effort_profile.name == "instant"),
+                    generation_timeout=_gen_timeout,
+                    citation_repair_timeout=_repair_timeout,
                 )
             except GeminiError as exc:
+                generation_ms = round((time.perf_counter() - generation_started) * 1000)
                 logger.warning(
-                    "Chat generation unavailable error_type=%s",
+                    "Chat generation unavailable error_type=%s error=%s "
+                    "effort=%s generation_ms=%d generation_timeout=%.1f",
                     type(exc).__name__,
+                    str(exc)[:200],
+                    effort_profile.name,
+                    generation_ms,
+                    _gen_timeout,
                 )
                 answer = AI_TEMPORARILY_UNAVAILABLE_MESSAGE
                 sources = []
@@ -2419,15 +2483,20 @@ async def chat(
                     "chat",
                     "answer_generation_fallback",
                     operation_started,
+                    effort=effort_profile.name,
+                    error_type=type(exc).__name__,
+                    generation_ms=generation_ms,
                     outcome="ai_unavailable",
                 )
             else:
+                generation_ms = round((time.perf_counter() - generation_started) * 1000)
                 log_progress(
                     logger,
                     "chat",
                     "answer_generation_completed",
                     operation_started,
                     answer_chars=len(answer),
+                    generation_ms=generation_ms,
                     source_count=len(sources),
                 )
             if (
@@ -2570,6 +2639,7 @@ async def chat(
         operation_started,
         phase_ms=round((time.perf_counter() - persistence_started) * 1000),
     )
+    total_ms = round((time.perf_counter() - operation_started) * 1000)
     log_progress(
         logger,
         "chat",
@@ -2580,6 +2650,27 @@ async def chat(
         source_count=len(sources),
         greeting=greeting_answer is not None,
         temporary=False,
+        total_ms=total_ms,
+    )
+    # ── Aggregate telemetry ── searchable single-line summary for dashboards ──
+    logger.info(
+        "Legal chat completed "
+        "effort=%s "
+        "cache_mode=%s "
+        "total_ms=%d "
+        "source_count=%d "
+        "answer_chars=%d "
+        "thinking_budget=%d "
+        "model=%s "
+        "greeting=%s",
+        effort_profile.name,
+        cache_mode,
+        total_ms,
+        len(sources),
+        len(answer),
+        effort_profile.thinking_budget,
+        settings.gemini_model,
+        str(greeting_answer is not None).lower(),
     )
     return ChatResponse(
         conversation_id=conversation_id,
