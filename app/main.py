@@ -102,6 +102,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    expose_headers=["Server-Timing", "X-Request-ID"],
 )
 
 
@@ -149,6 +150,7 @@ async def request_context(request: Request, call_next):
         reset_request_id(request_id_token)
     assert response is not None
     response.headers["X-Request-ID"] = request_id
+    response.headers["Access-Control-Expose-Headers"] = "Server-Timing, X-Request-ID"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
