@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     # gemini_timeout_seconds (120 s by default).
     legal_chat_fast_timeout_seconds: float = Field(default=8.0, ge=2.0, le=60.0)
     legal_chat_generation_timeout_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
-    legal_chat_citation_repair_timeout_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
+    legal_chat_citation_repair_timeout_seconds: float = Field(default=3.5, ge=1.0, le=30.0)
     query_rewrite_enabled: bool = True
     query_rewrite_timeout_seconds: int = Field(default=12, ge=2, le=30)
     query_rewrite_min_confidence: float = Field(default=0.75, ge=0.5, le=1)

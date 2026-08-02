@@ -82,6 +82,7 @@ from app.services.ai import (
 )
 from app.services.articles import ArticleResearchService
 from app.services.chat_effort import ChatEffort, chat_effort_profile
+from app.services.legal_catalog import LegalCatalogService, parse_catalog_request
 from app.services.contract_analysis import (
     build_contract_diff,
     contract_retrieval_query,
@@ -1324,6 +1325,71 @@ def _answer_validation_kind(exc: BaseException) -> str:
     return "grounding"
 
 
+def _normalize_citations_deterministically(value: str, allowed_ids: list[str]) -> str:
+    """Fix common syntax & formatting issues in citations deterministically without LLM calls.
+    
+    Handles:
+    - Grouped citations: [S1, S2] or [S1; S2] -> [S1] [S2]
+    - Case normalization: [s1] -> [S1]
+    - Parenthesized citations: (S1) or (S1, S2) -> [S1] [S2]
+    - Period position: . [S1] -> [S1].
+    - Spacing around bracketed citations
+    """
+    if not value or not allowed_ids:
+        return value
+
+    allowed_set = {id.upper() for id in allowed_ids}
+
+    # 1. Split grouped citations inside brackets: [S1, S2] -> [S1] [S2]
+    def _fix_grouped_brackets(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        tokens = re.split(r"[,;]\s*", inner)
+        items = []
+        for token in tokens:
+            cleaned = token.strip().upper()
+            if cleaned in allowed_set:
+                items.append(f"[{cleaned}]")
+            else:
+                items.append(token.strip())
+        return " ".join(items)
+
+    normalized = re.sub(r"\[([S|s]\d+(?:\s*[,;]\s*[S|s]\d+)+)\]", _fix_grouped_brackets, value)
+
+    # 2. Case normalization for lower case [s1] -> [S1]
+    for sid in allowed_ids:
+        sid_upper = sid.upper()
+        sid_lower = sid.lower()
+        if sid_lower != sid_upper:
+            normalized = re.sub(rf"\[{re.escape(sid_lower)}\]", f"[{sid_upper}]", normalized)
+
+    # 3. Parentheses to brackets: (S1) -> [S1]
+    def _fix_grouped_parens(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        tokens = re.split(r"[,;]\s*", inner)
+        items = []
+        all_valid = True
+        for token in tokens:
+            cleaned = token.strip().upper()
+            if cleaned in allowed_set:
+                items.append(f"[{cleaned}]")
+            else:
+                all_valid = False
+                break
+        if all_valid and items:
+            return " ".join(items)
+        return match.group(0)
+
+    normalized = re.sub(r"\(([S|s]\d+(?:\s*[,;]\s*[S|s]\d+)*)\)", _fix_grouped_parens, normalized)
+
+    # 4. Fix period before citation: . [S1] -> [S1].
+    normalized = re.sub(r"\.\s*(\[(?:S\d+)(?:\s*\[S\d+\])*\])", r" \1.", normalized)
+
+    # 5. Fix missing space before citation: word[S1] -> word [S1]
+    normalized = re.sub(r"([^\s\[({])(\[S\d+\])", r"\1 \2", normalized)
+
+    return normalized
+
+
 def _validate_answer_safety(
     value: str,
     *,
@@ -1458,6 +1524,32 @@ async def _complete_with_citation_repair(
         return answer
     except GeminiError as draft_validation_exc:
         validation_kind = _answer_validation_kind(draft_validation_exc)
+
+        # Attempt deterministic normalization before invoking expensive LLM repair!
+        normalized_draft = _normalize_citations_deterministically(answer, allowed_ids)
+        if normalized_draft != answer:
+            try:
+                _validate_answer_safety(
+                    normalized_draft,
+                    allowed_ids=allowed_ids,
+                    sources=sources,
+                )
+                draft_safety_valid = True
+                if sources is not None:
+                    _validate_professional_legal_opening(normalized_draft)
+                _validate_answer_plan_coverage(normalized_draft, answer_plan)
+                log_progress(
+                    logger,
+                    "answer_generation",
+                    "completed",
+                    operation_started,
+                    outcome="deterministic_normalization_valid",
+                    validation_kind=validation_kind,
+                )
+                return normalized_draft
+            except GeminiError:
+                pass  # Deterministic normalization wasn't enough, continue to LLM repair
+
         if draft_safety_valid and skip_soft_repair:
             log_progress(
                 logger,
@@ -2150,6 +2242,19 @@ async def chat(
         history_turn_count=len(history_turns),
         summary_available=bool(summary_context),
     )
+    catalog_answer: str | None = None
+    catalog_req = (
+        parse_catalog_request(current_question)
+        if greeting_answer is None
+        else None
+    )
+    if catalog_req is not None:
+        try:
+            catalog_service = LegalCatalogService(db)
+            catalog_answer = await catalog_service.answer(catalog_req)
+        except Exception as _cat_exc:
+            logger.warning("Deterministic catalog lookup failed error=%s", _cat_exc)
+
     if greeting_answer is not None:
         retrieval_query = current_question
         answer_plan: dict[str, Any] = {}
@@ -2160,6 +2265,17 @@ async def chat(
             "greeting_completed",
             operation_started,
             outcome="deterministic_response",
+        )
+    elif catalog_answer is not None:
+        retrieval_query = current_question
+        answer_plan = {}
+        query_was_rewritten = False
+        log_progress(
+            logger,
+            "chat",
+            "catalog_completed",
+            operation_started,
+            outcome="deterministic_catalog_response",
         )
     else:
         # --- Prompt injection and Out-of-Scope guards (Python layer) ---
@@ -2248,6 +2364,7 @@ async def chat(
     cached_draft = ""
     answer = (
         greeting_answer
+        or catalog_answer
         or str((structure_result or {}).get("answer") or "")
     )
     structure_source = (structure_result or {}).get("source")
@@ -2256,7 +2373,15 @@ async def chat(
         if isinstance(structure_source, dict)
         else []
     )
-    if structure_result is not None:
+    if catalog_answer is not None:
+        verification = VerificationReport(
+            checked=True,
+            all_current=True,
+            checked_at=datetime.now(UTC),
+            items=[],
+            note="catalog_deterministic",
+        ).model_dump(mode="json")
+    elif structure_result is not None:
         verification = VerificationReport(
             checked=False,
             all_current=False,
@@ -2275,6 +2400,7 @@ async def chat(
         )
     answer_ready = (
         greeting_answer is not None
+        or catalog_answer is not None
         or structure_result is not None
     )
     cache_eligible = (

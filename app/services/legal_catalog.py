@@ -47,10 +47,14 @@ _SUMMARY_RE = re.compile(
     r"\bthong\s+ke\b|\bphan\s+bo\b|\bthong\s+tin\s+tong\s+quan\b"
 )
 _CATALOG_SCOPE_RE = re.compile(
-    r"\b(?:kho|corpus|co\s+so\s+du\s+lieu)\s+"
-    r"(?:(?:van\s+ban|luat|du\s+lieu)\s+)?vlegal\b"
-    r"|\b(?:trong|cua)\s+(?:kho\s+)?vlegal\b"
-    r"|\bdu\s+lieu\s+cua\s+vlegal\b"
+    r"\b(?:kho|corpus|co\s+so\s+du\s+lieu|he\s+thong)\s+"
+    r"(?:(?:van\s+ban|luat|du\s+lieu)\s+)?(?:vlegal|phap\s+ly|he\s+thong)?\b"
+    r"|\b(?:trong|cua)\s+(?:kho\s+|he\s+thong\s+)?vlegal\b"
+    r"|\bdu\s+lieu\s+(?:cua\s+)?vlegal\b"
+    r"|\bhe\s+thong\s+(?:co\s+)?bao\s+nhieu\s+(?:van\s+ban|luat|tai\s+lieu)\b"
+    r"|\bdanh\s+muc\s+van\s+ban\b"
+    r"|\bliet\s+ke\s+(?:cac\s+)?loai\s+van\s+ban\b",
+    re.IGNORECASE,
 )
 _IN_FORCE_RE = re.compile(r"\b(?:dang|con)\s+(?:co\s+)?hieu\s+luc\b")
 _EXPIRED_RE = re.compile(r"\bhet\s+hieu\s+luc\b")

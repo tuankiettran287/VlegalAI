@@ -181,7 +181,7 @@ def test_settings_has_legal_chat_timeout_fields() -> None:
     )
     assert s.legal_chat_fast_timeout_seconds == 8.0
     assert s.legal_chat_generation_timeout_seconds == 30.0
-    assert s.legal_chat_citation_repair_timeout_seconds == 5.0
+    assert s.legal_chat_citation_repair_timeout_seconds == 3.5
 
 
 def test_settings_fast_timeout_overridable() -> None:
@@ -203,3 +203,21 @@ def test_settings_timeouts_respect_bounds() -> None:
             session_secret="x" * 32,
             legal_chat_fast_timeout_seconds=0.5,  # below ge=2.0
         )
+
+
+def test_normalize_citations_deterministically() -> None:
+    """_normalize_citations_deterministically must fix grouped, lowercase, parenthesized citations and period order."""
+    from app.api import _normalize_citations_deterministically
+
+    allowed = ["S1", "S2", "S3"]
+
+    # Grouped brackets
+    assert _normalize_citations_deterministically("Theo Bộ luật Lao động [S1, S2].", allowed) == "Theo Bộ luật Lao động [S1] [S2]."
+    # Lowercase
+    assert _normalize_citations_deterministically("Căn cứ quy định [s1].", allowed) == "Căn cứ quy định [S1]."
+    # Parentheses
+    assert _normalize_citations_deterministically("Căn cứ quy định (S1).", allowed) == "Căn cứ quy định [S1]."
+    # Period order
+    assert _normalize_citations_deterministically("Căn cứ quy định. [S1]", allowed) == "Căn cứ quy định [S1]."
+    # Spacing
+    assert _normalize_citations_deterministically("Văn bản[S1] quy định.", allowed) == "Văn bản [S1] quy định."
