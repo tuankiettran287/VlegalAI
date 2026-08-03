@@ -68,6 +68,8 @@ from app.schemas import (
     ChatAttachmentUploadOut,
     DraftContractRequest,
     FeedbackRequest,
+    LegalDocumentDetailOut,
+    LegalDocumentSectionOut,
     MessageOut,
     PrepareSignatureRequest,
     ReviewContractRequest,
@@ -2310,6 +2312,151 @@ async def laws(
             for row in rows
         ]
     }
+
+
+_NORMALIZED_LAW_CODE_SQL = """
+upper(
+    regexp_replace(
+        btrim({value}),
+        '[[:space:]]+',
+        '',
+        'g'
+    )
+)
+"""
+
+
+@router.get("/laws/detail", response_model=LegalDocumentDetailOut)
+async def law_detail(
+    code: str = Query(min_length=3, max_length=120),
+    citation: str = Query(default="", max_length=1000),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(current_user),
+) -> LegalDocumentDetailOut:
+    """Return indexed evidence for a citation without guessing a public URL."""
+
+    normalized_code = _NORMALIZED_LAW_CODE_SQL.format(value=":code")
+    document_code = _NORMALIZED_LAW_CODE_SQL.format(value="document.code")
+    metadata_statement = sql_text(
+        f"""
+        SELECT
+            corpus.code,
+            coalesce(nullif(document.title, ''), corpus.title) AS title,
+            corpus.document_type,
+            coalesce(document.issuer, '') AS issuer,
+            coalesce(nullif(document.source_url, ''), nullif(corpus.source_url, ''))
+                AS source_url,
+            CASE
+                WHEN document.verified_at IS NOT NULL
+                 AND upper(coalesce(document.status, '')) NOT IN (
+                    '', 'UNKNOWN', 'UNVERIFIED'
+                 )
+                    THEN upper(document.status)
+                ELSE corpus.corpus_status
+            END AS status,
+            corpus.law_version
+        FROM legal_catalog_corpus AS corpus
+        LEFT JOIN legal_document AS document
+          ON {document_code} = corpus.law_code_normalized
+        WHERE corpus.law_code_normalized = {normalized_code}
+        LIMIT 1
+        """
+    )
+    metadata = (
+        await db.execute(metadata_statement, {"code": code})
+    ).mappings().first()
+    if metadata is None:
+        raise HTTPException(
+            status_code=404,
+            detail="KhÃ´ng tÃ¬m tháº¥y vÄƒn báº£n trong kho dá»¯ liá»‡u.",
+        )
+
+    chunk_code = _NORMALIZED_LAW_CODE_SQL.format(value="chunk.law_code")
+    focus = citation.strip()
+    focus_filter = """
+      AND (
+        lower(btrim(chunk.citation)) = lower(btrim(:citation))
+        OR lower(btrim(chunk.path_label)) = lower(btrim(:citation))
+      )
+    """ if focus else ""
+    current_chunks = f"""
+        FROM graphrag_chunk AS chunk
+        INNER JOIN graphrag_law_version AS latest_law
+          ON latest_law.law_code_normalized = {chunk_code}
+         AND latest_law.latest_version = chunk.law_version
+        WHERE {chunk_code} = {normalized_code}
+        {focus_filter}
+    """
+
+    async def load_sections(use_focus: bool) -> tuple[list[Any], int]:
+        active_chunks = current_chunks if use_focus else current_chunks.replace(
+            focus_filter,
+            "",
+        )
+        total = int(
+            await db.scalar(
+                sql_text(f"SELECT count(*) {active_chunks}"),
+                {"code": code, "citation": focus},
+            )
+            or 0
+        )
+        offset = (page - 1) * page_size if not use_focus else 0
+        limit = page_size if not use_focus else min(page_size, 20)
+        rows = (
+            await db.execute(
+                sql_text(
+                    f"""
+                    SELECT
+                        chunk.citation,
+                        chunk.title,
+                        chunk.path_label,
+                        chunk.text,
+                        chunk.chunk_type,
+                        chunk.ordinal
+                    {active_chunks}
+                    ORDER BY chunk.ordinal
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                {
+                    "code": code,
+                    "citation": focus,
+                    "limit": limit,
+                    "offset": offset,
+                },
+            )
+        ).mappings().all()
+        return list(rows), total
+
+    rows, total = await load_sections(bool(focus))
+    focused = bool(focus and rows)
+    if focus and not rows:
+        rows, total = await load_sections(False)
+
+    return LegalDocumentDetailOut(
+        code=str(metadata["code"]),
+        title=str(metadata["title"]),
+        document_type=str(metadata["document_type"]),
+        issuer=str(metadata["issuer"]),
+        status=str(metadata["status"]),
+        source_url=(
+            str(metadata["source_url"])
+            if metadata["source_url"]
+            else None
+        ),
+        law_version=(
+            int(metadata["law_version"])
+            if metadata["law_version"] is not None
+            else None
+        ),
+        focused=focused,
+        sections=[LegalDocumentSectionOut.model_validate(row) for row in rows],
+        total=total,
+        page=1 if focused else page,
+        page_size=min(page_size, 20) if focused else page_size,
+    )
 
 
 @router.post("/conversations", response_model=ConversationOut, status_code=201)

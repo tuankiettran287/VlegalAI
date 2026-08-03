@@ -4,25 +4,24 @@ import re
 import uuid
 from datetime import datetime
 from typing import Any, Literal
-from urllib.parse import urlencode
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 _LEGAL_SOURCE_CODE_RE = re.compile(
-    r"\b\d{1,4}/\d{4}/[A-Z\u0110][A-Z0-9\u0110.\-]*\b",
+    r"\b(?:\d{1,4}/\d{4}/[A-Z\u0110][A-Z0-9\u0110.\-]*|"
+    r"\d{1,4}/VBHN-[A-Z\u0110][A-Z0-9\u0110.\-]*)\b",
     re.IGNORECASE,
 )
-_OFFICIAL_LEGAL_LOOKUP_URL = "https://vanban.chinhphu.vn/"
 
 
-def official_legal_lookup_url(*labels: str) -> str | None:
-    """Build a safe official lookup link when no verified direct URL exists."""
+def legal_source_code(*labels: str) -> str | None:
+    """Extract a legal-document code without guessing an external URL."""
 
     match = _LEGAL_SOURCE_CODE_RE.search(" ".join(labels).upper())
     if match is None:
         return None
-    return f"{_OFFICIAL_LEGAL_LOOKUP_URL}?{urlencode({'pageid': '473', 'q': match.group(0)})}"
+    return match.group(0).upper()
 
 
 
@@ -67,13 +66,37 @@ class SourceOut(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     doc_id: str | None = None
     source_url: str | None = None
-    lookup_url: str | None = None
+    document_code: str | None = None
 
     @model_validator(mode="after")
-    def add_official_lookup_url(self) -> "SourceOut":
-        if not self.source_url and not self.lookup_url:
-            self.lookup_url = official_legal_lookup_url(self.citation, self.title)
+    def add_document_code(self) -> "SourceOut":
+        if not self.document_code:
+            self.document_code = legal_source_code(self.citation, self.title)
         return self
+
+
+class LegalDocumentSectionOut(BaseModel):
+    citation: str
+    title: str
+    path_label: str = ""
+    text: str
+    chunk_type: str
+    ordinal: int
+
+
+class LegalDocumentDetailOut(BaseModel):
+    code: str
+    title: str
+    document_type: str
+    issuer: str = ""
+    status: str
+    source_url: str | None = None
+    law_version: int | None = None
+    focused: bool = False
+    sections: list[LegalDocumentSectionOut] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 50
 
 
 class VerificationItem(BaseModel):

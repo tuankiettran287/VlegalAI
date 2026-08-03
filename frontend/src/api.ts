@@ -4,6 +4,7 @@ import type {
   ChatAttachment,
   ChatMessage,
   Conversation,
+  LegalDocumentDetail,
   Risk,
   Source,
   Template,
@@ -110,7 +111,7 @@ function normalizeSources(value: unknown): Source[] {
         : [],
       doc_id: typeof item.doc_id === "string" ? item.doc_id : null,
       source_url: typeof item.source_url === "string" ? item.source_url : null,
-      lookup_url: typeof item.lookup_url === "string" ? item.lookup_url : null,
+      document_code: typeof item.document_code === "string" ? item.document_code : null,
     }];
   });
 }
@@ -388,6 +389,18 @@ export const artifactApi = {
   update: (id: string, body: Partial<Pick<Artifact, "title" | "content" | "status">>) =>
     patch<Artifact>(`/api/artifacts/${id}`, body),
   remove: (id: string) => requestJson<void>(`/api/artifacts/${id}`, { method: "DELETE" }),
+};
+
+export const legalDocumentApi = {
+  get: (code: string, citation = "", page = 1, pageSize = 50) => {
+    const query = new URLSearchParams({
+      code,
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    if (citation) query.set("citation", citation);
+    return requestJson<LegalDocumentDetail>(`/api/laws/detail?${query.toString()}`);
+  },
 };
 
 export type SignatureResponse = {

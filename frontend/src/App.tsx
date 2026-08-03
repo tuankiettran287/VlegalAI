@@ -69,6 +69,7 @@ import { sampleQuestions, templateFallback } from "./data";
 import ArticlesPage from "./ArticlesPage";
 import LandingPage from "./LandingPage";
 import GuidePage from "./GuidePage";
+import LegalDocumentPage from "./LegalDocumentPage";
 import OnboardingPage from "./OnboardingPage";
 import type {
   Artifact,
@@ -348,25 +349,41 @@ function SourcePanel({ sources }: { sources?: Source[] | null }) {
       <div className="source-list">
         {sources.map((source) => {
           const sourceUrl = safeSourceUrl(source.source_url);
-          const lookupUrl = safeSourceUrl(source.lookup_url);
-          const openUrl = sourceUrl || lookupUrl;
-          const openLabel = sourceUrl ? "Mở văn bản gốc" : "Tra cứu căn cứ";
+          const documentUrl = source.document_code
+            ? `/van-ban?code=${encodeURIComponent(source.document_code)}&citation=${encodeURIComponent(source.citation)}`
+            : null;
           return (
             <article className="source-item" key={`${source.source_id}-${source.citation}`}>
               <div className="source-title">
                 <span className="source-id">{source.source_id}</span>
                 <strong>{source.citation || source.title}</strong>
-                {openUrl && (
-                  <a
-                    className="source-open-link"
-                    href={openUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label={`${openLabel}: ${source.citation || source.title}`}
-                  >
-                    <span>{openLabel}</span>
-                    <ExternalLink size={13} />
-                  </a>
+                {(documentUrl || sourceUrl) && (
+                  <span className="source-link-actions">
+                    {documentUrl && (
+                      <a
+                        className="source-open-link"
+                        href={documentUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`Xem căn cứ: ${source.citation || source.title}`}
+                      >
+                        <span>Xem căn cứ</span>
+                        <FileText size={13} />
+                      </a>
+                    )}
+                    {sourceUrl && (
+                      <a
+                        className="source-official-link"
+                        href={sourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`Mở nguồn chính thức: ${source.citation || source.title}`}
+                      >
+                        <span>Nguồn chính thức</span>
+                        <ExternalLink size={13} />
+                      </a>
+                    )}
+                  </span>
                 )}
               </div>
               <p>{source.text}</p>
@@ -1728,6 +1745,16 @@ function App() {
   else if (path === "/review-hop-dong" || path === "/phan-tich-hop-dong") page = <ReviewPage />;
   else if (path === "/so-sanh-hop-dong") page = <ComparePage />;
   else if (path === "/ky-van-ban") page = <SignaturePage />;
+  else if (path === "/van-ban") {
+    const params = new URLSearchParams(window.location.search);
+    page = (
+      <LegalDocumentPage
+        code={params.get("code") || ""}
+        citation={params.get("citation") || ""}
+        onNavigate={navigate}
+      />
+    );
+  }
   else if (path === "/bai-viet" || path.startsWith("/bai-viet/")) {
     const articleSlug = path.startsWith("/bai-viet/")
       ? decodeURIComponent(path.slice("/bai-viet/".length))

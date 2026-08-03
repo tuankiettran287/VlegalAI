@@ -18,7 +18,31 @@ export type Source = {
   reasons: string[];
   doc_id?: string | null;
   source_url?: string | null;
-  lookup_url?: string | null;
+  document_code?: string | null;
+};
+
+export type LegalDocumentSection = {
+  citation: string;
+  title: string;
+  path_label: string;
+  text: string;
+  chunk_type: string;
+  ordinal: number;
+};
+
+export type LegalDocumentDetail = {
+  code: string;
+  title: string;
+  document_type: string;
+  issuer: string;
+  status: string;
+  source_url?: string | null;
+  law_version?: number | null;
+  focused: boolean;
+  sections: LegalDocumentSection[];
+  total: number;
+  page: number;
+  page_size: number;
 };
 
 export type VerificationItem = {
