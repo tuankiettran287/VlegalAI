@@ -1119,6 +1119,20 @@ async def _evidence_gated_sources(
 
     started = time.perf_counter()
 
+    partial_evidence_note = (
+        "Nguồn hiện có chỉ hỗ trợ một phần câu hỏi. Hãy nêu rõ phần "
+        "chưa đủ căn cứ, sau đó vẫn giải thích những thông tin liên quan "
+        "được nguồn chứng minh; không trả lời 'Dữ liệu không có sẵn'."
+    )
+
+    def partial_verification(report: dict[str, Any]) -> dict[str, Any]:
+        updated = dict(report)
+        existing_note = str(updated.get("note") or "").strip()
+        updated["note"] = " ".join(
+            part for part in (existing_note, partial_evidence_note) if part
+        )
+        return updated
+
     def selected_sources(
         rows: list[dict[str, Any]],
         selected_ids: tuple[str, ...],
@@ -1138,6 +1152,7 @@ async def _evidence_gated_sources(
         max_sources=settings.evidence_gate_max_sources,
     )
     first_selected = selected_sources(sources, first.relevant_source_ids)
+    first_related = selected_sources(sources, first.related_source_ids)
     semantic_fallback = any(
         "intent_anchor_semantic_fallback" in source.get("reasons", [])
         for source in sources
@@ -1150,26 +1165,21 @@ async def _evidence_gated_sources(
         coverage=first.coverage,
         failed=first.failed,
         refined=bool(first.refined_search_query),
+        related_count=len(first_related),
         selected_count=len(first_selected),
     )
-    if first.failed and semantic_fallback:
+    if first.failed:
         if telemetry is not None:
             telemetry["evidence_gate"] = round(
                 (time.perf_counter() - started) * 1000,
                 1,
             )
         return (
-            [],
-            VerificationReport(
-                checked=False,
-                all_current=False,
-                checked_at=datetime.now(UTC),
-                items=[],
-                note=LEGAL_DATA_UNAVAILABLE_MESSAGE,
-            ).model_dump(mode="json"),
+            first_selected,
+            partial_verification(verification) if semantic_fallback else verification,
             retrieval_query,
         )
-    if first.failed or (first.coverage == "sufficient" and first_selected):
+    if first.coverage == "sufficient" and first_selected:
         if telemetry is not None:
             telemetry["evidence_gate"] = round(
                 (time.perf_counter() - started) * 1000,
@@ -1199,12 +1209,10 @@ async def _evidence_gated_sources(
                 refined_sources,
                 second.relevant_source_ids,
             )
-            second_requires_semantic_validation = any(
-                "intent_anchor_semantic_fallback" in source.get("reasons", [])
-                for source in refined_sources
+            second_related = selected_sources(
+                refined_sources,
+                second.related_source_ids,
             )
-            if second.failed and second_requires_semantic_validation:
-                second_selected = []
             log_progress(
                 logger,
                 "evidence_gate",
@@ -1212,6 +1220,7 @@ async def _evidence_gated_sources(
                 started,
                 coverage=second.coverage,
                 failed=second.failed,
+                related_count=len(second_related),
                 selected_count=len(second_selected),
             )
             if second_selected:
@@ -1220,7 +1229,26 @@ async def _evidence_gated_sources(
                         (time.perf_counter() - started) * 1000,
                         1,
                     )
-                return second_selected, refined_verification, refined_query
+                return (
+                    second_selected,
+                    (
+                        partial_verification(refined_verification)
+                        if second.failed or second.coverage != "sufficient"
+                        else refined_verification
+                    ),
+                    refined_query,
+                )
+            if second_related:
+                if telemetry is not None:
+                    telemetry["evidence_gate"] = round(
+                        (time.perf_counter() - started) * 1000,
+                        1,
+                    )
+                return (
+                    second_related,
+                    partial_verification(refined_verification),
+                    refined_query,
+                )
 
     if telemetry is not None:
         telemetry["evidence_gate"] = round(
@@ -1228,16 +1256,33 @@ async def _evidence_gated_sources(
             1,
         )
     if first_selected:
-        return first_selected, verification, retrieval_query
+        return first_selected, partial_verification(verification), retrieval_query
+    if first_related:
+        return first_related, partial_verification(verification), retrieval_query
+
+    # Retrieval has already rejected rows without query evidence. The LLM gate
+    # may still be overly conservative for a colloquial definition or for a
+    # question whose exact requested value is missing. Preserve a small,
+    # grounded context so generation can explain what is supported and state
+    # the missing part explicitly instead of collapsing to an empty answer.
+    fallback_sources = selected_sources(
+        sources,
+        tuple(
+            str(source.get("source_id") or "")
+            for source in sources[: settings.evidence_gate_max_sources]
+        ),
+    )
+    log_progress(
+        logger,
+        "evidence_gate",
+        "partial_sources_retained",
+        started,
+        reason="gate_selected_none",
+        source_count=len(fallback_sources),
+    )
     return (
-        [],
-        VerificationReport(
-            checked=False,
-            all_current=False,
-            checked_at=datetime.now(UTC),
-            items=[],
-            note=LEGAL_DATA_UNAVAILABLE_MESSAGE,
-        ).model_dump(mode="json"),
+        fallback_sources,
+        partial_verification(verification),
         retrieval_query,
     )
 

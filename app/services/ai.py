@@ -1183,6 +1183,10 @@ khái niệm gần nghĩa chỉ vì nguồn đó có cùng từ khóa. Nếu câ
 hạn hoặc kết luận cụ thể nhưng nguồn chưa chứng minh được giá trị đó, phải nói rõ phần
 chưa thể xác định rồi chỉ giải thích những thông tin trực tiếp mà nguồn chứng minh được.
 Chỉ trả lời “Dữ liệu không có sẵn” khi LEGAL_SOURCES rỗng.
+Khi KIỂM TRA HIỆU LỰC cho biết nguồn chỉ hỗ trợ một phần, không được kết luận
+câu hỏi nằm ngoài phạm vi và không được trả lời “Dữ liệu không có sẵn”. Phải nói
+rõ chi tiết nào chưa có đủ căn cứ, rồi giải thích phần thông tin liên quan mà nguồn
+thực sự chứng minh được.
 
 CÁCH MỞ ĐẦU CÂU TRẢ LỜI — BẮT BUỘC
 - Khi có đủ căn cứ, ký tự đầu tiên của câu trả lời phải là “Theo”. Không chào hỏi, không

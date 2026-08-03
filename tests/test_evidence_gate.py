@@ -77,6 +77,32 @@ def test_evidence_gate_returns_safe_refined_query_when_sources_miss_intent() -> 
     )
 
 
+def test_evidence_gate_distinguishes_related_sources_from_direct_sources() -> None:
+    class _AI:
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            return {
+                "relevant_source_ids": [],
+                "related_source_ids": ["S2"],
+                "coverage": "partial",
+                "refined_search_query": "",
+                "reason": "Nguồn giải thích phần liên quan nhưng thiếu giá trị được hỏi.",
+            }
+
+    result = asyncio.run(
+        assess_source_relevance(
+            _AI(),  # type: ignore[arg-type]
+            original_question="Giá trị hiện tại là bao nhiêu?",
+            retrieval_query="Giá trị hiện tại",
+            sources=_sources(),
+            timeout_seconds=2,
+        )
+    )
+
+    assert result.relevant_source_ids == ()
+    assert result.related_source_ids == ("S2",)
+    assert result.coverage == "partial"
+
+
 def test_evidence_gate_rejects_refinement_that_invents_a_number() -> None:
     class _AI:
         async def complete_json(self, *_: object, **__: object) -> dict:
@@ -120,7 +146,7 @@ def test_evidence_gate_fails_open_when_model_is_unavailable() -> None:
     assert result.reason == "ai_unavailable_fail_open"
 
 
-def test_api_evidence_gate_fails_closed_for_unvalidated_semantic_fallback() -> None:
+def test_api_evidence_gate_keeps_partial_context_when_gate_is_unavailable() -> None:
     class _AI:
         async def complete_json(self, *_: object, **__: object) -> dict:
             raise GeminiError("unavailable")
@@ -147,9 +173,50 @@ def test_api_evidence_gate_fails_closed_for_unvalidated_semantic_fallback() -> N
         )
     )
 
-    assert selected == []
-    assert verification["all_current"] is False
+    assert len(selected) == 2
+    assert verification["all_current"] is True
+    assert "chỉ hỗ trợ một phần" in verification["note"]
     assert query == "Cách gọi đời thường của khái niệm"
+
+
+def test_api_evidence_gate_preserves_retrieved_context_when_gate_selects_none() -> None:
+    class _AI:
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            return {
+                "relevant_source_ids": [],
+                "related_source_ids": [],
+                "coverage": "none",
+                "refined_search_query": "",
+                "reason": "Không có nguồn định nghĩa nguyên văn.",
+            }
+
+    sources = _sources()
+    for source in sources:
+        source["reasons"] = ["intent_anchors:2", "postgres_bm25"]
+    settings = SimpleNamespace(
+        evidence_gate_enabled=True,
+        evidence_gate_timeout_seconds=2.0,
+        evidence_gate_max_sources=8,
+    )
+
+    selected, verification, query = asyncio.run(
+        _evidence_gated_sources(
+            original_question="Khái niệm này là gì?",
+            retrieval_query="Khái niệm này",
+            sources=sources,
+            verification={"checked": True, "all_current": True},
+            ai=_AI(),  # type: ignore[arg-type]
+            retrieval=None,  # type: ignore[arg-type]
+            freshness=None,  # type: ignore[arg-type]
+            settings=settings,  # type: ignore[arg-type]
+        )
+    )
+
+    assert len(selected) == 2
+    assert [source["source_id"] for source in selected] == ["S1", "S2"]
+    assert verification["note"] != "Dữ liệu không có sẵn"
+    assert "chỉ hỗ trợ một phần" in verification["note"]
+    assert query == "Khái niệm này"
 
 
 def test_api_evidence_gate_refines_retrieval_after_off_topic_sources() -> None:

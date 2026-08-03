@@ -30,9 +30,12 @@ Quy tắc bắt buộc:
 5. relevant_source_ids chỉ chứa ID của nguồn hỗ trợ trực tiếp. coverage là sufficient khi
    đủ căn cứ trả lời trọng tâm, partial khi chỉ trả lời được một phần, none khi không nguồn
    nào trực tiếp phù hợp.
-6. refined_search_query là truy vấn tìm kiếm ngắn gọn, dùng thuật ngữ pháp lý tương đương
+6. related_source_ids chứa ID của nguồn không đủ để kết luận trực tiếp nhưng vẫn
+   giúp giải thích khái niệm, phạm vi, nguyên tắc hoặc phần thông tin đã có. Không
+   được lặp lại ID đã có trong relevant_source_ids.
+7. refined_search_query là truy vấn tìm kiếm ngắn gọn, dùng thuật ngữ pháp lý tương đương
    với đúng ý định ban đầu. Không thêm tên luật, số hiệu, điều khoản, con số hoặc kết luận.
-7. Khi coverage là partial hoặc none và câu hỏi vẫn xác định được ý định, phải cung cấp
+8. Khi coverage là partial hoặc none và câu hỏi vẫn xác định được ý định, phải cung cấp
    refined_search_query khác retrieval_query để hệ thống tìm lại bằng cách gọi pháp lý phù hợp.
 """
 
@@ -41,6 +44,7 @@ Quy tắc bắt buộc:
 class EvidenceGateResult:
     relevant_source_ids: tuple[str, ...]
     coverage: str
+    related_source_ids: tuple[str, ...] = ()
     refined_search_query: str = ""
     attempted: bool = False
     failed: bool = False
@@ -53,12 +57,18 @@ def _schema(source_ids: list[str]) -> dict[str, Any]:
         "additionalProperties": False,
         "required": [
             "relevant_source_ids",
+            "related_source_ids",
             "coverage",
             "refined_search_query",
             "reason",
         ],
         "properties": {
             "relevant_source_ids": {
+                "type": "array",
+                "maxItems": len(source_ids),
+                "items": {"type": "string", "enum": source_ids},
+            },
+            "related_source_ids": {
                 "type": "array",
                 "maxItems": len(source_ids),
                 "items": {"type": "string", "enum": source_ids},
@@ -187,6 +197,11 @@ async def assess_source_relevance(
         if isinstance(payload, dict)
         else None
     )
+    related_values = (
+        payload.get("related_source_ids", [])
+        if isinstance(payload, dict)
+        else None
+    )
     coverage_value = (
         payload.get("coverage")
         if isinstance(payload, dict)
@@ -194,6 +209,7 @@ async def assess_source_relevance(
     )
     if (
         not isinstance(selected_values, list)
+        or not isinstance(related_values, list)
         or coverage_value not in {"sufficient", "partial", "none"}
     ):
         logger.warning(
@@ -213,9 +229,19 @@ async def assess_source_relevance(
         for source_id in selected_values
         if isinstance(source_id, str) and source_id in allowed_ids
     )
+    selected_set = set(selected)
+    related = tuple(
+        source_id
+        for source_id in related_values
+        if (
+            isinstance(source_id, str)
+            and source_id in allowed_ids
+            and source_id not in selected_set
+        )
+    )
     coverage = str(coverage_value)
     if not selected:
-        coverage = "none"
+        coverage = "partial" if related else "none"
     refined = _safe_refined_query(
         original_question,
         retrieval_query,
@@ -224,6 +250,7 @@ async def assess_source_relevance(
     return EvidenceGateResult(
         selected,
         coverage,
+        related_source_ids=related,
         refined_search_query=refined,
         attempted=True,
         reason=str(payload.get("reason") or "")[:300],
