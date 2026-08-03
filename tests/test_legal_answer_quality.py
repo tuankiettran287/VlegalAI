@@ -785,9 +785,14 @@ def test_retrieval_runs_each_compound_facet_and_merges_results() -> None:
         )
     )
 
-    assert store.queries == plan_retrieval_queries(
+    planned_queries = plan_retrieval_queries(
         "Lương cơ bản là bao nhiêu và khi làm lễ thì nhân mấy?"
     )
+    # Facet retrieval runs concurrently. asyncio.gather preserves the order
+    # of returned result sets, but worker-thread side effects may be observed
+    # in a different order across operating systems and Python schedulers.
+    assert len(store.queries) == len(planned_queries)
+    assert set(store.queries) == set(planned_queries)
     assert {row["node_id"] for row in rows} == {"node-S1", "node-S2"}
 
 
