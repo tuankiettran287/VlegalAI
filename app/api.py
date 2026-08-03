@@ -1138,6 +1138,10 @@ async def _evidence_gated_sources(
         max_sources=settings.evidence_gate_max_sources,
     )
     first_selected = selected_sources(sources, first.relevant_source_ids)
+    semantic_fallback = any(
+        "intent_anchor_semantic_fallback" in source.get("reasons", [])
+        for source in sources
+    )
     log_progress(
         logger,
         "evidence_gate",
@@ -1148,6 +1152,23 @@ async def _evidence_gated_sources(
         refined=bool(first.refined_search_query),
         selected_count=len(first_selected),
     )
+    if first.failed and semantic_fallback:
+        if telemetry is not None:
+            telemetry["evidence_gate"] = round(
+                (time.perf_counter() - started) * 1000,
+                1,
+            )
+        return (
+            [],
+            VerificationReport(
+                checked=False,
+                all_current=False,
+                checked_at=datetime.now(UTC),
+                items=[],
+                note=LEGAL_DATA_UNAVAILABLE_MESSAGE,
+            ).model_dump(mode="json"),
+            retrieval_query,
+        )
     if first.failed or (first.coverage == "sufficient" and first_selected):
         if telemetry is not None:
             telemetry["evidence_gate"] = round(
@@ -1178,6 +1199,12 @@ async def _evidence_gated_sources(
                 refined_sources,
                 second.relevant_source_ids,
             )
+            second_requires_semantic_validation = any(
+                "intent_anchor_semantic_fallback" in source.get("reasons", [])
+                for source in refined_sources
+            )
+            if second.failed and second_requires_semantic_validation:
+                second_selected = []
             log_progress(
                 logger,
                 "evidence_gate",

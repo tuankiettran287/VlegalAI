@@ -225,7 +225,7 @@ def test_answer_plan_rejects_cited_but_off_topic_answer() -> None:
     )
 
 
-def test_generic_intent_coverage_rejects_sources_that_only_share_context() -> None:
+def test_generic_intent_coverage_routes_synonyms_to_semantic_validation() -> None:
     class _Store:
         def retrieve(self, _: str, __: int) -> list[dict]:
             return [
@@ -261,7 +261,11 @@ def test_generic_intent_coverage_rejects_sources_that_only_share_context() -> No
         )
     )
 
-    assert rows == []
+    assert rows
+    assert all(
+        "intent_anchor_semantic_fallback" in row["reasons"]
+        for row in rows
+    )
 
 
 def test_generic_intent_anchor_separates_requested_measure_from_nearby_one() -> None:

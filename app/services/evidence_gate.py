@@ -32,6 +32,8 @@ Quy tắc bắt buộc:
    nào trực tiếp phù hợp.
 6. refined_search_query là truy vấn tìm kiếm ngắn gọn, dùng thuật ngữ pháp lý tương đương
    với đúng ý định ban đầu. Không thêm tên luật, số hiệu, điều khoản, con số hoặc kết luận.
+7. Khi coverage là partial hoặc none và câu hỏi vẫn xác định được ý định, phải cung cấp
+   refined_search_query khác retrieval_query để hệ thống tìm lại bằng cách gọi pháp lý phù hợp.
 """
 
 

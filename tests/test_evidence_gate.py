@@ -120,6 +120,38 @@ def test_evidence_gate_fails_open_when_model_is_unavailable() -> None:
     assert result.reason == "ai_unavailable_fail_open"
 
 
+def test_api_evidence_gate_fails_closed_for_unvalidated_semantic_fallback() -> None:
+    class _AI:
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            raise GeminiError("unavailable")
+
+    sources = _sources()
+    for source in sources:
+        source["reasons"] = ["intent_anchor_semantic_fallback"]
+    settings = SimpleNamespace(
+        evidence_gate_enabled=True,
+        evidence_gate_timeout_seconds=2.0,
+        evidence_gate_max_sources=8,
+    )
+
+    selected, verification, query = asyncio.run(
+        _evidence_gated_sources(
+            original_question="Cách gọi đời thường của khái niệm là gì?",
+            retrieval_query="Cách gọi đời thường của khái niệm",
+            sources=sources,
+            verification={"checked": True, "all_current": True},
+            ai=_AI(),  # type: ignore[arg-type]
+            retrieval=None,  # type: ignore[arg-type]
+            freshness=None,  # type: ignore[arg-type]
+            settings=settings,  # type: ignore[arg-type]
+        )
+    )
+
+    assert selected == []
+    assert verification["all_current"] is False
+    assert query == "Cách gọi đời thường của khái niệm"
+
+
 def test_api_evidence_gate_refines_retrieval_after_off_topic_sources() -> None:
     class _AI:
         def __init__(self) -> None:
@@ -158,6 +190,9 @@ def test_api_evidence_gate_refines_retrieval_after_off_topic_sources() -> None:
 
     ai = _AI()
     retrieval = _Retrieval()
+    initial_sources = _sources()
+    for source in initial_sources:
+        source["reasons"] = ["intent_anchor_semantic_fallback"]
     settings = SimpleNamespace(
         evidence_gate_enabled=True,
         evidence_gate_timeout_seconds=2.0,
@@ -168,7 +203,7 @@ def test_api_evidence_gate_refines_retrieval_after_off_topic_sources() -> None:
         _evidence_gated_sources(
             original_question="Cách gọi đời thường của khái niệm là gì?",
             retrieval_query="Cách gọi đời thường của khái niệm",
-            sources=_sources(),
+            sources=initial_sources,
             verification={"checked": True, "all_current": True},
             ai=ai,  # type: ignore[arg-type]
             retrieval=retrieval,  # type: ignore[arg-type]

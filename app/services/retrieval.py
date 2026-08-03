@@ -568,13 +568,15 @@ def _filter_rows_for_query_intent(
     ]
     strong: list[tuple[float, dict[str, Any]]] = []
     hybrid_fallback: list[dict[str, Any]] = []
+    semantic_fallback: list[tuple[float, dict[str, Any]]] = []
     for row in rows:
         evidence = _row_evidence(row)
         intent_anchor_matches = sum(
             anchor in evidence for anchor in intent_anchors
         )
-        if intent_anchors and intent_anchor_matches == 0:
-            continue
+        needs_semantic_validation = bool(
+            intent_anchors and intent_anchor_matches == 0
+        )
         evidence_tokens = set(_WORD_RE.findall(evidence))
         group_scores = []
         for terms, phrases in evidence_groups:
@@ -594,7 +596,7 @@ def _filter_rows_for_query_intent(
             + min(phrase_matches, 2) * 0.1
             + min(intent_anchor_matches, 2) * 0.15
         )
-        if relevance >= 0.35:
+        if relevance >= 0.35 and not needs_semantic_validation:
             row["reasons"] = list(
                 dict.fromkeys(
                     [
@@ -605,6 +607,21 @@ def _filter_rows_for_query_intent(
                 )
             )
             strong.append((relevance, row))
+        elif needs_semantic_validation and (
+            coverage >= 0.2 or (matched >= 1 and is_hybrid)
+        ):
+            row["reasons"] = list(
+                dict.fromkeys(
+                    [
+                        *row.get("reasons", []),
+                        f"intent_terms:{matched}/{term_count}",
+                        "intent_anchor_semantic_fallback",
+                    ]
+                )
+            )
+            semantic_fallback.append(
+                (coverage + min(phrase_matches, 2) * 0.1, row)
+            )
         elif matched >= 1 and is_hybrid:
             row["reasons"] = list(
                 dict.fromkeys(
@@ -619,6 +636,9 @@ def _filter_rows_for_query_intent(
             for score, row in strong
             if score >= max(0.35, best_relevance - 0.18)
         ]
+    if semantic_fallback:
+        semantic_fallback.sort(key=lambda item: item[0], reverse=True)
+        return [row for _, row in semantic_fallback[:8]]
     return hybrid_fallback
 
 
