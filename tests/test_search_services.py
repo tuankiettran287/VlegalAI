@@ -451,16 +451,28 @@ def test_article_research_keeps_only_sources_published_on_requested_day() -> Non
             captured.update(kwargs)
             return [
                 {
-                    "url": "https://example.com/today",
-                    "title": "Bản tin pháp luật hôm nay",
-                    "raw_content": "Nội dung pháp lý được xuất bản trong ngày. " * 8,
+                    "url": "https://laodong.vn/today",
+                    "title": "Bản tin lao động hôm nay",
+                    "raw_content": "Nội dung về quyền của người lao động trong ngày. " * 8,
                     "published_date": "2026-08-03T08:15:00+07:00",
                 },
                 {
-                    "url": "https://example.com/yesterday",
-                    "title": "Bản tin pháp luật cũ",
-                    "raw_content": "Nội dung pháp lý cũ không được phép hiển thị. " * 8,
+                    "url": "https://laodong.vn/yesterday",
+                    "title": "Bản tin lao động cũ",
+                    "raw_content": "Nội dung lao động cũ không được phép hiển thị. " * 8,
                     "published_date": "2026-08-02T20:00:00+07:00",
+                },
+                {
+                    "url": "https://chinhphu.vn/dau-khi",
+                    "title": "Dự án Luật Dầu khí sửa đổi",
+                    "raw_content": "Nội dung về quản lý tài nguyên dầu khí quốc gia. " * 8,
+                    "published_date": "2026-08-03T09:00:00+07:00",
+                },
+                {
+                    "url": "https://example.com/foreign-labor",
+                    "title": "International labor news",
+                    "raw_content": "International labor and employment article. " * 8,
+                    "published_date": "2026-08-03T09:00:00+07:00",
                 },
             ]
 
@@ -477,15 +489,22 @@ def test_article_research_keeps_only_sources_published_on_requested_day() -> Non
     service = ArticleResearchService(_DatedTavily(), _EmptyGoogle(), ai)
 
     result = asyncio.run(
-        service.search("pháp luật lao động", published_on=date(2026, 8, 3))
+        service.search(
+            "pháp luật lao động",
+            published_on=date(2026, 8, 3),
+            generate_summary=False,
+        )
     )
 
     assert [source["url"] for source in result["sources"]] == [
-        "https://example.com/today"
+        "https://laodong.vn/today"
     ]
+    assert ai.user_prompt == ""
+    assert "[W1]" in result["summary"]
     assert captured["topic"] == "news"
     assert captured["start_date"] == date(2026, 8, 3)
     assert captured["end_date"] == date(2026, 8, 4)
+    assert "laodong.vn" in captured["include_domains"]
 
 
 def test_article_research_rejects_sources_without_verified_current_date() -> None:

@@ -59,6 +59,7 @@ def test_daily_article_publisher_is_idempotent_and_publishes_research(
         async def search(self, query: str, **kwargs: object) -> dict[str, object]:
             assert "chủ đề kiểm thử" in query
             assert kwargs["published_on"].isoformat() == "2026-07-29"
+            assert kwargs["generate_summary"] is False
             return {
                 "summary": "Nội dung cập nhật có căn cứ rõ ràng [W1].",
                 "sources": [{

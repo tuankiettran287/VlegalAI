@@ -397,6 +397,7 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     f"ngày {slot_date:%d/%m/%Y}; cập nhật quy định, chính sách "
                     "và vấn đề thực tiễn mới nhất",
                     published_on=slot_date,
+                    generate_summary=False,
                 )
                 sources = (
                     result.get("sources")

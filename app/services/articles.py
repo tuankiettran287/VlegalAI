@@ -4,9 +4,11 @@ import asyncio
 import html
 import logging
 import re
+import unicodedata
 from datetime import UTC, date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from app.services.ai import (
@@ -35,6 +37,27 @@ MAX_RESEARCH_EVIDENCE_CHARS = 3_500
 MAX_FALLBACK_SOURCES = 6
 logger = logging.getLogger(__name__)
 ARTICLE_TIMEZONE = ZoneInfo("Asia/Bangkok")
+VIETNAM_LEGAL_NEWS_DOMAINS = [
+    "chinhphu.vn",
+    "quochoi.vn",
+    "moj.gov.vn",
+    "laodong.vn",
+    "baohiemxahoi.gov.vn",
+    "luatvietnam.vn",
+    "thuvienphapluat.vn",
+    "tapchitoaan.vn",
+    "baophapluat.vn",
+    "plo.vn",
+    "nhandan.vn",
+    "vietnamplus.vn",
+    "congthuong.vn",
+    "tapchitaichinh.vn",
+    "vneconomy.vn",
+    "vietnamnet.vn",
+    "vnexpress.net",
+    "tuoitre.vn",
+    "thanhnien.vn",
+]
 EDITORIAL_LEAD_RE = re.compile(
     r"(?im)^\s*(?:dưới đây|sau đây) là "
     r"(?:bản )?(?:tổng hợp|phân tích|tóm tắt|nghiên cứu|"
@@ -80,6 +103,109 @@ def _published_on_local_date(value: Any, expected: date) -> bool:
         published_at
         and published_at.astimezone(ARTICLE_TIMEZONE).date() == expected
     )
+
+
+def _fold_article_search_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = unicodedata.normalize("NFD", value.casefold())
+    return " ".join(
+        "".join(
+            character
+            for character in normalized
+            if not unicodedata.combining(character)
+        )
+        .replace("đ", "d")
+        .split()
+    )
+
+
+def _is_vietnam_legal_news_url(value: Any) -> bool:
+    url = safe_public_url(value)
+    host = (urlparse(url).hostname or "").casefold().removeprefix("www.")
+    return any(
+        host == domain or host.endswith(f".{domain}")
+        for domain in VIETNAM_LEGAL_NEWS_DOMAINS
+    )
+
+
+ARTICLE_TOPIC_MARKERS = (
+    (
+        ("xuat nhap canh", "cu tru"),
+        ("xuat nhap canh", "cu tru", "nguoi nuoc ngoai"),
+    ),
+    (
+        ("lao dong", "viec lam"),
+        ("lao dong", "nguoi lao dong", "viec lam", "tien luong", "cong doan"),
+    ),
+    (("bao hiem xa hoi",), ("bao hiem", "luong huu", "tro cap", "an sinh")),
+    (
+        ("hop dong dan su", "dan su"),
+        ("hop dong", "dan su", "boi thuong", "nghia vu"),
+    ),
+    (
+        ("hop dong thuong mai", "thuong mai"),
+        ("hop dong", "thuong mai", "kinh doanh"),
+    ),
+    (("dat dai", "nha o"), ("dat dai", "nha o", "bat dong san", "tai san")),
+    (("thue", "tai chinh"), ("thue", "tai chinh", "hoa don", "ngan sach")),
+    (("nguoi tieu dung",), ("nguoi tieu dung", "bao ve nguoi tieu dung")),
+    (("doanh nghiep",), ("doanh nghiep", "cong ty", "quan tri")),
+    (
+        ("hon nhan", "gia dinh", "thua ke"),
+        ("hon nhan", "gia dinh", "ly hon", "thua ke", "di san"),
+    ),
+    (
+        ("so huu tri tue", "ban quyen"),
+        ("so huu tri tue", "ban quyen", "nhan hieu", "sang che"),
+    ),
+    (("du lieu", "an ninh mang"), ("du lieu", "an ninh mang", "quyen rieng tu")),
+    (
+        ("thuong mai dien tu", "hop dong dien tu"),
+        ("thuong mai dien tu", "hop dong dien tu", "giao dich dien tu"),
+    ),
+    (
+        ("tranh chap", "to tung", "trong tai"),
+        ("tranh chap", "to tung", "trong tai", "khoi kien", "toa an"),
+    ),
+    (
+        ("hanh chinh", "khieu nai"),
+        ("hanh chinh", "khieu nai", "quyet dinh hanh chinh"),
+    ),
+    (("hinh su",), ("hinh su", "toi pham", "trach nhiem hinh su")),
+    (("ngan hang", "tin dung"), ("ngan hang", "tin dung", "giao dich bao dam")),
+    (("xay dung", "dau thau"), ("xay dung", "dau thau", "du an")),
+    (("moi truong",), ("moi truong", "tai nguyen", "phat thai")),
+    (("y te", "giao duc"), ("y te", "giao duc", "bao hiem y te", "hoc phi")),
+)
+
+
+def _is_relevant_article_result(row: dict[str, Any], query: str) -> bool:
+    topic = _fold_article_search_text(query.split(";", 1)[0])
+    evidence = _fold_article_search_text(
+        f"{row.get('title') or ''} {row.get('content') or ''} "
+        f"{row.get('raw_content') or ''}"
+    )
+    for topic_markers, result_markers in ARTICLE_TOPIC_MARKERS:
+        if any(marker in topic for marker in topic_markers):
+            return any(marker in evidence for marker in result_markers)
+    significant_terms = {
+        token
+        for token in topic.split()
+        if len(token) >= 4
+        and token
+        not in {
+            "phap",
+            "luat",
+            "viet",
+            "nam",
+            "quyen",
+            "nghia",
+            "thuc",
+            "hien",
+        }
+    }
+    return len(significant_terms.intersection(evidence.split())) >= 2
 
 
 def _plain_source_text(value: Any, *, limit: int) -> str:
@@ -331,6 +457,7 @@ class ArticleResearchService:
         query: str,
         *,
         published_on: date | None = None,
+        generate_summary: bool = True,
     ) -> dict[str, Any]:
         outbound_query = query
         settings = getattr(self.ai, "settings", None)
@@ -361,10 +488,16 @@ class ArticleResearchService:
                 topic="news" if published_on is not None else "general",
                 start_date=published_on,
                 end_date=(published_on + timedelta(days=1)) if published_on else None,
+                include_domains=(
+                    VIETNAM_LEGAL_NEWS_DOMAINS if published_on is not None else None
+                ),
             ),
             self.google_search.search(
                 search_query,
                 max_results=10,
+                include_domains=(
+                    VIETNAM_LEGAL_NEWS_DOMAINS if published_on is not None else None
+                ),
             ),
             return_exceptions=True,
         )
@@ -453,6 +586,8 @@ class ArticleResearchService:
                 row
                 for row in merged_results
                 if _published_on_local_date(row.get("published_date"), published_on)
+                and _is_vietnam_legal_news_url(row.get("url"))
+                and _is_relevant_article_result(row, query)
             ]
         results = [
             row
@@ -525,6 +660,25 @@ class ArticleResearchService:
             ]
         ]
         allowed_source_ids = [source["id"] for source in sources]
+        if not generate_summary:
+            return {
+                "query": query,
+                "summary": _source_digest_summary(query, sources),
+                "sources": sources,
+                "providers_used": sorted(
+                    {
+                        provider
+                        for source in sources
+                        for provider in source.get("providers") or []
+                    }
+                ),
+                "search_warnings": warnings,
+                "google_search_entry_point": (
+                    google_search_entry_point[:50_000]
+                    if google_search_entry_point
+                    else None
+                ),
+            }
         summary = ""
         try:
             summary = await self.ai.complete(
