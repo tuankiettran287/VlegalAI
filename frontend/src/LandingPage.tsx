@@ -157,22 +157,6 @@ export default function LandingPage({ authAvailable, loginUrl }: LandingPageProp
           ))}
         </div>
       </section>
-
-      <section className="lp-final-cta">
-        <span className="lp-final-mark"><Scale size={25} /></span>
-        <p>Bắt đầu với câu hỏi của bạn</p>
-        <h2>Một quyết định vững vàng bắt đầu từ căn cứ rõ ràng.</h2>
-        <GoogleAction authAvailable={authAvailable} loginUrl={loginUrl} />
-      </section>
-
-      <footer className="lp-footer">
-        <a className="lp-brand" href="#top" aria-label="VLegal AI — Về đầu trang">
-          <span className="lp-brand-mark"><Scale size={18} /></span>
-          <span><strong>VLegal</strong><small>Legal intelligence</small></span>
-        </a>
-        <p>Kết quả do AI hỗ trợ không thay thế ý kiến tư vấn chuyên môn.</p>
-        <span>© 2026 VLegal AI</span>
-      </footer>
     </main>
   );
 }
