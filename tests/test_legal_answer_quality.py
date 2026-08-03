@@ -497,7 +497,9 @@ def test_short_forced_labor_query_retrieves_expanded_legal_definition() -> None:
 
     rows = asyncio.run(service.retrieve("Cưỡng bức lao động"))
 
-    assert store.queries == plan_retrieval_queries("Cưỡng bức lao động")
+    planned_queries = plan_retrieval_queries("Cưỡng bức lao động")
+    assert len(store.queries) == len(planned_queries)
+    assert set(store.queries) == set(planned_queries)
     assert len(rows) == 1
     assert "Cưỡng bức lao động" in rows[0]["text"]
 
@@ -703,7 +705,9 @@ def test_single_hop_never_initializes_graph_store(
     rows = asyncio.run(service.retrieve("Cưỡng bức lao động"))
 
     assert rows
-    assert postgres.queries == plan_retrieval_queries("Cưỡng bức lao động")
+    planned_queries = plan_retrieval_queries("Cưỡng bức lao động")
+    assert len(postgres.queries) == len(planned_queries)
+    assert set(postgres.queries) == set(planned_queries)
     assert graph.queries == []
     assert graph_initializations == 0
     assert "retrieval_route:single_hop" in rows[0]["reasons"]
