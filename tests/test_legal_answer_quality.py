@@ -64,7 +64,7 @@ def test_compound_question_is_split_and_keeps_focus_actor() -> None:
     assert len(actor_plan["must_answer"]) == 2
 
 
-def test_public_sector_base_salary_is_not_expanded_to_minimum_wage() -> None:
+def test_planner_does_not_inject_an_adjacent_concept_for_unmapped_question() -> None:
     query = (
         "Mức lương cơ bản hiện tại của cán bộ nhà nước "
         "là bao nhiêu?"
@@ -73,19 +73,9 @@ def test_public_sector_base_salary_is_not_expanded_to_minimum_wage() -> None:
     planned = plan_retrieval_queries(query)
     answer_plan = build_answer_plan(query)
 
-    assert any("mức lương cơ sở" in item for item in planned[1:])
-    assert all("mức lương tối thiểu" not in item for item in planned[1:])
-    assert answer_plan["target_concept"] == (
-        "mức lương cơ sở của cán bộ, công chức, viên chức"
-    )
-    assert answer_plan["requires_exact_value"] is True
-    assert "mức lương tối thiểu vùng" in answer_plan["do_not_confuse_with"]
-    assert any(
-        "mức lương cơ sở" in item
-        for item in plan_retrieval_queries(
-            "Mức lương cơ sở hiện nay là bao nhiêu?"
-        )[1:]
-    )
+    assert planned == [query]
+    assert "target_concept" not in answer_plan
+    assert "do_not_confuse_with" not in answer_plan
 
 
 def test_ontology_expands_specific_concepts_instead_of_broad_wage_terms() -> None:
@@ -234,7 +224,7 @@ def test_answer_plan_rejects_cited_but_off_topic_answer() -> None:
     )
 
 
-def test_public_sector_salary_rejects_adjacent_minimum_wage_sources() -> None:
+def test_generic_intent_coverage_keeps_context_and_rejects_adjacent_results() -> None:
     class _Store:
         def retrieve(self, _: str, __: int) -> list[dict]:
             return [
@@ -270,10 +260,16 @@ def test_public_sector_salary_rejects_adjacent_minimum_wage_sources() -> None:
         )
     )
 
-    assert rows == []
+    assert len(rows) == 1
+    assert "cán bộ, công chức" in rows[0]["text"]
+    assert "tối thiểu" not in rows[0]["text"]
+    assert any(
+        reason.startswith("intent_terms:")
+        for reason in rows[0]["reasons"]
+    )
 
 
-def test_public_sector_salary_requires_and_accepts_exact_base_amount() -> None:
+def test_generic_intent_filter_does_not_require_a_number_in_the_same_chunk() -> None:
     query = "Lương cơ sở của công chức hiện nay là bao nhiêu?"
 
     class _Store:
@@ -300,10 +296,60 @@ def test_public_sector_salary_requires_and_accepts_exact_base_amount() -> None:
         "Mức lương cơ sở là 2,34 triệu đồng/tháng."
     )
 
-    assert asyncio.run(incomplete.retrieve(query)) == []
+    incomplete_rows = asyncio.run(incomplete.retrieve(query))
+    assert len(incomplete_rows) == 1
+    assert any(
+        reason.startswith("intent_terms:")
+        for reason in incomplete_rows[0]["reasons"]
+    )
     rows = asyncio.run(complete.retrieve(query))
     assert len(rows) == 1
     assert "2,34 triệu đồng/tháng" in rows[0]["text"]
+    assert any(
+        reason.startswith("intent_terms:")
+        for reason in rows[0]["reasons"]
+    )
+
+
+def test_sparse_single_hop_retrieval_retries_with_a_wider_generic_pool() -> None:
+    query = (
+        "Người lao động muốn đơn phương chấm dứt hợp đồng lao động "
+        "thì phải báo trước bao lâu?"
+    )
+
+    class _Store:
+        def __init__(self) -> None:
+            self.limits: list[int] = []
+
+        def retrieve(self, _: str, limit: int) -> list[dict]:
+            self.limits.append(limit)
+            if limit <= 8:
+                return [
+                    _source(
+                        citation="Bộ Luật Lao Động > Điều 91",
+                        text="Mức lương tối thiểu được xác lập theo vùng.",
+                    )
+                ]
+            return [
+                _source(
+                    citation="Bộ Luật Lao Động > Điều 35",
+                    text=(
+                        "Người lao động có quyền đơn phương chấm dứt hợp đồng "
+                        "lao động nhưng phải báo trước theo thời hạn luật định."
+                    ),
+                )
+            ]
+
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    store = _Store()
+    service._store = store
+
+    rows = asyncio.run(service.retrieve(query))
+
+    assert store.limits[0] == 8
+    assert store.limits[-1] > store.limits[0]
+    assert len(rows) == 1
+    assert "đơn phương chấm dứt" in rows[0]["text"]
 
 
 def test_short_forced_labor_query_expands_to_definition_and_prohibition() -> None:
@@ -729,7 +775,7 @@ def test_legal_prompt_requires_direct_professional_chatbot_opening() -> None:
 
     assert 'ký tự đầu tiên của câu trả lời phải là “Theo”' in normalized_prompt
     assert "có hiệu lực từ ngày" in normalized_prompt
-    assert "không được thay “mức lương cơ sở/lương cơ bản" in normalized_prompt
+    assert "không thay bằng một khái niệm gần nghĩa" in normalized_prompt
     assert "Chỉ viện dẫn một hoặc hai nguồn trực tiếp nhất" in normalized_prompt
     assert "focus_actor" in normalized_prompt
     assert "2–4 đoạn ngắn" in normalized_prompt

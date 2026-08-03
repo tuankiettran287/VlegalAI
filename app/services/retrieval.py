@@ -204,27 +204,6 @@ _LEGAL_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
     ),
 )
 
-_PUBLIC_SECTOR_WAGE_ACTORS = (
-    "can bo",
-    "cong chuc",
-    "vien chuc",
-    "nha nuoc",
-    "khu vuc cong",
-)
-_BASE_WAGE_TERMS = ("luong co ban", "luong co so")
-_EXACT_VALUE_MARKERS = (
-    "bao nhieu",
-    "hien nay",
-    "hien tai",
-    "muc nao",
-    "la may",
-)
-_CURRENCY_AMOUNT_RE = re.compile(
-    r"(?<!\d)\d[\d.,\s]{1,}\s*(?:trieu\s+)?"
-    r"(?:dong|vnd)(?:\s*/?\s*thang)?\b",
-    re.IGNORECASE,
-)
-
 _QUERY_CONCEPT_GROUPS = (
     ontology.WAGE_COMPONENTS,
     ontology.BONUS_TYPES,
@@ -390,24 +369,6 @@ def _concept_retrieval_query(concept: ontology.Concept) -> str:
     )
 
 
-def _is_public_sector_base_wage_query(query: str) -> bool:
-    query_ascii = _ascii(query)
-    if "luong co so" in query_ascii:
-        return True
-    return (
-        "luong co ban" in query_ascii
-        and any(actor in query_ascii for actor in _PUBLIC_SECTOR_WAGE_ACTORS)
-    )
-
-
-def _requires_exact_public_sector_wage(query: str) -> bool:
-    query_ascii = _ascii(query)
-    return (
-        _is_public_sector_base_wage_query(query)
-        and any(marker in query_ascii for marker in _EXACT_VALUE_MARKERS)
-    )
-
-
 def _row_evidence(row: dict[str, Any]) -> str:
     return _ascii(
         f"{row.get('title', '')} {row.get('citation', '')} "
@@ -428,6 +389,7 @@ def _filter_rows_for_query_intent(
 
     query_ascii = _ascii(query)
     matched_concepts = _matched_query_concepts(query)
+    concept_filtered = False
     if matched_concepts:
         concept_rows = [
             row
@@ -439,6 +401,7 @@ def _filter_rows_for_query_intent(
         ]
         if concept_rows:
             rows = concept_rows
+            concept_filtered = True
 
     if "cuong buc lao dong" in query_ascii or "cuong buc" in query_ascii:
         relevant = [
@@ -490,32 +453,88 @@ def _filter_rows_for_query_intent(
                 selected.append(prohibition)
         return selected or relevant
 
-    if not _is_public_sector_base_wage_query(query):
+    if concept_filtered:
+        for row in rows:
+            row["reasons"] = list(
+                dict.fromkeys([*row.get("reasons", []), "ontology_concept_match"])
+            )
         return rows
 
-    primary = [
-        row for row in rows
-        if "luong co so" in _row_evidence(row)
+    # Apply the same evidence policy to every legal topic. A row is strong
+    # when it covers enough meaningful query terms; a hybrid lexical+dense row
+    # with partial coverage remains an acceptable fallback. This avoids both
+    # question-specific branches and the previous all-or-nothing filtering.
+    facets = _question_facets(query)
+    facet_groups = [
+        (facet, terms)
+        for facet in (facets or [query])
+        if (terms := _significant_terms(facet))
     ]
-    if not primary:
-        return []
-    if _requires_exact_public_sector_wage(query) and not any(
-        _CURRENCY_AMOUNT_RE.search(_row_evidence(row))
-        for row in primary
-    ):
-        return []
+    if not facet_groups or max(len(terms) for _, terms in facet_groups) < 2:
+        return rows
 
-    related = [
-        row
-        for row in rows
-        if row not in primary
-        and any(actor in _row_evidence(row) for actor in _PUBLIC_SECTOR_WAGE_ACTORS)
-        and any(
-            term in _row_evidence(row)
-            for term in ("he so luong", "bang luong", "che do tien luong")
-        )
+    def anchor_phrases(value: str, terms: list[str]) -> set[str]:
+        tokens = [
+            token
+            for token in _WORD_RE.findall(_ascii(value))
+            if len(token) >= 2
+        ]
+        significant = set(terms)
+        return {
+            " ".join(tokens[index : index + size])
+            for size in (2, 3)
+            for index in range(0, len(tokens) - size + 1)
+            if sum(
+                token in significant
+                for token in tokens[index : index + size]
+            ) >= 1
+        }
+
+    evidence_groups = [
+        (terms, anchor_phrases(facet, terms))
+        for facet, terms in facet_groups
     ]
-    return [*primary, *related]
+    strong: list[tuple[float, dict[str, Any]]] = []
+    hybrid_fallback: list[dict[str, Any]] = []
+    for row in rows:
+        evidence = _row_evidence(row)
+        evidence_tokens = set(_WORD_RE.findall(evidence))
+        group_scores = []
+        for terms, phrases in evidence_groups:
+            matched = sum(term in evidence_tokens for term in terms)
+            phrase_matches = sum(phrase in evidence for phrase in phrases)
+            group_scores.append(
+                (matched / len(terms), phrase_matches, matched, len(terms))
+            )
+        coverage, phrase_matches, matched, term_count = max(group_scores)
+        reasons = {str(reason) for reason in row.get("reasons", [])}
+        is_hybrid = {
+            "postgres_vector_cosine",
+            "postgres_bm25",
+        }.issubset(reasons)
+        relevance = coverage + min(phrase_matches, 2) * 0.1
+        if relevance >= 0.35:
+            row["reasons"] = list(
+                dict.fromkeys(
+                    [*row.get("reasons", []), f"intent_terms:{matched}/{term_count}"]
+                )
+            )
+            strong.append((relevance, row))
+        elif matched >= 1 and is_hybrid:
+            row["reasons"] = list(
+                dict.fromkeys(
+                    [*row.get("reasons", []), f"hybrid_intent_terms:{matched}/{term_count}"]
+                )
+            )
+            hybrid_fallback.append(row)
+    if strong:
+        best_relevance = max(score for score, _ in strong)
+        return [
+            row
+            for score, row in strong
+            if score >= max(0.35, best_relevance - 0.18)
+        ]
+    return hybrid_fallback
 
 
 def _accented_significant_terms(value: str) -> list[str]:
@@ -761,17 +780,6 @@ def plan_retrieval_queries(query: str) -> list[str]:
             if expanded.casefold() != normalized.casefold():
                 planned.append(expanded)
     query_ascii = _ascii(normalized)
-    if any(term in query_ascii for term in _BASE_WAGE_TERMS):
-        if _is_public_sector_base_wage_query(normalized):
-            planned.append(
-                "mức lương cơ sở cán bộ công chức viên chức "
-                "hệ số lương số tiền đồng tháng"
-            )
-        elif "luong co ban" in query_ascii and not matched_concepts:
-            planned.append(
-                "tiền lương mức lương theo công việc "
-                "mức lương tối thiểu Điều 90 Điều 91"
-            )
     for markers, expansion in _LEGAL_QUERY_EXPANSIONS:
         if any(marker in query_ascii for marker in markers):
             planned.append(expansion)
@@ -859,19 +867,6 @@ def build_answer_plan(query: str) -> dict[str, Any]:
             }
             for concept in supporting_concepts
         ]
-    if _is_public_sector_base_wage_query(query):
-        plan.update(
-            {
-                "target_concept": (
-                    "mức lương cơ sở của cán bộ, công chức, viên chức"
-                ),
-                "requires_exact_value": _requires_exact_public_sector_wage(query),
-                "do_not_confuse_with": [
-                    "mức lương tối thiểu vùng",
-                    "mức lương theo công việc hoặc chức danh",
-                ],
-            }
-        )
     return plan
 
 
@@ -1206,6 +1201,7 @@ class RetrievalService:
             planned_queries = plan_retrieval_queries(query)[
                 : profile.retrieval_query_limit
             ]
+            query_complexity = max(1, len(_significant_terms(query)))
             result_limit = (
                 base_top_k
                 if route == "single_hop"
@@ -1230,30 +1226,60 @@ class RetrievalService:
                     ),
                 )
             )
-            result_sets = []
-            for planned_query in planned_queries:
-                result_sets.append(
-                    await run_in_threadpool(
-                        store.retrieve,
-                        planned_query,
-                        per_query_limit,
-                    )
-                )
-                for row in result_sets[-1]:
-                    row["reasons"] = list(
-                        dict.fromkeys(
-                            [
-                                *row.get("reasons", []),
-                                f"retrieval_route:{route}",
-                            ]
+            async def retrieve_planned(limit: int) -> list[list[dict[str, Any]]]:
+                result_sets: list[list[dict[str, Any]]] = []
+                for planned_query in planned_queries:
+                    result_sets.append(
+                        await run_in_threadpool(
+                            store.retrieve,
+                            planned_query,
+                            limit,
                         )
                     )
-            rows = _merge_retrieval_rows(
+                    for row in result_sets[-1]:
+                        row["reasons"] = list(
+                            dict.fromkeys(
+                                [
+                                    *row.get("reasons", []),
+                                    f"retrieval_route:{route}",
+                                ]
+                            )
+                        )
+                return result_sets
+
+            result_sets = await retrieve_planned(per_query_limit)
+            raw_rows = _merge_retrieval_rows(
                 result_sets,
                 result_limit,
                 planned_queries,
             )
-            rows = _filter_rows_for_query_intent(query, rows)
+            rows = _filter_rows_for_query_intent(query, raw_rows)
+            # Keep ordinary single-hop lookups fast. Only widen the hybrid
+            # candidate pool when retrieval found data but intent filtering
+            # retained too little evidence for a non-trivial question.
+            if (
+                route == "single_hop"
+                and raw_rows
+                and len(rows) < 2
+                and query_complexity >= 5
+            ):
+                recovery_limit = min(
+                    24,
+                    max(base_top_k * 2, query_complexity * 3),
+                )
+                if recovery_limit > per_query_limit:
+                    recovery_sets = await retrieve_planned(recovery_limit)
+                    recovery_raw_rows = _merge_retrieval_rows(
+                        recovery_sets,
+                        recovery_limit,
+                        planned_queries,
+                    )
+                    recovery_rows = _filter_rows_for_query_intent(
+                        query,
+                        recovery_raw_rows,
+                    )
+                    if recovery_rows:
+                        rows = recovery_rows
             if not _rows_have_query_evidence(query, rows):
                 return []
             answer_limit = {
