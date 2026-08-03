@@ -14,6 +14,10 @@ from app.core.security import decrypt_text, encrypt_text
 from app.db import SessionFactory
 from app.models import ChatMessage, Conversation, ConversationSummary
 from app.services.ai import GeminiService, untrusted_data_block
+from app.services.chat_attachments import (
+    compact_attachment_context,
+    deserialize_attachment_context,
+)
 from app.services.embeddings import (
     VertexAIEmbeddingService,
     embedding_config_from_settings,
@@ -23,6 +27,29 @@ from app.services.embeddings import (
 
 logger = logging.getLogger(__name__)
 MAX_REFRESH_ATTEMPTS = 3
+
+
+def _summary_message_content(message: ChatMessage, settings: Settings) -> str:
+    content = decrypt_text(message.content_ciphertext, settings)[:4000]
+    ciphertext = getattr(message, "attachment_context_ciphertext", None)
+    if not ciphertext:
+        return content
+    try:
+        attachments = deserialize_attachment_context(
+            decrypt_text(ciphertext, settings)
+        )
+    except Exception:
+        logger.warning(
+            "Ignoring unreadable attachment context while summarizing message_id=%s",
+            message.id,
+        )
+        return content
+    if not attachments:
+        return content
+    return (
+        f"{content}\n\nTệp đính kèm:\n"
+        f"{compact_attachment_context(attachments, max_chars=4000)}"
+    )
 
 
 SUMMARY_SYSTEM_PROMPT = """Bạn là bộ nhớ hội thoại pháp lý.
@@ -115,7 +142,7 @@ class ConversationMemoryService:
                 messages=tuple(
                     (
                         message.role,
-                        decrypt_text(message.content_ciphertext, self.settings)[:4000],
+                        _summary_message_content(message, self.settings),
                     )
                     for message in new_messages
                 ),

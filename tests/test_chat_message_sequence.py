@@ -7,9 +7,14 @@ from types import SimpleNamespace
 
 from app.api import chat
 from app.core.config import Settings
-from app.core.security import encrypt_text
+from app.core.security import decrypt_text, encrypt_text
 from app.models import ChatAnswerFeedback, ChatMessage, Conversation
 from app.schemas import ChatRequest, VerificationItem, VerificationReport
+from app.services.chat_attachments import (
+    ExtractedChatAttachment,
+    create_attachment_token,
+    deserialize_attachment_context,
+)
 
 
 class _Rows:
@@ -126,9 +131,12 @@ class _Freshness:
 class _AI:
     def __init__(self, db: _ChatSession) -> None:
         self.db = db
+        self.prompts: list[str] = []
 
-    async def complete(self, *_: object, **__: object) -> str:
+    async def complete(self, *args: object, **__: object) -> str:
         assert self.db.rolled_back
+        if len(args) > 1:
+            self.prompts.append(str(args[1]))
         return (
             "Theo Điều 1, Luật thử nghiệm số 100/2020/QH14 [S1], "
             "đây là quy định pháp luật thử nghiệm."
@@ -185,6 +193,59 @@ def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() ->
     assert result.conversation_id == conversation_id
     assert memory.refreshed == [conversation_id]
     assert "Căn cứ được trích dẫn:" not in result.answer
+
+
+def test_chat_uses_and_persists_encrypted_attachment_context() -> None:
+    settings = Settings(_env_file=None, session_secret="chat-attachment-sequence-test")
+    user_id = uuid.uuid4()
+    conversation_id = uuid.uuid4()
+    conversation = Conversation(id=conversation_id, user_id=user_id)
+    db = _ChatSession(conversation)
+    memory = _Memory(db)
+    ai = _AI(db)
+    token = create_attachment_token(
+        ExtractedChatAttachment(
+            filename="noi-quy-lao-dong.txt",
+            content_type="text/plain",
+            kind="document",
+            size_bytes=180,
+            text="Điều 5. Người lao động làm việc từ 22 giờ đến 06 giờ.",
+            truncated=False,
+        ),
+        str(user_id),
+        settings,
+    )
+
+    asyncio.run(
+        chat(
+            ChatRequest(
+                message="Quy định trong tệp này có phù hợp không?",
+                conversation_id=conversation_id,
+                attachments=[{"token": token}],
+            ),
+            db=db,
+            user=SimpleNamespace(id=user_id, preferred_name="Minh"),
+            settings=settings,
+            retrieval=_Retrieval(db),
+            freshness=_Freshness(db),
+            ai=ai,
+            memory=memory,
+            answer_cache=_Cache(),
+        )
+    )
+
+    user_message = next(
+        item
+        for item in db.added
+        if isinstance(item, ChatMessage) and item.role == "USER"
+    )
+    assert user_message.attachments[0]["filename"] == "noi-quy-lao-dong.txt"
+    assert user_message.attachment_context_ciphertext is not None
+    stored = deserialize_attachment_context(
+        decrypt_text(user_message.attachment_context_ciphertext, settings)
+    )
+    assert "22 giờ" in stored[0]["text"]
+    assert any("USER_ATTACHMENTS" in prompt and "22 giờ" in prompt for prompt in ai.prompts)
 
 
 class _RegenerationSession:

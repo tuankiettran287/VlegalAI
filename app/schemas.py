@@ -128,6 +128,24 @@ class ConversationOut(BaseModel):
     message_count: int = 0
 
 
+class ChatAttachment(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=1, max_length=120)
+    kind: Literal["image", "document"]
+    size_bytes: int = Field(ge=0, le=15 * 1024 * 1024)
+    page_count: int | None = Field(default=None, ge=0, le=250)
+    truncated: bool = False
+
+
+class ChatAttachmentUploadOut(ChatAttachment):
+    token: str = Field(min_length=20, max_length=300_000)
+    preview: str = Field(default="", max_length=500)
+
+
+class ChatAttachmentToken(BaseModel):
+    token: str = Field(min_length=20, max_length=300_000)
+
+
 class MessageOut(BaseModel):
     id: uuid.UUID
     conversation_id: uuid.UUID
@@ -135,6 +153,7 @@ class MessageOut(BaseModel):
     content: str
     sources: list[SourceOut] = Field(default_factory=list)
     verification: VerificationReport | None = None
+    attachments: list[ChatAttachment] = Field(default_factory=list)
     feedback_rating: Literal["good", "bad"] | None = None
     created_at: datetime
 
@@ -153,19 +172,8 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=2, max_length=5000)
     conversation_id: uuid.UUID | None = None
     regenerate_from_message_id: uuid.UUID | None = None
+    attachments: list[ChatAttachmentToken] = Field(default_factory=list, max_length=3)
     effort: ChatEffort = Field(default="medium", description="Deprecated compatibility field; new clients send instant.")
-    history: list[ChatTurn] = Field(
-        default_factory=list,
-        max_length=12,
-        description="Temporary guest history only; authenticated history is loaded from PostgreSQL.",
-    )
-
-
-class ChatResponse(BaseModel):
-    conversation_id: uuid.UUID | None = None
-    message_id: uuid.UUID
-    answer: str
-    sources: list[SourceOut]
     history: list[ChatTurn] = Field(
         default_factory=list,
         max_length=12,

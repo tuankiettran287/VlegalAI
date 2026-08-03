@@ -1,6 +1,7 @@
 import type {
   Article,
   Artifact,
+  ChatAttachment,
   ChatMessage,
   ChatEffort,
   Conversation,
@@ -152,6 +153,20 @@ function normalizeConversationMessages(value: unknown, conversationId: string): 
     if (role !== "user" && role !== "assistant") return [];
     const sources = normalizeSources(item.sources);
     const verification = normalizeVerification(item.verification);
+    const attachments: ChatAttachment[] = Array.isArray(item.attachments)
+      ? item.attachments.flatMap((attachment) => {
+          if (!isRecord(attachment)) return [];
+          const kind = attachment.kind === "image" ? "image" : "document";
+          return [{
+            filename: typeof attachment.filename === "string" ? attachment.filename : "Tệp đính kèm",
+            content_type: typeof attachment.content_type === "string" ? attachment.content_type : "application/octet-stream",
+            kind,
+            size_bytes: typeof attachment.size_bytes === "number" ? attachment.size_bytes : 0,
+            page_count: typeof attachment.page_count === "number" ? attachment.page_count : null,
+            truncated: Boolean(attachment.truncated),
+          }];
+        })
+      : [];
     return [{
       id: typeof item.id === "string" ? item.id : `${conversationId}-${index}`,
       conversation_id: typeof item.conversation_id === "string" ? item.conversation_id : conversationId,
@@ -159,6 +174,7 @@ function normalizeConversationMessages(value: unknown, conversationId: string): 
       content: typeof item.content === "string" ? item.content : "",
       sources: sources.length ? sources : undefined,
       verification,
+      attachments: attachments.length ? attachments : undefined,
       feedback_rating:
         item.feedback_rating === "good" || item.feedback_rating === "bad"
           ? item.feedback_rating
@@ -223,6 +239,7 @@ export function askLegalQuestion(
   effort: ChatEffort = "instant",
   options: {
     regenerateFromMessageId?: string | null;
+    attachments?: ChatAttachment[];
   } = {},
 ) {
   return requestJson<ChatResponse>("/api/chat", {
@@ -231,10 +248,26 @@ export function askLegalQuestion(
       message,
       conversation_id: conversationId || null,
       regenerate_from_message_id: options.regenerateFromMessageId || null,
+      attachments: (options.attachments || []).flatMap((attachment) =>
+        attachment.token ? [{ token: attachment.token }] : [],
+      ),
       effort: "instant",
     }),
     signal: AbortSignal.timeout(45000),
   });
+}
+
+export function uploadChatAttachment(file: File) {
+  const body = new FormData();
+  body.append("attachment", file);
+  return requestJson<ChatAttachment & { token: string; preview: string }>(
+    "/api/chat/attachments",
+    {
+      method: "POST",
+      body,
+      signal: AbortSignal.timeout(120000),
+    },
+  );
 }
 
 export function rateChatAnswer(

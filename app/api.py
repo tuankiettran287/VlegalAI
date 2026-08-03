@@ -64,6 +64,8 @@ from app.schemas import (
     ConversationDetailOut,
     ConversationOut,
     ConversationUpdate,
+    ChatAttachment,
+    ChatAttachmentUploadOut,
     DraftContractRequest,
     FeedbackRequest,
     MessageOut,
@@ -82,6 +84,21 @@ from app.services.ai import (
 )
 from app.services.articles import ArticleResearchService
 from app.services.chat_effort import ChatEffort, chat_effort_profile
+from app.services.chat_attachments import (
+    MAX_CHAT_ATTACHMENT_BYTES,
+    MAX_CHAT_ATTACHMENTS,
+    MAX_COMBINED_ATTACHMENT_TEXT_CHARS,
+    ChatAttachmentError,
+    attachment_metadata,
+    compact_attachment_context,
+    create_attachment_token,
+    decode_attachment_token,
+    deserialize_attachment_context,
+    extract_document_attachment,
+    extracted_ocr_attachment,
+    serialize_attachment_context,
+    validate_chat_attachment,
+)
 from app.services.legal_catalog import LegalCatalogService, parse_catalog_request
 from app.services.contract_analysis import (
     build_contract_diff,
@@ -478,6 +495,75 @@ def semantic_answer_cache_service(request: Request) -> SemanticAnswerCacheServic
     return request.app.state.semantic_answer_cache
 
 
+@router.post(
+    "/chat/attachments",
+    response_model=ChatAttachmentUploadOut,
+)
+async def upload_chat_attachment(
+    attachment: UploadFile = File(...),
+    user: User = Depends(current_user),
+    settings: Settings = Depends(get_settings),
+    ai: GeminiService = Depends(ai_service),
+) -> ChatAttachmentUploadOut:
+    data = await attachment.read(MAX_CHAT_ATTACHMENT_BYTES + 1)
+    try:
+        validated = validate_chat_attachment(
+            data,
+            attachment.filename or "tep-dinh-kem",
+            attachment.content_type,
+        )
+        if validated.requires_ocr:
+            ocr_text = await ai.extract_attachment_text(
+                validated.data,
+                validated.content_type,
+                validated.filename,
+            )
+            extracted = extracted_ocr_attachment(validated, ocr_text)
+        else:
+            try:
+                extracted = await run_in_threadpool(
+                    extract_document_attachment,
+                    validated,
+                )
+            except ChatAttachmentError as exc:
+                is_scanned_pdf = (
+                    validated.content_type == "application/pdf"
+                    and "Không đọc được nội dung văn bản" in str(exc)
+                )
+                if not is_scanned_pdf:
+                    raise
+                ocr_text = await ai.extract_attachment_text(
+                    validated.data,
+                    validated.content_type,
+                    validated.filename,
+                )
+                extracted = extracted_ocr_attachment(validated, ocr_text)
+    except ChatAttachmentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except GeminiError as exc:
+        logger.warning(
+            "Attachment OCR unavailable error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Không thể đọc ảnh hoặc tài liệu scan lúc này. Vui lòng thử lại sau.",
+        ) from exc
+    finally:
+        await attachment.close()
+
+    metadata = extracted.metadata()
+    return ChatAttachmentUploadOut(
+        **metadata,
+        token=create_attachment_token(
+            extracted,
+            str(user.id),
+            settings,
+        ),
+        preview=extracted.text[:320],
+    )
+
+
 def _hash_content(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -528,6 +614,103 @@ def _message_sources_out(value: Any) -> list[SourceOut]:
     return sources
 
 
+def _message_attachments_out(value: Any) -> list[ChatAttachment]:
+    if not isinstance(value, list):
+        return []
+    attachments: list[ChatAttachment] = []
+    for item in value[:MAX_CHAT_ATTACHMENTS]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            attachments.append(ChatAttachment.model_validate(item))
+        except ValidationError:
+            logger.warning("Ignoring malformed attachment metadata in stored chat message")
+    return attachments
+
+
+def _stored_attachment_payloads(
+    message: ChatMessage,
+    settings: Settings,
+) -> list[dict[str, Any]]:
+    ciphertext = getattr(message, "attachment_context_ciphertext", None)
+    if not ciphertext:
+        return []
+    try:
+        return deserialize_attachment_context(decrypt_text(ciphertext, settings))
+    except (BinasciiError, InvalidTag, UnicodeDecodeError, ValueError):
+        logger.warning(
+            "Ignoring unreadable chat attachment context message_id=%s",
+            message.id,
+        )
+        return []
+
+
+def _request_attachment_payloads(
+    tokens: list[Any],
+    user_id: uuid.UUID,
+    settings: Settings,
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    seen_tokens: set[str] = set()
+    remaining = MAX_COMBINED_ATTACHMENT_TEXT_CHARS
+    for item in tokens[:MAX_CHAT_ATTACHMENTS]:
+        token = str(getattr(item, "token", "") or "")
+        if not token or token in seen_tokens:
+            continue
+        seen_tokens.add(token)
+        try:
+            decoded = decode_attachment_token(token, str(user_id), settings)
+        except ChatAttachmentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        payload = {
+            **attachment_metadata(decoded),
+            "text": str(decoded.get("text") or ""),
+        }
+        if remaining <= 0:
+            break
+        text = str(payload.get("text") or "")
+        if len(text) > remaining:
+            payload["text"] = text[:remaining]
+            payload["truncated"] = True
+        remaining -= len(str(payload.get("text") or ""))
+        payloads.append(payload)
+    return payloads
+
+
+def _retrieval_query_with_attachments(
+    query: str,
+    payloads: list[dict[str, Any]],
+) -> str:
+    if not payloads:
+        return query
+    attachment_hint = compact_attachment_context(payloads, max_chars=3_000)
+    return f"{query}\n\nNội dung tệp đính kèm liên quan:\n{attachment_hint}"[:8_000]
+
+
+def _attachment_citation_sources(
+    payloads: list[dict[str, Any]],
+    *,
+    start_index: int,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "source_id": f"S{start_index + index}",
+            "score": 1.0,
+            "chunk_type": "user_attachment",
+            "citation": f"Tệp người dùng cung cấp: {payload['filename']}",
+            "title": payload["filename"],
+            "text": (
+                "Tệp do người dùng cung cấp cho lượt hỏi hiện tại. "
+                "Đây là chứng cứ đầu vào, không phải văn bản pháp luật."
+            ),
+            "reasons": ["user_attachment"],
+            "doc_id": None,
+            "source_url": None,
+        }
+        for index, payload in enumerate(payloads)
+    ]
+
+
 def _message_content_out(message: ChatMessage, settings: Settings) -> str:
     try:
         return decrypt_text(message.content_ciphertext, settings)
@@ -552,6 +735,9 @@ def _message_out(
         content=_message_content_out(message, settings),
         sources=_message_sources_out(message.sources),
         verification=_message_verification_out(message.verification),
+        attachments=_message_attachments_out(
+            getattr(message, "attachments", []),
+        ),
         feedback_rating=(
             feedback_rating.lower()
             if feedback_rating in {"GOOD", "BAD"}
@@ -1949,10 +2135,17 @@ async def _load_postgres_chat_history(
             .limit(limit)
         )
     ).all()
-    return [
-        (message.role, decrypt_text(message.content_ciphertext, settings))
-        for message in reversed(stored_messages)
-    ]
+    history: list[tuple[str, str]] = []
+    for message in reversed(stored_messages):
+        content = decrypt_text(message.content_ciphertext, settings)
+        attachment_payloads = _stored_attachment_payloads(message, settings)
+        if attachment_payloads:
+            content = (
+                f"{content}\n\nTệp đính kèm của lượt này:\n"
+                f"{compact_attachment_context(attachment_payloads)}"
+            )
+        history.append((message.role, content))
+    return history
 
 
 @router.get("/health/live", tags=["health"])
@@ -2286,6 +2479,24 @@ async def chat(
 
     current_question = payload.message
     regeneration_target_id = payload.regenerate_from_message_id
+    if regeneration_target_id and payload.attachments:
+        raise HTTPException(
+            status_code=422,
+            detail="Không thể thay tệp đính kèm khi đang tạo lại câu trả lời",
+        )
+    attachment_payloads = (
+        _request_attachment_payloads(
+            payload.attachments,
+            authenticated_user_id,
+            settings,
+        )
+        if not regeneration_target_id
+        else []
+    )
+    message_attachments = [
+        attachment_metadata(item)
+        for item in attachment_payloads
+    ]
     regeneration_feedback = ""
     regeneration_original_answer = ""
     regeneration_feedback_id: uuid.UUID | None = None
@@ -2322,7 +2533,7 @@ async def chat(
     history_turns: list[tuple[str, str]] = []
     greeting_answer = (
         None
-        if regeneration_target_id
+        if regeneration_target_id or attachment_payloads
         else greeting_response(current_question, preferred_name)
     )
     if payload.conversation_id:
@@ -2357,6 +2568,13 @@ async def chat(
             current_question = _message_content_out(
                 question_message,
                 settings,
+            )
+            attachment_payloads = _stored_attachment_payloads(
+                question_message,
+                settings,
+            )
+            message_attachments = list(
+                getattr(question_message, "attachments", []) or []
             )
             regeneration_original_answer = _message_content_out(
                 answer_message,
@@ -2430,7 +2648,7 @@ async def chat(
     guard_verification: dict[str, Any] | None = None
     catalog_req = (
         parse_catalog_request(current_question)
-        if greeting_answer is None
+        if greeting_answer is None and not attachment_payloads
         else None
     )
     if catalog_req is not None:
@@ -2511,6 +2729,10 @@ async def chat(
                     retrieval_query = query_rewrite.retrieval_query
                     query_was_rewritten = query_rewrite.rewritten
                     rewrite_attempted = query_rewrite.attempted
+                retrieval_query = _retrieval_query_with_attachments(
+                    retrieval_query,
+                    attachment_payloads,
+                )
                 answer_plan = build_answer_plan(retrieval_query)
                 log_progress(
                     logger,
@@ -2549,6 +2771,7 @@ async def chat(
         greeting_answer is None
         and catalog_answer is None
         and guard_answer is None
+        and not attachment_payloads
         and callable(structure_lookup)
     ):
         structure_result = await structure_lookup(retrieval_query)
@@ -2617,6 +2840,7 @@ async def chat(
     )
     cache_eligible = (
         not answer_ready
+        and not attachment_payloads
         and answer_cache.eligible(
             current_question,
             has_conversation_context=bool(history_turns or summary_context),
@@ -2741,6 +2965,14 @@ async def chat(
                 effort=effort_profile.name,
                 telemetry=timings,
             )
+        if sources and attachment_payloads:
+            sources = [
+                *sources,
+                *_attachment_citation_sources(
+                    attachment_payloads,
+                    start_index=len(sources) + 1,
+                ),
+            ]
         if not sources:
             answer = LEGAL_DATA_UNAVAILABLE_MESSAGE
             log_progress(
@@ -2777,6 +3009,8 @@ async def chat(
                     f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
                     f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
                     f"NGUỒN:\n{build_context(compact_context_sources(sources, retrieval_query, max_chars=(4500 if effort_profile.name == 'instant' else 9000), per_source_chars=(900 if effort_profile.name == 'instant' else 1200)))}\n\n"
+                    "TỆP ĐÍNH KÈM DO NGƯỜI DÙNG CUNG CẤP:\n"
+                    f"{untrusted_data_block('USER_ATTACHMENTS', attachment_payloads) if attachment_payloads else '(Không có)'}\n\n"
                     f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', current_question)}"
                     "\n\nCÁCH HIỂU ĐÃ CHUẨN HÓA:\n"
                     f"{untrusted_data_block('REWRITTEN_QUERY', retrieval_query) if query_was_rewritten else '(Không cần chuẩn hóa)'}"
@@ -2928,6 +3162,15 @@ async def chat(
             role="USER",
             content_ciphertext=encrypt_text(current_question, settings),
             content_hash=_hash_content(current_question),
+            attachments=message_attachments,
+            attachment_context_ciphertext=(
+                encrypt_text(
+                    serialize_attachment_context(attachment_payloads),
+                    settings,
+                )
+                if attachment_payloads
+                else None
+            ),
         )
         db.add(user_message)
     else:

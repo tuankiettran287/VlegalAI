@@ -16,6 +16,7 @@ def _stored_message(
     *,
     verification: object,
     sources: object | None = None,
+    attachments: object | None = None,
     content_ciphertext: str | None = None,
 ) -> ChatMessage:
     return ChatMessage(
@@ -27,6 +28,7 @@ def _stored_message(
         content_hash="history-hash",
         sources=sources if sources is not None else [],
         verification=verification,
+        attachments=attachments if attachments is not None else [],
         token_count=0,
         status="COMPLETED",
         created_at=datetime.now(UTC),
@@ -65,6 +67,17 @@ def test_stored_message_normalizes_legacy_and_malformed_metadata() -> None:
             },
             "invalid-source",
         ],
+        attachments=[
+            {
+                "filename": "noi-quy.pdf",
+                "content_type": "application/pdf",
+                "kind": "document",
+                "size_bytes": 2048,
+                "page_count": 2,
+                "truncated": False,
+            },
+            "invalid-attachment",
+        ],
     )
 
     result = _message_out(message, settings)
@@ -74,6 +87,7 @@ def test_stored_message_normalizes_legacy_and_malformed_metadata() -> None:
     assert result.verification.items == []
     assert result.verification.note == "Đã kiểm tra dữ liệu cũ."
     assert [source.source_id for source in result.sources] == ["S1"]
+    assert [attachment.filename for attachment in result.attachments] == ["noi-quy.pdf"]
 
 
 def test_stored_message_with_unreadable_ciphertext_does_not_break_conversation() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 import time
@@ -522,6 +523,43 @@ def test_complete_calls_vertex_with_structured_output() -> None:
         "thinkingBudget": 0,
         "includeThoughts": False,
     }
+
+
+def test_extract_attachment_text_sends_inline_data_to_vertex() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": "Điều 1. Thời giờ làm việc"}]},
+                        "finishReason": "STOP",
+                    }
+                ]
+            },
+        )
+
+    async def scenario() -> str:
+        service, client = _mocked_service(handler)
+        try:
+            return await service.extract_attachment_text(
+                b"\x89PNG\r\n\x1a\nimage",
+                "image/png",
+                "noi-quy.png",
+            )
+        finally:
+            await client.aclose()
+
+    assert asyncio.run(scenario()) == "Điều 1. Thời giờ làm việc"
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    inline_data = payload["contents"][0]["parts"][1]["inlineData"]
+    assert inline_data["mimeType"] == "image/png"
+    assert base64.b64decode(inline_data["data"]).startswith(b"\x89PNG")
+    assert payload["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 0
 
 
 @pytest.mark.parametrize(

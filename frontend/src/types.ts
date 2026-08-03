@@ -38,6 +38,17 @@ export type VerificationReport = {
   note: string;
 };
 
+export type ChatAttachment = {
+  filename: string;
+  content_type: string;
+  kind: "image" | "document";
+  size_bytes: number;
+  page_count?: number | null;
+  truncated: boolean;
+  token?: string;
+  preview?: string;
+};
+
 export type ChatMessage = {
   id: string;
   conversation_id?: string;
@@ -45,6 +56,7 @@ export type ChatMessage = {
   content: string;
   sources?: Source[];
   verification?: VerificationReport;
+  attachments?: ChatAttachment[];
   feedback_rating?: "good" | "bad" | null;
   pending?: boolean;
   typing?: boolean;

@@ -113,6 +113,8 @@ class ChatMessage(Base):
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     verification: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    attachments: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    attachment_context_ciphertext: Mapped[str | None] = mapped_column(Text)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(16), default="COMPLETED")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

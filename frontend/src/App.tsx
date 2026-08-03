@@ -23,6 +23,7 @@ import {
   Copy,
   ExternalLink,
   FileDiff,
+  FileImage,
   FilePenLine,
   FileText,
   FolderClock,
@@ -33,6 +34,7 @@ import {
   MessageSquareText,
   Moon,
   PenTool,
+  Paperclip,
   Plus,
   RefreshCw,
   Scale,
@@ -61,6 +63,7 @@ import {
   rateChatAnswer,
   reviewContract,
   sendFeedback,
+  uploadChatAttachment,
   type CompareResponse,
   type DraftResponse,
   type ReviewResponse,
@@ -72,6 +75,7 @@ import LandingPage from "./LandingPage";
 import OnboardingPage from "./OnboardingPage";
 import type {
   Artifact,
+  ChatAttachment,
   ChatEffort,
   ChatMessage,
   Conversation,
@@ -297,6 +301,12 @@ function formatDate(value?: string | null) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
   return new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short" }).format(date);
+}
+
+function formatFileSize(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.ceil(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function usePath() {
@@ -547,6 +557,8 @@ function ChatPage({
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [attachmentUploading, setAttachmentUploading] = useState(false);
   // Chat always uses the fast, citation-safe policy. Keep the request field
   // only for backwards compatibility with older API deployments.
   const [effort, setEffort] = useState<ChatEffort>("instant");
@@ -559,6 +571,7 @@ function ChatPage({
   const [feedbackLoadingId, setFeedbackLoadingId] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const conversationRequestRef = useRef(0);
   const hasMessages = messages.length > 0;
   const lastMessageId = messages[messages.length - 1]?.id;
@@ -617,6 +630,7 @@ function ChatPage({
       }
       setConversationId(id);
       setMessages(data.messages);
+      setAttachments([]);
       setFeedbackMessageId(null);
       setFeedbackComment("");
       setHistoryOpen(false);
@@ -637,15 +651,60 @@ function ChatPage({
     setConversationId(null);
     setMessages([]);
     setInput("");
+    setAttachments([]);
     setError("");
     setFeedbackMessageId(null);
     setFeedbackComment("");
     setCopiedMessageId(null);
   };
 
+  const handleAttachmentFiles = async (files: FileList | null) => {
+    if (!files?.length || attachmentUploading || loading) return;
+    const remainingSlots = 3 - attachments.length;
+    if (remainingSlots <= 0) {
+      setError("Mỗi câu hỏi chỉ được đính kèm tối đa 3 tệp.");
+      return;
+    }
+    const selected = Array.from(files);
+    if (selected.length > remainingSlots) {
+      setError(`Bạn chỉ có thể chọn thêm ${remainingSlots} tệp.`);
+      return;
+    }
+    setError("");
+    setAttachmentUploading(true);
+    const uploaded: ChatAttachment[] = [];
+    try {
+      for (const file of selected) {
+        uploaded.push(await uploadChatAttachment(file));
+      }
+      setAttachments((current) => [...current, ...uploaded].slice(0, 3));
+    } catch (reason) {
+      if (uploaded.length) {
+        setAttachments((current) => [...current, ...uploaded].slice(0, 3));
+      }
+      setError((reason as Error).message);
+    } finally {
+      setAttachmentUploading(false);
+      if (attachmentInputRef.current) attachmentInputRef.current.value = "";
+    }
+  };
+
   const submit = async (question = input) => {
-    const trimmed = question.trim();
-    if (!trimmed || loading || loadingConversationId) return;
+    const submittedAttachments = [...attachments];
+    const displayAttachments = submittedAttachments.map((attachment) => ({
+      filename: attachment.filename,
+      content_type: attachment.content_type,
+      kind: attachment.kind,
+      size_bytes: attachment.size_bytes,
+      page_count: attachment.page_count,
+      truncated: attachment.truncated,
+    }));
+    const trimmed = question.trim() || (
+      submittedAttachments.length
+        ? "Hãy phân tích các tệp đính kèm và cho tôi biết những vấn đề pháp luật lao động cần lưu ý."
+        : ""
+    );
+    if (!trimmed || loading || attachmentUploading || loadingConversationId) return;
     setError("");
     setLoading(true);
     const submittedEffort: ChatEffort = "instant";
@@ -654,7 +713,12 @@ function ChatPage({
       medium: "Thinking · Medium…",
       high: "Thinking · High…",
     };
-    const userMessage: ChatMessage = { id: uid(), role: "user", content: trimmed };
+    const userMessage: ChatMessage = {
+      id: uid(),
+      role: "user",
+      content: trimmed,
+      attachments: displayAttachments,
+    };
     const pendingId = uid();
     setMessages((current) => [
       ...current.map((message) =>
@@ -669,11 +733,13 @@ function ChatPage({
       },
     ]);
     setInput("");
+    setAttachments([]);
     try {
       const data = await askLegalQuestion(
         trimmed,
         conversationId,
         submittedEffort,
+        { attachments: submittedAttachments },
       );
       setConversationId(data.conversation_id || null);
       setMessages((current) =>
@@ -695,6 +761,7 @@ function ChatPage({
     } catch (reason) {
       const message = (reason as Error).message;
       setMessages((current) => current.filter((item) => item.id !== pendingId));
+      setAttachments((current) => current.length ? current : submittedAttachments);
       setError(message);
     } finally {
       setLoading(false);
@@ -837,6 +904,26 @@ function ChatPage({
           <label htmlFor="legal-question-input">{home ? "Tình huống cần tư vấn" : "Tiếp tục trao đổi"}</label>
           <span>{home ? "Mô tả càng cụ thể, kết quả càng sát nhu cầu" : "Shift + Enter để xuống dòng"}</span>
         </div>
+        {attachments.length > 0 && (
+          <div className="composer-attachments" aria-label="Tệp đã đính kèm">
+            {attachments.map((attachment, index) => (
+              <span className="attachment-chip" key={`${attachment.filename}-${index}`}>
+                {attachment.kind === "image" ? <FileImage size={15} /> : <FileText size={15} />}
+                <span>
+                  <strong>{attachment.filename}</strong>
+                  <small>{formatFileSize(attachment.size_bytes)}{attachment.truncated ? " · đã rút gọn" : ""}</small>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                  aria-label={`Bỏ tệp ${attachment.filename}`}
+                >
+                  <X size={13} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <textarea
           id="legal-question-input"
           value={input}
@@ -850,7 +937,7 @@ function ChatPage({
               submit();
             }
           }}
-          placeholder="Hỏi VLegal về tình huống pháp lý của bạn…"
+          placeholder={attachments.length ? "Bạn muốn hỏi điều gì về tệp này?" : "Hỏi VLegal về tình huống pháp lý của bạn…"}
         />
         <div className="effort-control">
           <div
@@ -886,12 +973,31 @@ function ChatPage({
           {selectedEffort.description}
         </p>
         <div className="composer-toolbar">
+          <button
+            className="attachment-trigger"
+            type="button"
+            disabled={attachmentUploading || loading || attachments.length >= 3}
+            onClick={() => attachmentInputRef.current?.click()}
+            aria-label="Đính kèm ảnh hoặc tài liệu"
+            title="JPEG, PNG, WebP, PDF, DOCX, TXT hoặc Markdown · tối đa 15 MB"
+          >
+            {attachmentUploading ? <RefreshCw className="spin" size={15} /> : <Paperclip size={15} />}
+            <span>{attachmentUploading ? "Đang đọc tệp…" : "Đính kèm"}</span>
+          </button>
+          <input
+            ref={attachmentInputRef}
+            className="attachment-input"
+            type="file"
+            multiple
+            accept="image/jpeg,image/png,image/webp,.pdf,.docx,.txt,.md"
+            onChange={(event) => void handleAttachmentFiles(event.target.files)}
+          />
           <span className="policy-line">
             <ShieldCheck size={14} />
             Đối chiếu căn cứ và kiểm tra hiệu lực
           </span>
           <span className="counter">{input.length}/5000</span>
-          <button className="primary-icon" type="submit" disabled={!input.trim() || loading || Boolean(loadingConversationId)} aria-label="Gửi câu hỏi">
+          <button className="primary-icon" type="submit" disabled={(!input.trim() && !attachments.length) || loading || attachmentUploading || Boolean(loadingConversationId)} aria-label="Gửi câu hỏi">
             <SendHorizontal size={18} />
           </button>
         </div>
@@ -1025,6 +1131,19 @@ function ChatPage({
                 <article className={`message ${message.role}`} key={message.id}>
                   {message.role === "assistant" && <div className="avatar"><Scale size={16} /></div>}
                   <div className="bubble">
+                    {message.role === "user" && Boolean(message.attachments?.length) && (
+                      <div className="message-attachments">
+                        {message.attachments?.map((attachment, index) => (
+                          <span key={`${message.id}-${attachment.filename}-${index}`}>
+                            {attachment.kind === "image" ? <FileImage size={14} /> : <FileText size={14} />}
+                            <span>
+                              <strong>{attachment.filename}</strong>
+                              <small>{formatFileSize(attachment.size_bytes)}</small>
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     {message.role === "assistant" ? (
                       <TypewriterMarkdown
                         text={message.content}
