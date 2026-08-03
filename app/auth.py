@@ -196,9 +196,6 @@ async def callback(
         transaction = decode_oidc_transaction(state, settings)
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=401, detail="Giao dịch SSO đã hết hạn hoặc không hợp lệ") from exc
-    if False:  # state comparison no longer needed — JWT signature is the CSRF protection
-        raise HTTPException(status_code=401, detail="SSO state không hợp lệ")
-
     metadata = await _oidc_metadata(settings)
     async with httpx.AsyncClient(timeout=20) as client:
         token_response = await client.post(
