@@ -19,7 +19,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ClipboardCheck,
-  Clock3,
   Copy,
   ExternalLink,
   FileDiff,
@@ -46,7 +45,6 @@ import {
   ThumbsUp,
   Trash2,
   Upload,
-  UserRound,
   X,
 } from "lucide-react";
 import {
@@ -59,7 +57,6 @@ import {
   draftContract,
   extractContractDocument,
   getTemplates,
-  prepareSignature,
   rateChatAnswer,
   reviewContract,
   sendFeedback,
@@ -67,7 +64,6 @@ import {
   type CompareResponse,
   type DraftResponse,
   type ReviewResponse,
-  type SignatureResponse,
 } from "./api";
 import { sampleQuestions, templateFallback } from "./data";
 import ArticlesPage from "./ArticlesPage";
@@ -91,7 +87,12 @@ const routes = [
   { path: "/tao-hop-dong", label: "Tạo hợp đồng", icon: FilePenLine },
   { path: "/review-hop-dong", label: "Review hợp đồng", icon: ClipboardCheck },
   { path: "/so-sanh-hop-dong", label: "So sánh hợp đồng", icon: FileDiff },
-  { path: "/ky-van-ban", label: "Ký văn bản", icon: PenTool },
+  {
+    path: "/ky-van-ban",
+    label: "Ký văn bản",
+    icon: PenTool,
+    comingSoon: true,
+  },
   { path: "/bai-viet", label: "Bài viết", icon: BookOpen },
   { path: "/thu-vien", label: "Lịch sử & tài liệu", icon: Library },
 ];
@@ -1620,31 +1621,27 @@ function ComparePage() {
 }
 
 function SignaturePage() {
-  const [title, setTitle] = useState("");
-  const [text, setText] = useState("");
-  const [signers, setSigners] = useState("");
-  const [result, setResult] = useState<SignatureResponse | null>(null);
-  const [error, setError] = useState("");
   return (
-    <section className="tool-page">
-      <PageHeader title="Ký văn bản" subtitle="Chuẩn bị gói ký, tạo dấu vân tay SHA-256 và lưu nhật ký nghiệp vụ trước khi chuyển sang nhà cung cấp chữ ký số." />
-      {error && <ErrorNotice error={error} onClose={() => setError("")} />}
-      <div className="workspace-grid">
-        <form className="workspace-card tool-form" onSubmit={async (event) => {
-          event.preventDefault(); setError("");
-          try { setResult(await prepareSignature({ title, document_text: text, signers: signers.split("\n").filter(Boolean) })); }
-          catch (reason) { setError((reason as Error).message); }
-        }}>
-          <label className="field"><span>Tên văn bản</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Biên bản thỏa thuận" /></label>
-          <DocumentInput title="Văn bản cần ký" value={text} onChange={setText} />
-          <label className="field"><span>Người ký — mỗi người một dòng</span><textarea value={signers} onChange={(event) => setSigners(event.target.value)} placeholder="Nguyễn Văn A&#10;Trần Thị B" /></label>
-          <button className="primary-button align-right" type="submit" disabled={title.length < 2 || text.length < 5}><PenTool size={16} /> Tạo gói ký</button>
-        </form>
-        <section className="result-panel signature-result">
-          <span className="eyebrow">Gói ký</span><h2>{result?.title || "Chưa tạo gói ký"}</h2>
-          {result ? <><div className="hash-box"><small>SHA-256</small>{result.document_hash}</div><div className="signer-list">{result.signers.map((name) => <span key={name}><UserRound size={14} />{name}</span>)}</div><div className="timeline">{result.audit_log.map((item) => <div key={`${item.time}-${item.event}`}><Clock3 size={15} /><span><strong>{item.event}</strong><small>{item.actor} · {formatDate(item.time)}</small></span></div>)}</div></> : <p className="empty-copy">Nhập văn bản và danh sách người ký để tạo mã hồ sơ có thể theo dõi.</p>}
-        </section>
-      </div>
+    <section className="tool-page signature-coming-soon-page">
+      <PageHeader
+        title="Ký văn bản"
+        subtitle="VLegal đang hoàn thiện quy trình ký số an toàn, xác thực danh tính và theo dõi trạng thái văn bản trong một không gian thống nhất."
+      />
+      <section className="coming-soon-panel" aria-labelledby="signature-coming-soon-title">
+        <div className="coming-soon-icon" aria-hidden="true"><PenTool size={28} /></div>
+        <span className="coming-soon-status">Sắp ra mắt</span>
+        <h2 id="signature-coming-soon-title">Ký số tin cậy, theo dõi minh bạch</h2>
+        <p>
+          Tính năng đang được hoàn thiện và chưa nhận văn bản để ký. Khi phát hành,
+          bạn sẽ có thể chuẩn bị hồ sơ ký, quản lý người ký và kiểm tra toàn bộ tiến
+          trình ngay trên VLegal.
+        </p>
+        <div className="coming-soon-capabilities" aria-label="Các khả năng dự kiến">
+          <span><ShieldCheck size={17} />Xác thực và bảo vệ văn bản</span>
+          <span><History size={17} />Theo dõi lịch sử ký</span>
+          <span><CheckCircle2 size={17} />Quản lý trạng thái người ký</span>
+        </div>
+      </section>
     </section>
   );
 }
@@ -1778,7 +1775,29 @@ function App() {
         aria-label="Điều hướng chính"
       >
         <div className="brand-row"><button className="brand" type="button" title={collapsed ? "Mở thanh điều hướng" : "Về trang chủ"} aria-label={collapsed ? "Mở thanh điều hướng" : "Về trang chủ"} onClick={() => { if (collapsed) { setCollapsed(false); return; } if (path !== "/") navigate("/"); }}><span className="brand-mark"><Scale size={22} /></span><span><strong>VLegal</strong><small>Trợ lý pháp lý</small></span></button><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Mở thanh điều hướng" : "Thu gọn thanh điều hướng"}><AlignLeft size={18} /></button></div>
-        <nav className="nav-list"><span className="nav-label">Trung tâm pháp lý</span>{routes.map((route) => { const Icon = route.icon; const active = activeRoute.path === route.path; return <button key={route.path} type="button" className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => { navigate(route.path); if (window.innerWidth <= 1080) setCollapsed(true); }}><Icon size={19} /><span>{route.label}</span></button>; })}</nav>
+        <nav className="nav-list">
+          <span className="nav-label">Trung tâm pháp lý</span>
+          {routes.map((route) => {
+            const Icon = route.icon;
+            const active = activeRoute.path === route.path;
+            return (
+              <button
+                key={route.path}
+                type="button"
+                className={active ? "active" : ""}
+                aria-current={active ? "page" : undefined}
+                onClick={() => {
+                  navigate(route.path);
+                  if (window.innerWidth <= 1080) setCollapsed(true);
+                }}
+              >
+                <Icon size={19} />
+                <span>{route.label}</span>
+                {route.comingSoon && <small className="nav-coming-soon">Sắp ra mắt</small>}
+              </button>
+            );
+          })}
+        </nav>
         <div className="trust-card"><ShieldCheck size={17} /><span><strong>Căn cứ minh bạch</strong><small>Kiểm tra hiệu lực trước khi trả lời</small></span></div>
         <div className="sidebar-actions"><button type="button" onClick={() => setFeedbackOpen(true)}><Bot size={17} /><span>Gửi góp ý</span></button><button type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={17} /> : <Moon size={17} />}<span>{dark ? "Giao diện sáng" : "Giao diện tối"}</span></button><div className="user-card"><span className="user-avatar">{user.avatar_url ? <img src={user.avatar_url} alt="" /> : (user.preferred_name || user.display_name).charAt(0).toUpperCase()}</span><span><strong>{user.preferred_name || user.display_name}</strong><small>{user.email}</small></span><button type="button" onClick={async () => { await authApi.logout(); window.location.reload(); }} aria-label="Đăng xuất"><LogOut size={16} /></button></div></div>
       </aside>

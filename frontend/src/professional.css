@@ -232,6 +232,30 @@ main:focus-visible {
   background: var(--gold);
 }
 
+.nav-coming-soon {
+  margin-left: auto;
+  padding: 3px 7px;
+  border: 1px solid rgb(220 192 131 / 34%);
+  border-radius: 999px;
+  background: rgb(220 192 131 / 12%);
+  color: #d8bd82;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.nav-list button.active .nav-coming-soon {
+  border-color: rgb(17 112 102 / 20%);
+  background: rgb(17 112 102 / 9%);
+  color: var(--brand-strong);
+}
+
+.sidebar.collapsed .nav-coming-soon {
+  display: none;
+}
+
 .trust-card {
   margin: auto 12px 12px;
   padding: 14px;
@@ -802,6 +826,90 @@ main:focus-visible {
   color: var(--muted);
   font-size: 14px;
   line-height: 1.65;
+}
+
+.signature-coming-soon-page {
+  min-height: 100%;
+}
+
+.coming-soon-panel {
+  display: grid;
+  justify-items: center;
+  min-height: 330px;
+  padding: clamp(42px, 7vw, 76px) clamp(24px, 6vw, 72px);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 50% 0%, rgb(17 112 102 / 9%), transparent 42%),
+    var(--surface);
+  box-shadow: var(--shadow-xs);
+  text-align: center;
+}
+
+.coming-soon-icon {
+  display: grid;
+  width: 62px;
+  height: 62px;
+  place-items: center;
+  margin-bottom: 18px;
+  border: 1px solid color-mix(in srgb, var(--brand) 25%, var(--line));
+  border-radius: 18px;
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  box-shadow: 0 12px 30px rgb(17 112 102 / 10%);
+}
+
+.coming-soon-status {
+  padding: 5px 10px;
+  border: 1px solid rgb(198 154 62 / 26%);
+  border-radius: 999px;
+  background: rgb(220 192 131 / 13%);
+  color: #927125;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.coming-soon-panel h2 {
+  max-width: 620px;
+  margin: 18px 0 10px;
+  color: var(--ink);
+  font: 650 clamp(26px, 4vw, 42px) / 1.08 var(--serif);
+  letter-spacing: -.03em;
+}
+
+.coming-soon-panel > p {
+  max-width: 660px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.coming-soon-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 28px;
+}
+
+.coming-soon-capabilities span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--brand-soft));
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.coming-soon-capabilities svg {
+  color: var(--brand);
 }
 
 .workspace-grid {
