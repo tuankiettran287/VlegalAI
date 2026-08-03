@@ -386,6 +386,7 @@ export function compareContracts(payload: {
 
 export const artifactApi = {
   list: (kind?: string) => requestJson<Artifact[]>(`/api/artifacts${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`),
+  get: (id: string) => requestJson<Artifact>(`/api/artifacts/${id}`),
   update: (id: string, body: Partial<Pick<Artifact, "title" | "content" | "status">>) =>
     patch<Artifact>(`/api/artifacts/${id}`, body),
   remove: (id: string) => requestJson<void>(`/api/artifacts/${id}`, { method: "DELETE" }),

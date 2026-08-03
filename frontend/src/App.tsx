@@ -19,6 +19,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   ClipboardCheck,
   Copy,
   ExternalLink,
@@ -97,6 +98,37 @@ const routes = [
   { path: "/bai-viet", label: "Bài viết", icon: BookOpen },
   { path: "/thu-vien", label: "Lịch sử & tài liệu", icon: Library },
 ];
+
+const ACTIVE_CONVERSATION_STORAGE_KEY = "vlegal-active-conversation-id";
+
+function readActiveConversationId() {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function persistActiveConversationId(id: string | null) {
+  if (typeof window === "undefined") return;
+  try {
+    if (id) window.sessionStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, id);
+    else window.sessionStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+  } catch {
+    // Browsers can disable storage; the in-memory state still keeps navigation working.
+  }
+}
+
+function artifactKindLabel(kind: string) {
+  const labels: Record<string, string> = {
+    CONTRACT_DRAFT: "Bản nháp hợp đồng",
+    CONTRACT_REVIEW: "Kết quả review hợp đồng",
+    CONTRACT_COMPARE: "Kết quả so sánh hợp đồng",
+    LEGAL_NOTE: "Ghi chú pháp lý",
+  };
+  return labels[kind] || kind.replaceAll("_", " ");
+}
 
 function uid() {
   return globalThis.crypto?.randomUUID?.() || String(Date.now() + Math.random());
@@ -508,9 +540,13 @@ function DocumentInput({
 function ChatPage({
   onNavigate,
   userName,
+  initialConversationId,
+  onActiveConversationChange,
 }: {
   onNavigate: (path: string) => void;
   userName: string;
+  initialConversationId: string | null;
+  onActiveConversationChange: (id: string | null) => void;
 }) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -532,6 +568,7 @@ function ChatPage({
   const documentAttachmentInputRef = useRef<HTMLInputElement>(null);
   const attachmentMenuRef = useRef<HTMLDivElement>(null);
   const conversationRequestRef = useRef(0);
+  const restoredConversationRef = useRef<string | null>(null);
   const hasMessages = messages.length > 0;
   const lastMessageId = messages[messages.length - 1]?.id;
 
@@ -575,11 +612,12 @@ function ChatPage({
     };
   }, []);
 
-  const openConversation = async (id: string) => {
+  const openConversation = useCallback(async (id: string) => {
     if (id === conversationId) {
       conversationRequestRef.current += 1;
       setLoadingConversationId(null);
       setHistoryOpen(false);
+      onActiveConversationChange(id);
       return;
     }
 
@@ -594,6 +632,7 @@ function ChatPage({
         throw new Error("Dữ liệu cuộc trò chuyện không khớp. Vui lòng thử lại.");
       }
       setConversationId(id);
+      onActiveConversationChange(id);
       setMessages(data.messages);
       setAttachments([]);
       setAttachmentMenuOpen(false);
@@ -604,17 +643,32 @@ function ChatPage({
       if (conversationRequestRef.current !== requestId) return;
       setError((reason as Error).message);
       setHistoryOpen(false);
+      if (!conversationId) onActiveConversationChange(null);
     } finally {
       if (conversationRequestRef.current === requestId) {
         setLoadingConversationId(null);
       }
     }
-  };
+  }, [conversationId, onActiveConversationChange]);
+
+  useEffect(() => {
+    if (
+      !initialConversationId
+      || initialConversationId === conversationId
+      || restoredConversationRef.current === initialConversationId
+    ) {
+      return;
+    }
+    restoredConversationRef.current = initialConversationId;
+    void openConversation(initialConversationId);
+  }, [conversationId, initialConversationId, openConversation]);
 
   const newConversation = () => {
     conversationRequestRef.current += 1;
     setLoadingConversationId(null);
     setConversationId(null);
+    restoredConversationRef.current = null;
+    onActiveConversationChange(null);
     setMessages([]);
     setInput("");
     setAttachments([]);
@@ -732,7 +786,9 @@ function ChatPage({
         conversationId,
         { attachments: submittedAttachments },
       );
-      setConversationId(data.conversation_id || null);
+      const nextConversationId = data.conversation_id || null;
+      setConversationId(nextConversationId);
+      onActiveConversationChange(nextConversationId);
       setMessages((current) =>
         current.map((message) =>
           message.id === pendingId
@@ -845,6 +901,9 @@ function ChatPage({
         conversationId,
         { regenerateFromMessageId: message.id },
       );
+      const nextConversationId = data.conversation_id || conversationId;
+      setConversationId(nextConversationId);
+      onActiveConversationChange(nextConversationId);
       setMessages((current) =>
         current.map((item) =>
           item.id === message.id
@@ -1638,20 +1697,119 @@ function SignaturePage() {
   );
 }
 
-function LibraryPage() {
+function LibraryPage({
+  onOpenArtifact,
+  onOpenConversation,
+}: {
+  onOpenArtifact: (id: string) => void;
+  onOpenConversation: (id: string) => void;
+}) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [tab, setTab] = useState<"documents" | "chats">("documents");
+  const [error, setError] = useState("");
   const reload = useCallback(() => Promise.all([artifactApi.list().then(setArtifacts), conversationApi.list().then(setConversations)]), []);
-  useEffect(() => { reload().catch(() => undefined); }, [reload]);
+  useEffect(() => {
+    reload().catch((reason) => setError((reason as Error).message));
+  }, [reload]);
   return (
     <section className="tool-page library-page">
       <PageHeader title="Lịch sử & tài liệu" subtitle="Quản lý toàn bộ cuộc trò chuyện, bản nháp, kết quả review và so sánh đã được lưu an toàn." />
+      {error && <ErrorNotice error={error} onClose={() => setError("")} />}
       <div className="tab-bar"><button className={tab === "documents" ? "active" : ""} onClick={() => setTab("documents")}><FileText size={16} />Tài liệu ({artifacts.length})</button><button className={tab === "chats" ? "active" : ""} onClick={() => setTab("chats")}><MessageSquareText size={16} />Hỏi đáp ({conversations.length})</button></div>
       <div className="library-list">
-        {tab === "documents" ? artifacts.map((item) => <article key={item.id}><div className="library-icon"><FileText size={19} /></div><div><small>{item.kind.replaceAll("_", " ")} · {formatDate(item.updated_at)}</small><h3>{item.title}</h3><p>{item.content.slice(0, 180)}</p></div><button className="icon-button" type="button" onClick={async () => { await artifactApi.remove(item.id); reload(); }} aria-label="Xóa tài liệu"><Trash2 size={15} /></button></article>) : conversations.map((item) => <article key={item.id}><div className="library-icon"><MessageSquareText size={19} /></div><div><small>{item.message_count} tin nhắn · {formatDate(item.updated_at)}</small><h3>{item.title}</h3><p>Cuộc trò chuyện pháp lý đã lưu.</p></div><button className="icon-button" type="button" onClick={async () => { await conversationApi.update(item.id, { status: "ARCHIVED" }); reload(); }} aria-label="Lưu trữ"><Archive size={15} /></button></article>)}
+        {tab === "documents" ? artifacts.map((item) => (
+          <article key={item.id}>
+            <button className="library-item-main" type="button" onClick={() => onOpenArtifact(item.id)}>
+              <span className="library-icon"><FileText size={19} /></span>
+              <span className="library-item-copy">
+                <small>{artifactKindLabel(item.kind)} · {formatDate(item.updated_at)}</small>
+                <strong>{item.title}</strong>
+                <span>{item.content.slice(0, 180)}</span>
+              </span>
+              <ChevronRight size={17} aria-hidden="true" />
+            </button>
+            <button className="icon-button library-row-action" type="button" onClick={async () => { try { await artifactApi.remove(item.id); await reload(); } catch (reason) { setError((reason as Error).message); } }} aria-label={`Xóa tài liệu ${item.title}`}><Trash2 size={15} /></button>
+          </article>
+        )) : conversations.map((item) => (
+          <article key={item.id}>
+            <button className="library-item-main" type="button" onClick={() => onOpenConversation(item.id)}>
+              <span className="library-icon"><MessageSquareText size={19} /></span>
+              <span className="library-item-copy">
+                <small>{item.message_count} tin nhắn · {formatDate(item.updated_at)}</small>
+                <strong>{item.title}</strong>
+                <span>Mở lại cuộc trò chuyện pháp lý đã lưu.</span>
+              </span>
+              <ChevronRight size={17} aria-hidden="true" />
+            </button>
+            <button className="icon-button library-row-action" type="button" onClick={async () => { try { await conversationApi.update(item.id, { status: "ARCHIVED" }); await reload(); } catch (reason) { setError((reason as Error).message); } }} aria-label={`Lưu trữ cuộc trò chuyện ${item.title}`}><Archive size={15} /></button>
+          </article>
+        ))}
         {((tab === "documents" && !artifacts.length) || (tab === "chats" && !conversations.length)) && <div className="empty-state"><FolderClock size={30} /><h3>Chưa có dữ liệu</h3><p>Kết quả AI của bạn sẽ tự động được lưu tại đây.</p></div>}
       </div>
+    </section>
+  );
+}
+
+function ArtifactPage({ artifactId, onNavigate }: { artifactId: string; onNavigate: (path: string) => void }) {
+  const [artifact, setArtifact] = useState<Artifact | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    artifactApi.get(artifactId)
+      .then((data) => {
+        if (active) setArtifact(data);
+      })
+      .catch((reason) => {
+        if (active) setError((reason as Error).message);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [artifactId]);
+
+  return (
+    <section className="tool-page artifact-page">
+      <button className="ghost-button artifact-back" type="button" onClick={() => onNavigate("/thu-vien")}>
+        <ArrowLeft size={16} /> Quay lại Lịch sử & tài liệu
+      </button>
+      {loading && <div className="artifact-state"><RefreshCw className="conversation-row-spinner" size={19} /><strong>Đang mở tài liệu…</strong></div>}
+      {!loading && error && <ErrorNotice error={error} />}
+      {!loading && artifact && (
+        <article className="artifact-document">
+          <header>
+            <div>
+              <span className="eyebrow">{artifactKindLabel(artifact.kind)}</span>
+              <h1>{artifact.title}</h1>
+              <p>Cập nhật {formatDate(artifact.updated_at)} · Trạng thái {artifact.status.toLocaleLowerCase("vi-VN")}</p>
+            </div>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(artifact.content);
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1800);
+                } catch {
+                  setError("Không thể sao chép tài liệu. Vui lòng thử lại.");
+                }
+              }}
+            >
+              <Copy size={15} /> {copied ? "Đã sao chép" : "Sao chép"}
+            </button>
+          </header>
+          <div className="artifact-document-content" dangerouslySetInnerHTML={{ __html: markdown(artifact.content) }} />
+        </article>
+      )}
     </section>
   );
 }
@@ -1665,6 +1823,7 @@ function FeedbackModal({ open, page, onClose }: { open: boolean; page: string; o
 
 function App() {
   const [path, navigate] = usePath();
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(readActiveConversationId);
   const [collapsed, setCollapsed] = useState(
     () => typeof window !== "undefined" && window.innerWidth <= 1080,
   );
@@ -1673,6 +1832,11 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authAvailable, setAuthAvailable] = useState(true);
+
+  const rememberActiveConversation = useCallback((id: string | null) => {
+    setActiveConversationId(id);
+    persistActiveConversationId(id);
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
@@ -1761,11 +1925,31 @@ function App() {
       : undefined;
     page = <ArticlesPage slug={articleSlug} onNavigate={navigate} />;
   }
-  else if (path === "/thu-vien") page = <LibraryPage />;
+  else if (path.startsWith("/thu-vien/tai-lieu/")) {
+    page = (
+      <ArtifactPage
+        artifactId={decodeURIComponent(path.slice("/thu-vien/tai-lieu/".length))}
+        onNavigate={navigate}
+      />
+    );
+  }
+  else if (path === "/thu-vien") {
+    page = (
+      <LibraryPage
+        onOpenArtifact={(id) => navigate(`/thu-vien/tai-lieu/${encodeURIComponent(id)}`)}
+        onOpenConversation={(id) => {
+          rememberActiveConversation(id);
+          navigate("/");
+        }}
+      />
+    );
+  }
   else page = (
     <ChatPage
       onNavigate={navigate}
       userName={user.preferred_name || user.display_name}
+      initialConversationId={activeConversationId}
+      onActiveConversationChange={rememberActiveConversation}
     />
   );
 
@@ -1810,7 +1994,7 @@ function App() {
           })}
         </nav>
         <div className="trust-card"><ShieldCheck size={17} /><span><strong>Căn cứ minh bạch</strong><small>Kiểm tra hiệu lực trước khi trả lời</small></span></div>
-        <div className="sidebar-actions"><button type="button" onClick={() => setFeedbackOpen(true)}><Bot size={17} /><span>Gửi góp ý</span></button><button type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={17} /> : <Moon size={17} />}<span>{dark ? "Giao diện sáng" : "Giao diện tối"}</span></button><div className="user-card"><span className="user-avatar">{user.avatar_url ? <img src={user.avatar_url} alt="" /> : (user.preferred_name || user.display_name).charAt(0).toUpperCase()}</span><span><strong>{user.preferred_name || user.display_name}</strong><small>{user.email}</small></span><button type="button" onClick={async () => { await authApi.logout(); window.location.reload(); }} aria-label="Đăng xuất"><LogOut size={16} /></button></div></div>
+        <div className="sidebar-actions"><button type="button" onClick={() => setFeedbackOpen(true)}><Bot size={17} /><span>Gửi góp ý</span></button><button type="button" onClick={() => setDark((value) => !value)}>{dark ? <Sun size={17} /> : <Moon size={17} />}<span>{dark ? "Giao diện sáng" : "Giao diện tối"}</span></button><div className="user-card"><span className="user-avatar">{user.avatar_url ? <img src={user.avatar_url} alt="" /> : (user.preferred_name || user.display_name).charAt(0).toUpperCase()}</span><span><strong>{user.preferred_name || user.display_name}</strong><small>{user.email}</small></span><button type="button" onClick={async () => { rememberActiveConversation(null); await authApi.logout(); window.location.reload(); }} aria-label="Đăng xuất"><LogOut size={16} /></button></div></div>
       </aside>
       <div className="content-shell"><header className="mobile-topbar"><button className="icon-button" type="button" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Mở thanh điều hướng" : "Đóng thanh điều hướng"} aria-controls="primary-navigation" aria-expanded={!collapsed}><Menu size={19} /></button><strong>{activeRoute.label}</strong><button className="icon-button" type="button" onClick={() => setDark((value) => !value)} aria-label={dark ? "Chuyển sang giao diện sáng" : "Chuyển sang giao diện tối"}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button></header><main className="content" id="main-content" tabIndex={-1}>{page}</main></div>
       <FeedbackModal open={feedbackOpen} page={path} onClose={() => setFeedbackOpen(false)} />

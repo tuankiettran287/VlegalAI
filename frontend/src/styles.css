@@ -2713,13 +2713,77 @@ summary:focus-visible {
 
 .library-list > article {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 13px;
-  padding: 15px;
+  gap: 6px;
+  padding: 6px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--surface);
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.library-list > article:hover {
+  border-color: color-mix(in srgb, var(--brand) 36%, var(--line));
+  box-shadow: var(--shadow-xs);
+  transform: translateY(-1px);
+}
+
+.library-item-main {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 13px;
+  padding: 9px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.library-item-main:hover {
+  background: var(--surface-strong);
+}
+
+.library-item-main:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.library-item-main > svg {
+  color: var(--faint);
+  transition: color 160ms ease, transform 160ms ease;
+}
+
+.library-item-main:hover > svg {
+  color: var(--brand);
+  transform: translateX(2px);
+}
+
+.library-item-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.library-item-copy strong,
+.library-item-copy > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-item-copy strong {
+  font-size: 12px;
+}
+
+.library-item-copy > span,
+.library-item-copy small {
+  color: var(--muted);
+  font-size: 9px;
 }
 
 .library-icon {
@@ -2732,26 +2796,85 @@ summary:focus-visible {
   color: var(--brand);
 }
 
-.library-list article > div:nth-child(2) {
-  min-width: 0;
+.library-row-action {
+  margin-right: 5px;
 }
 
-.library-list h3,
-.library-list p {
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.artifact-page {
+  max-width: none;
 }
 
-.library-list h3 {
-  font-size: 12px;
+.artifact-back,
+.artifact-state,
+.artifact-document {
+  width: min(980px, 100%);
+  margin-inline: auto;
 }
 
-.library-list p,
-.library-list small {
+.artifact-back {
+  margin-bottom: 16px;
+}
+
+.artifact-state {
+  display: flex;
+  min-height: 220px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
   color: var(--muted);
-  font-size: 9px;
+}
+
+.artifact-document {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.artifact-document > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: clamp(22px, 4vw, 40px);
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(135deg, var(--surface), var(--brand-soft));
+}
+
+.artifact-document h1 {
+  margin: 7px 0 8px;
+  font: 600 clamp(30px, 4vw, 46px)/1.05 var(--serif);
+  letter-spacing: -0.025em;
+}
+
+.artifact-document header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.artifact-document-content {
+  padding: clamp(24px, 5vw, 54px);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.artifact-document-content h1,
+.artifact-document-content h2,
+.artifact-document-content h3 {
+  margin: 1.2em 0 0.45em;
+  font-family: var(--serif);
+  line-height: 1.15;
+}
+
+.artifact-document-content p {
+  margin: 0 0 0.8em;
 }
 
 .empty-copy {
@@ -3373,12 +3496,24 @@ summary:focus-visible {
   }
 
   .library-list > article {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .library-list > article > .icon-button {
-    grid-column: 1 / -1;
-    width: 100%;
+    grid-column: auto;
+    width: 38px;
+  }
+
+  .library-item-main {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .library-item-main > svg {
+    display: none;
+  }
+
+  .artifact-document > header {
+    flex-direction: column;
   }
 }
 
