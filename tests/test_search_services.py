@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -441,6 +441,72 @@ def test_article_research_uses_tavily_and_google_search() -> None:
     assert result["sources"][0]["providers"] == ["google", "tavily"]
     assert 'UNTRUSTED_DATA name="TAVILY_GOOGLE_RESULTS"' in ai.user_prompt
     assert result["google_search_entry_point"] == "<div>Google Search</div>"
+
+
+def test_article_research_keeps_only_sources_published_on_requested_day() -> None:
+    captured: dict[str, object] = {}
+
+    class _DatedTavily(_FakeTavily):
+        async def search(self, _: str, **kwargs: object) -> list[dict]:
+            captured.update(kwargs)
+            return [
+                {
+                    "url": "https://example.com/today",
+                    "title": "Bản tin pháp luật hôm nay",
+                    "raw_content": "Nội dung pháp lý được xuất bản trong ngày. " * 8,
+                    "published_date": "2026-08-03T08:15:00+07:00",
+                },
+                {
+                    "url": "https://example.com/yesterday",
+                    "title": "Bản tin pháp luật cũ",
+                    "raw_content": "Nội dung pháp lý cũ không được phép hiển thị. " * 8,
+                    "published_date": "2026-08-02T20:00:00+07:00",
+                },
+            ]
+
+    class _EmptyGoogle:
+        async def search(self, *_: object, **__: object) -> dict:
+            return {"results": [], "queries": [], "search_entry_point": None}
+
+    ai = _FakeCompletionAI()
+
+    async def one_source_summary(*_: object, **__: object) -> str:
+        return "Bản tin trong ngày đã được xác minh [W1]."
+
+    ai.complete = one_source_summary
+    service = ArticleResearchService(_DatedTavily(), _EmptyGoogle(), ai)
+
+    result = asyncio.run(
+        service.search("pháp luật lao động", published_on=date(2026, 8, 3))
+    )
+
+    assert [source["url"] for source in result["sources"]] == [
+        "https://example.com/today"
+    ]
+    assert captured["topic"] == "news"
+    assert captured["start_date"] == date(2026, 8, 3)
+    assert captured["end_date"] == date(2026, 8, 4)
+
+
+def test_article_research_rejects_sources_without_verified_current_date() -> None:
+    class _UndatedTavily(_FakeTavily):
+        async def search(self, *_: object, **__: object) -> list[dict]:
+            return await super().search()
+
+    class _EmptyGoogle:
+        async def search(self, *_: object, **__: object) -> dict:
+            return {"results": [], "queries": [], "search_entry_point": None}
+
+    service = ArticleResearchService(
+        _UndatedTavily(),
+        _EmptyGoogle(),
+        _FakeCompletionAI(),
+    )
+
+    with pytest.raises(ArticleResearchError, match="03/08/2026"):
+        asyncio.run(
+            service.search("pháp luật lao động", published_on=date(2026, 8, 3))
+        )
 
 
 def test_article_research_caps_evidence_sent_to_generation() -> None:

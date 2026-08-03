@@ -56,8 +56,9 @@ def test_daily_article_publisher_is_idempotent_and_publishes_research(
         def __init__(self, *_: object) -> None:
             return None
 
-        async def search(self, query: str) -> dict[str, object]:
+        async def search(self, query: str, **kwargs: object) -> dict[str, object]:
             assert "chủ đề kiểm thử" in query
+            assert kwargs["published_on"].isoformat() == "2026-07-29"
             return {
                 "summary": "Nội dung cập nhật có căn cứ rõ ràng [W1].",
                 "sources": [{
@@ -65,6 +66,7 @@ def test_daily_article_publisher_is_idempotent_and_publishes_research(
                     "title": "Nguồn kiểm thử",
                     "url": "https://example.com/legal-update",
                     "excerpt": "Nội dung gốc của bài viết kiểm thử.",
+                    "published_date": "2026-07-29T08:30:00+07:00",
                 }],
             }
 
@@ -84,11 +86,12 @@ def test_daily_article_publisher_is_idempotent_and_publishes_research(
     assert len(added) == 1
     article = added[0]
     assert article.status == "PUBLISHED"
-    assert article.category == "Cập nhật pháp luật"
+    assert article.category == "Tin pháp lý"
     assert article.web_sources[0]["id"] == "W1"
     assert article.title == "Nguồn kiểm thử"
     assert article.excerpt == "Nội dung cập nhật có căn cứ rõ ràng."
     assert article.source_url == "https://example.com/legal-update"
+    assert article.published_at.isoformat() == "2026-07-29T01:30:00+00:00"
 
 
 def test_source_title_rejects_provider_domain() -> None:
@@ -170,7 +173,7 @@ def test_scheduled_article_batch_publishes_ten_unique_items(monkeypatch) -> None
         def __init__(self, *_: object) -> None:
             return None
 
-        async def search(self, query: str) -> dict[str, object]:
+        async def search(self, query: str, **_: object) -> dict[str, object]:
             searched_topics.append(query)
             index = len(searched_topics)
             return {
@@ -180,6 +183,7 @@ def test_scheduled_article_batch_publishes_ten_unique_items(monkeypatch) -> None
                     "title": f"Tiêu đề nguồn số {index}",
                     "url": f"https://example.com/article-{index}",
                     "excerpt": f"Nội dung nguồn số {index}.",
+                    "published_date": "2026-07-29T12:15:00+07:00",
                 }],
             }
 
@@ -309,7 +313,7 @@ def test_scheduled_article_refreshes_existing_fallback_content(monkeypatch) -> N
         def __init__(self, *_: object) -> None:
             return None
 
-        async def search(self, _: str) -> dict[str, object]:
+        async def search(self, _: str, **__: object) -> dict[str, object]:
             return {
                 "summary": (
                     "## Nội dung cập nhật\n\n"
@@ -320,6 +324,7 @@ def test_scheduled_article_refreshes_existing_fallback_content(monkeypatch) -> N
                     "title": "Quy định mới về pháp luật lao động",
                     "url": "https://example.com/new",
                     "excerpt": "Nội dung nguồn đã được làm sạch.",
+                    "published_date": "2026-07-29T07:05:00+07:00",
                 }],
             }
 
@@ -375,6 +380,68 @@ def test_worker_and_beat_use_five_daily_publication_times() -> None:
 
     assert worker_schedule._orig_hour == "7,12,15,18,22"
     assert beat_schedule._orig_hour == "7,12,15,18,22"
+
+
+@pytest.mark.parametrize(
+    ("topic", "title", "expected"),
+    [
+        (
+            "pháp luật lao động",
+            "Nghị định mới về tiền lương",
+            "Cập nhật pháp luật",
+        ),
+        (
+            "pháp luật lao động",
+            "Cách chuẩn bị hồ sơ xin việc",
+            "Lao động & việc làm",
+        ),
+        ("bảo hiểm xã hội", "Hướng dẫn hồ sơ hưu trí", "Bảo hiểm & an sinh"),
+        ("sở hữu trí tuệ", "Bảo vệ nhãn hiệu", "Sở hữu trí tuệ"),
+        ("pháp luật đất đai", "Thủ tục sang tên nhà ở", "Đất đai & nhà ở"),
+    ],
+)
+def test_article_category_uses_relevant_topic_tags(
+    topic: str,
+    title: str,
+    expected: str,
+) -> None:
+    from app.worker import _article_category
+
+    assert _article_category(topic, title) == expected
+
+
+def test_article_purge_targets_only_article_table(monkeypatch) -> None:
+    from scripts import publish_daily_article
+
+    statements: list[str] = []
+    committed = False
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def scalar(self, statement: object) -> int:
+            statements.append(str(statement))
+            return 181
+
+        async def execute(self, statement: object) -> None:
+            statements.append(str(statement))
+
+        async def commit(self) -> None:
+            nonlocal committed
+            committed = True
+
+    monkeypatch.setattr(publish_daily_article, "SessionFactory", _Session)
+
+    count = asyncio.run(publish_daily_article.purge_all_articles())
+
+    assert count == 181
+    assert committed is True
+    assert any("DELETE FROM article" in statement for statement in statements)
+    assert all("legal_document" not in statement for statement in statements)
 
 
 def test_daily_article_publisher_skips_when_disabled(monkeypatch) -> None:

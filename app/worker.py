@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import unicodedata
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -17,7 +18,11 @@ from app.core.config import get_settings
 from app.db import SessionFactory
 from app.models import Article, LegalDocument
 from app.services.ai import GeminiService
-from app.services.articles import ArticleResearchService
+from app.services.articles import (
+    ArticleResearchError,
+    ArticleResearchService,
+    parse_article_published_at,
+)
 from app.services.freshness import LegalFreshnessService
 from app.services.google_search import GoogleSearchService
 from app.services.indexer import LegalIndexer
@@ -30,6 +35,67 @@ ARTICLE_PUBLISH_HOURS = (7, 12, 15, 18, 22)
 ARTICLE_BATCH_SIZE = 10
 ARTICLE_BATCH_DELAY_SECONDS = 45.0
 LEGAL_FRESHNESS_INTERVAL_DAYS = 10
+
+
+def _fold_article_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFD", value.casefold())
+    return " ".join(
+        "".join(
+            character
+            for character in normalized
+            if not unicodedata.combining(character)
+        )
+        .replace("đ", "d")
+        .split()
+    )
+
+
+def _article_category(topic: str, title: str, summary: str = "") -> str:
+    text = _fold_article_text(f"{topic} {title} {summary}")
+    regulatory_text = _fold_article_text(title)
+    regulatory_markers = (
+        "nghi dinh",
+        "thong tu",
+        "bo luat",
+        "luat ",
+        "quyet dinh",
+        "chinh sach moi",
+        "quy dinh moi",
+    )
+    labor_markers = (
+        "lao dong",
+        "viec lam",
+        "tien luong",
+        "luong toi thieu",
+        "bao hiem xa hoi",
+        "bao hiem that nghiep",
+        "cong doan",
+        "an toan ve sinh lao dong",
+        "can bo cong chuc vien chuc",
+    )
+    if any(marker in regulatory_text for marker in regulatory_markers) and any(
+        marker in text for marker in labor_markers
+    ):
+        return "Cập nhật pháp luật"
+
+    category_rules = (
+        ("Bảo hiểm & an sinh", ("bao hiem", "an sinh", "luong huu", "tro cap")),
+        ("Lao động & việc làm", ("lao dong", "viec lam", "tien luong", "cong doan")),
+        ("Hợp đồng & dân sự", ("hop dong", "dan su", "thua ke", "boi thuong")),
+        ("Doanh nghiệp & thương mại", ("doanh nghiep", "thuong mai", "kinh doanh", "dau tu")),
+        ("Thuế & tài chính", ("thue", "tai chinh", "ngan hang", "hoa don")),
+        ("Đất đai & nhà ở", ("dat dai", "nha o", "bat dong san")),
+        ("Dữ liệu & công nghệ", ("du lieu", "cong nghe", "an ninh mang", "tri tue nhan tao")),
+        ("Sở hữu trí tuệ", ("so huu tri tue", "ban quyen", "nhan hieu", "sang che")),
+        ("Hôn nhân & gia đình", ("hon nhan", "gia dinh", "ly hon", "nuoi con")),
+        ("Tranh chấp & tố tụng", ("tranh chap", "to tung", "khoi kien", "toa an")),
+        ("Hành chính & cư trú", ("hanh chinh", "cu tru", "xuat nhap canh", "ho tich")),
+        ("Môi trường & xây dựng", ("moi truong", "xay dung", "quy hoach")),
+    )
+    for category, markers in category_rules:
+        if any(marker in text for marker in markers):
+            return category
+    return "Tin pháp lý"
 broker_url, result_backend = postgres_celery_urls(settings.database_url)
 celery_app = Celery(
     "vlegal",
@@ -316,6 +382,7 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
     published_ids: list[str] = []
     refreshed_ids: list[str] = []
     failures: list[str] = []
+    rejected: list[str] = []
     ai = GeminiService(settings)
     try:
         tavily = TavilyService(settings)
@@ -328,7 +395,8 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                 result = await research.search(
                     f"{topic}; bản tin số {item['number']} lúc {slot_label} "
                     f"ngày {slot_date:%d/%m/%Y}; cập nhật quy định, chính sách "
-                    "và vấn đề thực tiễn mới nhất"
+                    "và vấn đề thực tiễn mới nhất",
+                    published_on=slot_date,
                 )
                 sources = (
                     result.get("sources")
@@ -344,6 +412,13 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     else {}
                 )
                 source_url = str(primary_source.get("url") or "").strip() or None
+                source_published_at = parse_article_published_at(
+                    primary_source.get("published_date")
+                )
+                if source_published_at is None:
+                    raise ArticleResearchError(
+                        "Nguồn không có ngày xuất bản có thể xác minh."
+                    )
                 source_title = re.sub(
                     r"\s+",
                     " ",
@@ -354,6 +429,7 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     source_url,
                     fallback=f"Cập nhật pháp lý: {topic}",
                 )
+                article_category = _article_category(topic, article_title, summary)
                 async with SessionFactory() as db:
                     existing_article = await db.scalar(
                         select(Article).where(Article.slug == slug)
@@ -374,10 +450,11 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                         article.title = article_title
                         article.excerpt = article_excerpt
                         article.content = summary
-                        article.category = "Cập nhật pháp luật"
+                        article.category = article_category
                         article.status = "PUBLISHED"
                         article.source_url = source_url
                         article.web_sources = sources
+                        article.published_at = source_published_at
                     else:
                         article = Article(
                             author_id=None,
@@ -385,11 +462,11 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                             title=article_title,
                             excerpt=article_excerpt,
                             content=summary,
-                            category="Cập nhật pháp luật",
+                            category=article_category,
                             status="PUBLISHED",
                             source_url=source_url,
                             web_sources=sources,
-                            published_at=checked_at,
+                            published_at=source_published_at,
                         )
                         db.add(article)
                     await db.commit()
@@ -406,6 +483,16 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
                     item["number"],
                     topic,
                     isinstance(existing_article, Article),
+                )
+            except ArticleResearchError as exc:
+                rejected.append(slug)
+                logger.warning(
+                    "Skipped scheduled legal article without a verified same-day "
+                    "source slot=%s item=%s topic=%s reason=%s",
+                    slot_label,
+                    item["number"],
+                    topic,
+                    str(exc),
                 )
             except Exception as exc:
                 failures.append(slug)
@@ -436,6 +523,7 @@ async def _publish_daily_article(now: datetime | None = None) -> dict[str, Any]:
         "published": bool(published_ids or refreshed_ids),
         "published_count": len(published_ids),
         "refreshed_count": len(refreshed_ids),
+        "rejected_count": len(rejected),
         "skipped_count": len(skipped_ids),
         "slot": slot_label,
         "article_ids": [*skipped_ids, *published_ids, *refreshed_ids],

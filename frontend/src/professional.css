@@ -2645,6 +2645,11 @@ main:focus-visible {
 }
 
 .article-card-category {
+  align-self: flex-start;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--brand) 18%, var(--line));
+  border-radius: 999px;
+  background: var(--brand-soft);
   color: var(--brand);
   font-size: 9px;
   font-weight: 850;
@@ -2698,6 +2703,11 @@ main:focus-visible {
   gap: 5px;
   color: var(--muted);
   font-size: 9px;
+}
+
+.article-card-copy footer > span.article-source-date {
+  color: var(--ink-soft);
+  font-weight: 750;
 }
 
 .article-card-copy footer > a {
@@ -3289,6 +3299,24 @@ main:focus-visible {
 
 .article-source-list a > strong {
   white-space: normal;
+}
+
+.article-source-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.article-source-copy > strong {
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+}
+
+.article-source-copy > small {
+  color: var(--muted);
+  font-size: 8px;
 }
 
 .article-no-sources {

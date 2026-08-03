@@ -4,7 +4,10 @@ import asyncio
 import html
 import logging
 import re
+from datetime import UTC, date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.services.ai import (
     GeminiError,
@@ -31,6 +34,7 @@ MAX_RESEARCH_EVIDENCE_SOURCES = 8
 MAX_RESEARCH_EVIDENCE_CHARS = 3_500
 MAX_FALLBACK_SOURCES = 6
 logger = logging.getLogger(__name__)
+ARTICLE_TIMEZONE = ZoneInfo("Asia/Bangkok")
 EDITORIAL_LEAD_RE = re.compile(
     r"(?im)^\s*(?:dưới đây|sau đây) là "
     r"(?:bản )?(?:tổng hợp|phân tích|tóm tắt|nghiên cứu|"
@@ -43,6 +47,39 @@ FOLLOWUP_SENTENCE_RE = re.compile(
     r"các nguồn (?:này|trên)|nguồn (?:này|trên))\b",
     re.IGNORECASE,
 )
+
+
+def parse_article_published_at(value: Any) -> datetime | None:
+    """Parse a provider publication timestamp and normalize it to UTC."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    parsed: datetime | None = None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            for pattern in ("%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+                try:
+                    parsed = datetime.strptime(raw, pattern)
+                    break
+                except ValueError:
+                    continue
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ARTICLE_TIMEZONE)
+    return parsed.astimezone(UTC)
+
+
+def _published_on_local_date(value: Any, expected: date) -> bool:
+    published_at = parse_article_published_at(value)
+    return bool(
+        published_at
+        and published_at.astimezone(ARTICLE_TIMEZONE).date() == expected
+    )
 
 
 def _plain_source_text(value: Any, *, limit: int) -> str:
@@ -289,7 +326,12 @@ class ArticleResearchService:
         self.google_search = google_search
         self.ai = ai
 
-    async def search(self, query: str) -> dict[str, Any]:
+    async def search(
+        self,
+        query: str,
+        *,
+        published_on: date | None = None,
+    ) -> dict[str, Any]:
         outbound_query = query
         settings = getattr(self.ai, "settings", None)
         data_policy = str(
@@ -305,12 +347,20 @@ class ArticleResearchService:
                     "under the current data policy."
                 )
         search_query = f"{outbound_query} pháp luật Việt Nam"
+        if published_on is not None:
+            search_query = (
+                f"{search_query} ngày {published_on:%d/%m/%Y} "
+                f"after:{(published_on - timedelta(days=1)).isoformat()} "
+                f"before:{(published_on + timedelta(days=1)).isoformat()}"
+            )
         tavily_response, google_response = await asyncio.gather(
             self.tavily.search(
                 search_query,
                 max_results=10,
                 include_raw_content=True,
-                topic="general",
+                topic="news" if published_on is not None else "general",
+                start_date=published_on,
+                end_date=(published_on + timedelta(days=1)) if published_on else None,
             ),
             self.google_search.search(
                 search_query,
@@ -398,6 +448,12 @@ class ArticleResearchService:
             ],
             limit=16,
         )
+        if published_on is not None:
+            merged_results = [
+                row
+                for row in merged_results
+                if _published_on_local_date(row.get("published_date"), published_on)
+            ]
         results = [
             row
             for row in merged_results
@@ -409,7 +465,13 @@ class ArticleResearchService:
                     set(row.get("providers") or []) | {"tavily"}
                 )
         if not results:
-            detail = "; ".join(warnings) or "Không tìm thấy nguồn liên quan."
+            if published_on is not None:
+                detail = (
+                    "Không tìm thấy nguồn có ngày xuất bản xác minh đúng "
+                    f"{published_on:%d/%m/%Y}."
+                )
+            else:
+                detail = "; ".join(warnings) or "Không tìm thấy nguồn liên quan."
             raise ArticleResearchError(f"Không thể tìm bài viết: {detail}")
 
         for row in results:

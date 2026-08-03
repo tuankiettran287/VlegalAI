@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import httpx
@@ -26,6 +27,8 @@ class TavilyService:
         max_results: int = 8,
         include_raw_content: bool = True,
         topic: str = "general",
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
     ) -> list[dict[str, Any]]:
         if not self.settings.tavily_ready:
             raise TavilyError("TAVILY_API_KEY chưa được cấu hình")
@@ -39,6 +42,14 @@ class TavilyService:
             "include_raw_content": include_raw_content,
             "include_domains": include_domains or [],
         }
+        if start_date is not None:
+            payload["start_date"] = (
+                start_date.isoformat() if isinstance(start_date, date) else start_date
+            )
+        if end_date is not None:
+            payload["end_date"] = (
+                end_date.isoformat() if isinstance(end_date, date) else end_date
+            )
         timeout = float(getattr(self.settings, "tavily_timeout_seconds", 3.5) or 3.5)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(self.SEARCH_URL, json=payload)

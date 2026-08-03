@@ -42,7 +42,6 @@ type ResearchResult = {
 
 const ALL_CATEGORIES = "Tất cả";
 const ARTICLE_PAGE_SIZE = 30;
-const coverTones = ["emerald", "navy", "gold", "clay"] as const;
 
 function escapeHtml(value: string) {
   return value
@@ -83,9 +82,20 @@ function readingMinutes(content: string) {
 }
 
 function coverTone(article: Article) {
-  const seed = Array.from(`${article.category}:${article.title}`)
-    .reduce((total, character) => total + character.codePointAt(0)!, 0);
-  return coverTones[seed % coverTones.length];
+  const category = article.category
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  if (category.includes("cap nhat") || category.includes("lao dong")) return "emerald";
+  if (category.includes("doanh nghiep") || category.includes("hop dong")) return "navy";
+  if (category.includes("thue") || category.includes("dat dai") || category.includes("hanh chinh")) return "gold";
+  return "clay";
+}
+
+function articleSourceDate(article: Article) {
+  const sources = article.web_sources || [];
+  const primary = sources.find((source) => source.url === article.source_url) || sources[0];
+  return primary?.published_date || article.published_at || null;
 }
 
 function ArticleCover({
@@ -176,7 +186,7 @@ function ArticleDetail({
             <h1>{article.title}</h1>
             {article.excerpt && <p>{article.excerpt}</p>}
             <div className="article-reader-meta">
-              <span><CalendarDays size={15} /> {formatArticleDate(article.published_at || article.created_at)}</span>
+              <span><CalendarDays size={15} /> Nguồn đăng {formatArticleDate(articleSourceDate(article))}</span>
               <span><Eye size={15} /> {article.views.toLocaleString("vi-VN")} lượt xem</span>
               <span><Clock3 size={15} /> {readingMinutes(article.content)} phút đọc</span>
             </div>
@@ -198,7 +208,10 @@ function ArticleDetail({
                 {article.web_sources.map((source) => (
                   <a key={`${source.id}-${source.url}`} href={source.url} target="_blank" rel="noreferrer">
                     <span>{source.id}</span>
-                    <strong>{source.title}</strong>
+                    <div className="article-source-copy">
+                      <strong>{source.title}</strong>
+                      <small>Nguồn đăng {formatArticleDate(source.published_date)}</small>
+                    </div>
                     <ExternalLink size={14} />
                   </a>
                 ))}
@@ -477,7 +490,7 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
                     </button>
                     <p>{article.excerpt || "Mở bài viết để xem nội dung phân tích và các nguồn tham khảo liên quan."}</p>
                     <footer>
-                      <span><CalendarDays size={14} /> {formatArticleDate(article.published_at || article.created_at)}</span>
+                      <span className="article-source-date"><CalendarDays size={14} /> Nguồn đăng {formatArticleDate(articleSourceDate(article))}</span>
                       <span><Eye size={14} /> {article.views.toLocaleString("vi-VN")} lượt xem</span>
                       {article.source_url ? (
                         <a
