@@ -34,25 +34,27 @@ export default function GuidePage({
   return (
     <main className="lp-page lp-guide-page">
       <header className="lp-nav" aria-label="Điều hướng hướng dẫn VLegal AI">
-        <a className="lp-brand" href="/" aria-label="VLegal AI — Trang đầu">
-          <span className="lp-brand-mark" aria-hidden="true"><Scale size={21} /></span>
-          <span><strong>VLegal</strong><small>Legal intelligence</small></span>
-        </a>
+        <div className="lp-nav-inner">
+          <a className="lp-brand" href="/" aria-label="VLegal AI — Trang đầu">
+            <span className="lp-brand-mark" aria-hidden="true"><Scale size={21} /></span>
+            <span><strong>VLegal</strong><small>Legal intelligence</small></span>
+          </a>
 
-        <nav className="lp-nav-links" aria-label="Mục lục hướng dẫn">
-          <a href="#guide-login">Đăng nhập</a>
-          <a href="#guide-ask">Đặt câu hỏi</a>
-          <a href="#guide-read">Kiểm tra nguồn</a>
-          <a href="#guide-contract">Hợp đồng</a>
-        </nav>
+          <nav className="lp-nav-links" aria-label="Mục lục hướng dẫn">
+            <a href="#guide-login">Đăng nhập</a>
+            <a href="#guide-ask">Đặt câu hỏi</a>
+            <a href="#guide-read">Kiểm tra nguồn</a>
+            <a href="#guide-contract">Hợp đồng</a>
+          </nav>
 
-        <div className="lp-guide-nav-actions">
-          <a className="lp-back-link" href="/"><ArrowLeft size={15} /> Trang chủ</a>
-          {authenticated ? (
-            <a className="lp-login compact" href="/">Mở ứng dụng <ArrowRight size={15} /></a>
-          ) : (
-            <GoogleAction authAvailable={authAvailable} loginUrl={loginUrl} compact />
-          )}
+          <div className="lp-guide-nav-actions">
+            <a className="lp-back-link" href="/"><ArrowLeft size={15} /> Trang chủ</a>
+            {authenticated ? (
+              <a className="lp-login compact" href="/">Mở ứng dụng <ArrowRight size={15} /></a>
+            ) : (
+              <GoogleAction authAvailable={authAvailable} loginUrl={loginUrl} compact />
+            )}
+          </div>
         </div>
       </header>
 

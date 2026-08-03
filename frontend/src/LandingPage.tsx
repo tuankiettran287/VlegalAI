@@ -1,15 +1,12 @@
 import {
   ArrowRight,
-  BookOpen,
   CheckCircle2,
   ClipboardCheck,
   FileDiff,
   FilePenLine,
   MessageSquareText,
-  Paperclip,
   Play,
   Scale,
-  ShieldCheck,
   Sparkles,
   Video,
 } from "lucide-react";
@@ -79,18 +76,20 @@ export default function LandingPage({ authAvailable, loginUrl }: LandingPageProp
   return (
     <main className="lp-page">
       <header className="lp-nav" aria-label="Điều hướng VLegal AI">
-        <a className="lp-brand" href="#top" aria-label="VLegal AI — Trang đầu">
-          <span className="lp-brand-mark" aria-hidden="true"><Scale size={21} /></span>
-          <span><strong>VLegal</strong><small>Legal intelligence</small></span>
-        </a>
+        <div className="lp-nav-inner">
+          <a className="lp-brand" href="#top" aria-label="VLegal AI — Trang đầu">
+            <span className="lp-brand-mark" aria-hidden="true"><Scale size={21} /></span>
+            <span><strong>VLegal</strong><small>Legal intelligence</small></span>
+          </a>
 
-        <nav className="lp-nav-links" aria-label="Nội dung trang">
-          <a href="#demo">Video hướng dẫn</a>
-          <a href="#capabilities">Tính năng</a>
-          <a href="/huong-dan">Hướng dẫn chi tiết</a>
-        </nav>
+          <nav className="lp-nav-links" aria-label="Nội dung trang">
+            <a href="#demo">Video hướng dẫn</a>
+            <a href="#capabilities">Tính năng</a>
+            <a href="/huong-dan">Hướng dẫn chi tiết</a>
+          </nav>
 
-        <GoogleAction authAvailable={authAvailable} loginUrl={loginUrl} compact />
+          <GoogleAction authAvailable={authAvailable} loginUrl={loginUrl} compact />
+        </div>
       </header>
 
       <section className="lp-hero" id="top">
@@ -118,46 +117,12 @@ export default function LandingPage({ authAvailable, loginUrl }: LandingPageProp
           </div>
         </div>
 
-        <div className="lp-product-stage" aria-label="Minh họa không gian hỏi đáp VLegal">
-          <div className="lp-stage-orbit orbit-one" aria-hidden="true" />
-          <div className="lp-stage-orbit orbit-two" aria-hidden="true" />
-          <div className="lp-product-window">
-            <header>
-              <div className="lp-window-brand"><Scale size={17} /><strong>Trợ lý pháp lý</strong></div>
-              <span><i /> Đối chiếu căn cứ tự động</span>
-            </header>
-            <div className="lp-window-body">
-              <div className="lp-window-greeting">
-                <small>LEGAL INTELLIGENCE</small>
-                <strong>Xin chào, bạn cần hỗ trợ điều gì?</strong>
-              </div>
-              <div className="lp-window-composer">
-                <span>Hỏi VLegal về tình huống pháp lý của bạn…</span>
-                <footer><i><Paperclip size={13} /></i><button type="button" tabIndex={-1} aria-hidden="true"><ArrowRight size={15} /></button></footer>
-              </div>
-              <div className="lp-window-prompt-row">
-                <span>Lao động</span><span>Tiền lương</span><span>Hợp đồng</span>
-              </div>
+        <div className="lp-hero-media" id="demo" aria-labelledby="lp-hero-video-title">
+          <div className="lp-hero-video-card">
+            <div className="lp-hero-video-header">
+              <span><i /> Hướng dẫn sử dụng VLegal</span>
+              <small>30 giây</small>
             </div>
-          </div>
-          <div className="lp-stage-card lp-stage-source">
-            <BookOpen size={17} /><span><strong>Nguồn rõ ràng</strong>Mở trực tiếp văn bản đã dùng</span>
-          </div>
-          <div className="lp-stage-card lp-stage-check">
-            <ShieldCheck size={17} /><span><strong>Hiệu lực được kiểm tra</strong>Giảm rủi ro dùng căn cứ cũ</span>
-          </div>
-        </div>
-      </section>
-
-      <section className="lp-demo" id="demo" aria-labelledby="lp-demo-title">
-        <header className="lp-section-heading lp-demo-heading">
-          <div><p><Video size={14} /> Video hướng dẫn</p><h2 id="lp-demo-title">Làm quen với VLegal trong 30 giây.</h2></div>
-          <span>Xem nhanh luồng đăng nhập, đặt câu hỏi, đính kèm tài liệu và kiểm tra căn cứ.</span>
-        </header>
-
-        <div className="lp-demo-shell">
-          <div className="lp-video-frame">
-            <div className="lp-video-toolbar"><span><i /> VLegal walkthrough</span><small>00:30</small></div>
             <video
               controls
               playsInline
@@ -169,16 +134,12 @@ export default function LandingPage({ authAvailable, loginUrl }: LandingPageProp
               <track kind="captions" src="/vlegal-guide.vi.vtt" srcLang="vi" label="Tiếng Việt" default />
               Trình duyệt của bạn chưa hỗ trợ phát video.
             </video>
+            <div className="lp-hero-video-footer">
+              <span><Video size={15} /><strong id="lp-hero-video-title">Xem cách đặt câu hỏi và kiểm tra căn cứ</strong></span>
+              <a href="/huong-dan">Hướng dẫn đầy đủ <ArrowRight size={15} /></a>
+            </div>
           </div>
-
-          <aside className="lp-video-summary" aria-label="Bắt đầu nhanh với VLegal">
-            <small>BẮT ĐẦU NHANH</small>
-            <h3>Video đủ để bạn bắt đầu trong 30 giây.</h3>
-            <span><CheckCircle2 size={16} /> Đăng nhập bằng Google</span>
-            <span><CheckCircle2 size={16} /> Hỏi hoặc tải tài liệu lên</span>
-            <span><CheckCircle2 size={16} /> Mở căn cứ để kiểm tra</span>
-            <a href="/huong-dan">Đọc hướng dẫn đầy đủ <ArrowRight size={16} /></a>
-          </aside>
+          <span className="lp-hero-video-note"><CheckCircle2 size={15} /> Không cần cài đặt · bắt đầu ngay trên trình duyệt</span>
         </div>
       </section>
 
