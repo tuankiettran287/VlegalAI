@@ -236,9 +236,11 @@ def _check_non_labor_scope(message: str) -> str | None:
         if phrase_match or pat.search(message):
             logger.info("non_labor_scope_detected query=%s", message[:80])
             return (
-                "VLegal AI hiện tại là trợ lý chuyên sâu về **Pháp luật Lao động Việt Nam** "
-                "(Bộ luật Lao động 2019, hợp đồng lao động, tiền lương, thời giờ làm việc - nghỉ ngơi, "
-                "bảo hiểm xã hội, an toàn lao động, việc làm, kỷ luật lao động, tranh chấp lao động...).\n\n"
+                "VLegal AI hiện tại là trợ lý chuyên sâu về **Pháp luật Lao động Việt Nam "
+                "và các chế độ liên quan đã có trong kho dữ liệu** (Bộ luật Lao động 2019, "
+                "hợp đồng lao động, tiền lương, chế độ tiền lương khu vực công, thời giờ làm việc "
+                "- nghỉ ngơi, bảo hiểm xã hội, an toàn lao động, việc làm, kỷ luật lao động, "
+                "tranh chấp lao động...).\n\n"
                 "Câu hỏi của bạn nằm ngoài phạm vi CSDL chuyên ngành Lao động hiện tại của hệ thống. "
                 "Bạn có cần hỗ trợ câu hỏi nào liên quan đến Pháp luật Lao động không?"
             )
@@ -1143,6 +1145,23 @@ async def _evidence_gated_sources(
             row["source_id"] = f"S{index}"
         return selected
 
+    def deterministic_fallback_sources(
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Keep only rows already proven by deterministic retrieval signals.
+
+        Semantic intent fallbacks exist so the LLM gate can inspect synonyms;
+        they must never be promoted to answer evidence when that gate fails.
+        """
+
+        safe_ids = tuple(
+            str(row.get("source_id") or "")
+            for row in rows
+            if "intent_anchor_semantic_fallback"
+            not in {str(reason) for reason in row.get("reasons", [])}
+        )
+        return selected_sources(rows, safe_ids)
+
     first = await assess_source_relevance(
         ai,
         original_question=original_question,
@@ -1174,9 +1193,14 @@ async def _evidence_gated_sources(
                 (time.perf_counter() - started) * 1000,
                 1,
             )
+        safe_fallback = deterministic_fallback_sources(sources)
         return (
-            first_selected,
-            partial_verification(verification) if semantic_fallback else verification,
+            safe_fallback,
+            (
+                partial_verification(verification)
+                if semantic_fallback or safe_fallback
+                else verification
+            ),
             retrieval_query,
         )
     if first.coverage == "sufficient" and first_selected:
@@ -1265,12 +1289,8 @@ async def _evidence_gated_sources(
     # question whose exact requested value is missing. Preserve a small,
     # grounded context so generation can explain what is supported and state
     # the missing part explicitly instead of collapsing to an empty answer.
-    fallback_sources = selected_sources(
-        sources,
-        tuple(
-            str(source.get("source_id") or "")
-            for source in sources[: settings.evidence_gate_max_sources]
-        ),
+    fallback_sources = deterministic_fallback_sources(
+        sources[: settings.evidence_gate_max_sources]
     )
     log_progress(
         logger,
@@ -1871,7 +1891,11 @@ async def _complete_with_citation_repair(
             except GeminiError:
                 pass  # Deterministic normalization wasn't enough, continue to LLM repair
 
-        if draft_safety_valid and skip_soft_repair:
+        if (
+            draft_safety_valid
+            and skip_soft_repair
+            and validation_kind != "answer_plan_coverage"
+        ):
             log_progress(
                 logger,
                 "answer_generation",
@@ -1948,7 +1972,7 @@ async def _complete_with_citation_repair(
                 "Citation repair timed out after %.1fs; retaining grounded draft",
                 _repair_timeout,
             )
-            if draft_safety_valid:
+            if draft_safety_valid and validation_kind != "answer_plan_coverage":
                 log_progress(
                     logger,
                     "answer_generation",
@@ -1989,7 +2013,7 @@ async def _complete_with_citation_repair(
                 repair_validation_kind,
                 draft_safety_valid,
             )
-            if draft_safety_valid:
+            if draft_safety_valid and validation_kind != "answer_plan_coverage":
                 log_progress(
                     logger,
                     "answer_generation",
@@ -2016,6 +2040,10 @@ async def _complete_with_citation_repair(
         except _AnswerCoverageError as coverage_exc:
             soft_validation_failures.append(
                 _answer_validation_kind(coverage_exc)
+            )
+        if "answer_plan_coverage" in soft_validation_failures:
+            raise GeminiError(
+                "Câu trả lời đã sửa vẫn chưa giải quyết đúng khái niệm được hỏi."
             )
         if soft_validation_failures:
             logger.warning(

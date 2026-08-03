@@ -347,6 +347,10 @@ WAGE_COMPONENTS: tuple[tuple[Concept, str | None], ...] = (
     (_c("muc-luong-toi-thieu", "Mức lương tối thiểu",
         ["muc luong toi thieu", "luong toi thieu vung", "luong toi thieu thang", "luong toi thieu gio"],
         "Mức lương thấp nhất trả cho NLĐ làm công việc giản đơn nhất trong điều kiện bình thường."), None),
+    (_c("muc-luong-co-so", "Mức lương cơ sở",
+        ["muc luong co so", "luong co so"],
+        "Mức dùng để tính tiền lương, phụ cấp và các chế độ khác đối với cán bộ, công chức, "
+        "viên chức và người hưởng lương từ ngân sách nhà nước."), None),
     (_c("tien-luong-lam-them-gio", "Tiền lương làm thêm giờ",
         [
             "tien luong lam them gio",
@@ -405,6 +409,28 @@ WAGE_COMPONENTS: tuple[tuple[Concept, str | None], ...] = (
         ["don phuong cham dut hop dong lao dong trai phap luat", "boi thuong it nhat 02 thang tien luong",
          "nhan nguoi lao dong tro lai lam viec"],
         "Nghĩa vụ tài chính của bên chấm dứt hợp đồng lao động trái pháp luật."), None),
+)
+
+# Colloquial phrases are mapped only when their surrounding actor/domain makes
+# the legal concept unambiguous.  Keeping these aliases in the ontology avoids
+# question-specific branches in the retriever and prevents "lương cơ bản" in an
+# ordinary employment/overtime question from being confused with the public
+# sector's "mức lương cơ sở".
+CONTEXTUAL_QUERY_ALIASES: tuple[
+    tuple[str, tuple[str, ...], tuple[str, ...]], ...
+] = (
+    (
+        "muc-luong-co-so",
+        ("luong co ban", "muc luong co ban", "luong nen"),
+        (
+            "can bo",
+            "cong chuc",
+            "vien chuc",
+            "nha nuoc",
+            "khu vuc cong",
+            "ngan sach nha nuoc",
+        ),
+    ),
 )
 
 BONUS_TYPES: tuple[Concept, ...] = (

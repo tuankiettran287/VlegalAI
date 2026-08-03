@@ -65,7 +65,7 @@ def test_compound_question_is_split_and_keeps_focus_actor() -> None:
     assert len(actor_plan["must_answer"]) == 2
 
 
-def test_planner_does_not_inject_an_adjacent_concept_for_unmapped_question() -> None:
+def test_planner_maps_public_sector_base_salary_to_legal_term() -> None:
     query = (
         "Mức lương cơ bản hiện tại của cán bộ nhà nước "
         "là bao nhiêu?"
@@ -74,9 +74,24 @@ def test_planner_does_not_inject_an_adjacent_concept_for_unmapped_question() -> 
     planned = plan_retrieval_queries(query)
     answer_plan = build_answer_plan(query)
 
-    assert planned == [query]
-    assert "target_concept" not in answer_plan
-    assert "do_not_confuse_with" not in answer_plan
+    assert planned[0] == query
+    assert "Mức lương cơ sở" in planned[1:]
+    assert any(
+        item.startswith("Mức lương cơ sở")
+        and "cán bộ, công chức" in item
+        for item in planned[1:]
+    )
+    assert answer_plan["required_concepts"] == [
+        {
+            "label": "Mức lương cơ sở",
+            "guidance": next(
+                item
+                for item in planned
+                if item.startswith("Mức lương cơ sở")
+                and "cán bộ, công chức" in item
+            ),
+        }
+    ]
 
 
 def test_ontology_expands_specific_concepts_instead_of_broad_wage_terms() -> None:
@@ -225,7 +240,7 @@ def test_answer_plan_rejects_cited_but_off_topic_answer() -> None:
     )
 
 
-def test_generic_intent_coverage_routes_synonyms_to_semantic_validation() -> None:
+def test_public_salary_concept_rejects_sources_without_the_legal_measure() -> None:
     class _Store:
         def retrieve(self, _: str, __: int) -> list[dict]:
             return [
@@ -261,11 +276,18 @@ def test_generic_intent_coverage_routes_synonyms_to_semantic_validation() -> Non
         )
     )
 
-    assert rows
-    assert all(
-        "intent_anchor_semantic_fallback" in row["reasons"]
-        for row in rows
-    )
+    assert rows == []
+
+
+def test_public_salary_alias_does_not_change_private_overtime_question() -> None:
+    query = "Tăng ca được trả bao nhiêu lần lương cơ bản?"
+
+    labels = {
+        item["label"] for item in build_answer_plan(query).get("required_concepts", [])
+    }
+
+    assert "Mức lương cơ sở" not in labels
+    assert "Tiền lương làm thêm giờ" in labels
 
 
 def test_generic_intent_anchor_separates_requested_measure_from_nearby_one() -> None:
@@ -299,10 +321,7 @@ def test_generic_intent_anchor_separates_requested_measure_from_nearby_one() -> 
     assert len(rows) == 1
     assert "lương cơ sở" in rows[0]["text"]
     assert "đóng bảo hiểm" not in rows[0]["text"]
-    assert any(
-        reason.startswith("intent_anchors:")
-        for reason in rows[0]["reasons"]
-    )
+    assert "ontology_concept_match" in rows[0]["reasons"]
 
 
 def test_intent_anchors_and_answer_validation_are_topic_agnostic() -> None:
@@ -362,17 +381,11 @@ def test_generic_intent_filter_does_not_require_a_number_in_the_same_chunk() -> 
 
     incomplete_rows = asyncio.run(incomplete.retrieve(query))
     assert len(incomplete_rows) == 1
-    assert any(
-        reason.startswith("intent_terms:")
-        for reason in incomplete_rows[0]["reasons"]
-    )
+    assert "ontology_concept_match" in incomplete_rows[0]["reasons"]
     rows = asyncio.run(complete.retrieve(query))
     assert len(rows) == 1
     assert "2,34 triệu đồng/tháng" in rows[0]["text"]
-    assert any(
-        reason.startswith("intent_terms:")
-        for reason in rows[0]["reasons"]
-    )
+    assert "ontology_concept_match" in rows[0]["reasons"]
 
 
 def test_sparse_single_hop_retrieval_retries_with_a_wider_generic_pool() -> None:
@@ -883,6 +896,49 @@ def test_valid_citations_but_generic_preamble_triggers_style_repair() -> None:
     assert ai.calls == 2
     assert answer.startswith("Theo Điều 98")
     assert "[S1]" in answer
+
+
+def test_single_hop_does_not_retain_grounded_but_off_topic_draft() -> None:
+    class _AI:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, *_: object, **__: object) -> str:
+            self.calls += 1
+            return "Theo quy định [S1], mức đóng bảo hiểm xã hội là 0,5%."
+
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            self.calls += 1
+            return {
+                "statements": [
+                    {
+                        "text": "Mức lương cơ sở được dùng để tính tiền lương.",
+                        "citations": ["S1"],
+                    }
+                ]
+            }
+
+    source = _source(
+        citation="Nghị định về chế độ tiền lương > Điều 3. Mức lương cơ sở",
+        text="Mức lương cơ sở được dùng để tính tiền lương trong bảng lương.",
+    )
+    answer = asyncio.run(
+        _complete_with_citation_repair(
+            _AI(),  # type: ignore[arg-type]
+            "system",
+            "prompt",
+            allowed_ids=["S1"],
+            sources=[source],
+            answer_plan=build_answer_plan(
+                "Lương cơ bản của công chức hiện tại là bao nhiêu?"
+            ),
+            max_tokens=300,
+            skip_soft_repair=True,
+        )
+    )
+
+    assert "Mức lương cơ sở" in answer
+    assert "mức đóng bảo hiểm" not in answer
 
 
 def test_grounded_title_matching_ignores_optional_punctuation() -> None:

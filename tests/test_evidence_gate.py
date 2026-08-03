@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from app.api import _evidence_gated_sources
 from app.services.ai import GeminiError
-from app.services.evidence_gate import assess_source_relevance
+from app.services.evidence_gate import _schema, assess_source_relevance
 
 
 def _sources() -> list[dict]:
@@ -126,7 +126,7 @@ def test_evidence_gate_rejects_refinement_that_invents_a_number() -> None:
     assert result.refined_search_query == ""
 
 
-def test_evidence_gate_fails_open_when_model_is_unavailable() -> None:
+def test_evidence_gate_fails_safely_when_model_is_unavailable() -> None:
     class _AI:
         async def complete_json(self, *_: object, **__: object) -> dict:
             raise GeminiError("unavailable")
@@ -141,12 +141,19 @@ def test_evidence_gate_fails_open_when_model_is_unavailable() -> None:
         )
     )
 
-    assert result.relevant_source_ids == ("S1", "S2")
+    assert result.relevant_source_ids == ()
     assert result.failed is True
-    assert result.reason == "ai_unavailable_fail_open"
+    assert result.reason == "ai_unavailable_safe_fallback"
 
 
-def test_api_evidence_gate_keeps_partial_context_when_gate_is_unavailable() -> None:
+def test_related_source_ids_remain_optional_for_vertex_responses() -> None:
+    schema = _schema(["S1", "S2"])
+
+    assert "related_source_ids" in schema["properties"]
+    assert "related_source_ids" not in schema["required"]
+
+
+def test_api_evidence_gate_drops_semantic_only_context_when_gate_is_unavailable() -> None:
     class _AI:
         async def complete_json(self, *_: object, **__: object) -> dict:
             raise GeminiError("unavailable")
@@ -173,10 +180,41 @@ def test_api_evidence_gate_keeps_partial_context_when_gate_is_unavailable() -> N
         )
     )
 
-    assert len(selected) == 2
+    assert selected == []
     assert verification["all_current"] is True
     assert "chỉ hỗ trợ một phần" in verification["note"]
     assert query == "Cách gọi đời thường của khái niệm"
+
+
+def test_api_evidence_gate_keeps_deterministic_context_when_gate_is_unavailable() -> None:
+    class _AI:
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            raise GeminiError("unavailable")
+
+    sources = _sources()
+    for source in sources:
+        source["reasons"] = ["ontology_concept_match", "postgres_bm25"]
+    settings = SimpleNamespace(
+        evidence_gate_enabled=True,
+        evidence_gate_timeout_seconds=2.0,
+        evidence_gate_max_sources=8,
+    )
+
+    selected, verification, _ = asyncio.run(
+        _evidence_gated_sources(
+            original_question="Mức pháp lý này là bao nhiêu?",
+            retrieval_query="Mức pháp lý này",
+            sources=sources,
+            verification={"checked": True, "all_current": True},
+            ai=_AI(),  # type: ignore[arg-type]
+            retrieval=None,  # type: ignore[arg-type]
+            freshness=None,  # type: ignore[arg-type]
+            settings=settings,  # type: ignore[arg-type]
+        )
+    )
+
+    assert [source["source_id"] for source in selected] == ["S1", "S2"]
+    assert "chỉ hỗ trợ một phần" in verification["note"]
 
 
 def test_api_evidence_gate_preserves_retrieved_context_when_gate_selects_none() -> None:

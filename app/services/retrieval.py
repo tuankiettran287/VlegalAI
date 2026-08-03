@@ -290,6 +290,9 @@ def _ontology_query_concepts() -> tuple[ontology.Concept, ...]:
 
 
 _QUERY_CONCEPTS = _ontology_query_concepts()
+_QUERY_CONCEPTS_BY_KEY = {
+    concept.key: concept for concept in _QUERY_CONCEPTS
+}
 
 
 def _matched_query_concepts(query: str) -> list[ontology.Concept]:
@@ -309,6 +312,26 @@ def _matched_query_concepts(query: str) -> list[ontology.Concept]:
         scored.append(
             (
                 len(_significant_terms(longest)),
+                len(_ascii(concept.label)),
+                concept,
+            )
+        )
+
+    # Some everyday terms only have a single legal meaning in a specific
+    # actor/domain context. Resolve those aliases from ontology data rather
+    # than hardcoding whole sample questions into retrieval.
+    for concept_key, aliases, context_markers in ontology.CONTEXTUAL_QUERY_ALIASES:
+        if not (
+            any(alias in query_ascii for alias in aliases)
+            and any(marker in query_ascii for marker in context_markers)
+        ):
+            continue
+        concept = _QUERY_CONCEPTS_BY_KEY.get(concept_key)
+        if concept is None:
+            continue
+        scored.append(
+            (
+                max(len(_significant_terms(alias)) for alias in aliases),
                 len(_ascii(concept.label)),
                 concept,
             )
@@ -888,10 +911,12 @@ def plan_retrieval_queries(query: str) -> list[str]:
     for markers, expansion in _LEGAL_QUERY_EXPANSIONS:
         if any(marker in query_ascii for marker in markers):
             planned.append(expansion)
-    planned.extend(
-        _concept_retrieval_query(concept)
-        for concept in matched_concepts
-    )
+    for concept in matched_concepts:
+        # Keep one short canonical query for the AND-based BM25 branch, then
+        # add the richer ontology description for dense/vector recall. A long
+        # description alone can over-constrain PostgreSQL full-text search.
+        planned.append(concept.label)
+        planned.append(_concept_retrieval_query(concept))
     return list(dict.fromkeys(planned))[:5]
 
 

@@ -57,7 +57,6 @@ def _schema(source_ids: list[str]) -> dict[str, Any]:
         "additionalProperties": False,
         "required": [
             "relevant_source_ids",
-            "related_source_ids",
             "coverage",
             "refined_search_query",
             "reason",
@@ -164,32 +163,33 @@ async def assess_source_relevance(
             timeout_seconds,
         )
         return EvidenceGateResult(
-            tuple(source_ids),
+            (),
             "partial",
             attempted=True,
             failed=True,
-            reason="timeout_fail_open",
+            reason="timeout_safe_fallback",
         )
     except GeminiError as exc:
         logger.warning(
-            "Evidence gate unavailable error_type=%s",
+            "Evidence gate unavailable error_type=%s error=%s",
             type(exc).__name__,
+            str(exc)[:240],
         )
         return EvidenceGateResult(
-            tuple(source_ids),
+            (),
             "partial",
             attempted=True,
             failed=True,
-            reason="ai_unavailable_fail_open",
+            reason="ai_unavailable_safe_fallback",
         )
     except Exception:
         logger.exception("Unexpected evidence gate failure")
         return EvidenceGateResult(
-            tuple(source_ids),
+            (),
             "partial",
             attempted=True,
             failed=True,
-            reason="unexpected_error_fail_open",
+            reason="unexpected_error_safe_fallback",
         )
 
     selected_values = (
