@@ -202,8 +202,8 @@ def test_api_evidence_gate_keeps_deterministic_context_when_gate_is_unavailable(
 
     selected, verification, _ = asyncio.run(
         _evidence_gated_sources(
-            original_question="Mức pháp lý này là bao nhiêu?",
-            retrieval_query="Mức pháp lý này",
+            original_question="Người lao động có quyền yêu cầu công ty giải quyết không?",
+            retrieval_query="Quyền yêu cầu của người lao động",
             sources=sources,
             verification={"checked": True, "all_current": True},
             ai=_AI(),  # type: ignore[arg-type]
@@ -215,6 +215,50 @@ def test_api_evidence_gate_keeps_deterministic_context_when_gate_is_unavailable(
 
     assert [source["source_id"] for source in selected] == ["S1", "S2"]
     assert "chỉ hỗ trợ một phần" in verification["note"]
+
+
+def test_api_evidence_gate_requires_direct_value_when_gate_is_unavailable() -> None:
+    class _AI:
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            raise GeminiError("unavailable")
+
+    sources = [
+        {
+            "source_id": "S1",
+            "citation": "Điều 5 Nghị định thử nghiệm",
+            "title": "Mức tham chiếu",
+            "text": "Mức tham chiếu được áp dụng theo mức lương cơ sở.",
+            "reasons": ["ontology_concept_match", "postgres_bm25"],
+        },
+        {
+            "source_id": "S2",
+            "citation": "Điều 3 Nghị định trực tiếp",
+            "title": "Mức lương cơ sở",
+            "text": "Mức lương cơ sở là 2.340.000 đồng/tháng.",
+            "reasons": ["ontology_concept_match", "postgres_bm25"],
+        },
+    ]
+    settings = SimpleNamespace(
+        evidence_gate_enabled=True,
+        evidence_gate_timeout_seconds=2.0,
+        evidence_gate_max_sources=8,
+    )
+
+    selected, _, _ = asyncio.run(
+        _evidence_gated_sources(
+            original_question="Mức lương cơ sở hiện nay là bao nhiêu?",
+            retrieval_query="Mức lương cơ sở",
+            sources=sources,
+            verification={"checked": True, "all_current": True},
+            ai=_AI(),  # type: ignore[arg-type]
+            retrieval=None,  # type: ignore[arg-type]
+            freshness=None,  # type: ignore[arg-type]
+            settings=settings,  # type: ignore[arg-type]
+        )
+    )
+
+    assert [source["source_id"] for source in selected] == ["S1"]
+    assert "2.340.000 đồng/tháng" in selected[0]["text"]
 
 
 def test_api_evidence_gate_preserves_retrieved_context_when_gate_selects_none() -> None:

@@ -431,6 +431,27 @@ CONTEXTUAL_QUERY_ALIASES: tuple[
             "ngan sach nha nuoc",
         ),
     ),
+    (
+        "tt-khoi-kien-lao-dong",
+        (
+            "kien cong ty",
+            "kien doanh nghiep",
+            "kien nguoi su dung lao dong",
+            "ra toa",
+            "kien",
+        ),
+        (
+            "lao dong",
+            "nguoi lao dong",
+            "nguoi su dung lao dong",
+            "hop dong",
+            "cong ty",
+            "doanh nghiep",
+            "sa thai",
+            "cham dut",
+            "tien luong",
+        ),
+    ),
 )
 
 BONUS_TYPES: tuple[Concept, ...] = (

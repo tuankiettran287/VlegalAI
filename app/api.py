@@ -148,6 +148,65 @@ LEGAL_DATA_UNAVAILABLE_MESSAGE = "Dữ liệu không có sẵn"
 AI_TEMPORARILY_UNAVAILABLE_MESSAGE = (
     "Dịch vụ AI tạm thời không khả dụng. Vui lòng thử lại sau."
 )
+_DIRECT_VALUE_QUESTION_RE = re.compile(
+    r"\b(?:bao\s+nhiêu|bao\s+lâu|mấy|tỷ\s+lệ|phần\s+trăm|gấp\s+.+\s+lần|"
+    r"mức\s+nào|thời\s+hạn)\b",
+    re.IGNORECASE,
+)
+_MONEY_VALUE_RE = re.compile(
+    r"\b\d[\d.,\s]*\s*(?:đồng|triệu|tỷ)(?:\s*/\s*(?:tháng|giờ|ngày))?\b",
+    re.IGNORECASE,
+)
+_TIME_VALUE_RE = re.compile(
+    r"\b(?:\d+[\d.,]*|một|hai|ba|bốn|năm|sáu|bảy|tám|chín|mười)\s+"
+    r"(?:giờ|ngày|tháng|năm|tuần)\b",
+    re.IGNORECASE,
+)
+_RATE_VALUE_RE = re.compile(
+    r"(?:\b\d+(?:[.,]\d+)?\s*%|\b\d+(?:[.,]\d+)?\s*lần\b|"
+    r"\b\d+(?:[.,]\d+)?\s*phần\s+trăm\b)",
+    re.IGNORECASE,
+)
+_GENERIC_VALUE_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:đồng|triệu|tỷ|%|lần|giờ|ngày|tháng|năm|tuần)\b",
+    re.IGNORECASE,
+)
+_OUT_OF_SCOPE_ANSWER_RE = re.compile(
+    r"(?:nằm\s+ngoài\s+phạm\s+vi|trợ\s+lý\s+chuyên\s+sâu\s+về\s+pháp\s+luật\s+lao\s+động|"
+    r"cơ\s+sở\s+dữ\s+liệu\s+chuyên\s+ngành\s+lao\s+động)",
+    re.IGNORECASE,
+)
+
+
+def _requires_direct_value(question: str) -> bool:
+    return _DIRECT_VALUE_QUESTION_RE.search(str(question or "")) is not None
+
+
+def _source_contains_requested_value(
+    question: str,
+    source: dict[str, Any],
+) -> bool:
+    """Require a value of the requested kind before a failed gate can fail open.
+
+    Article numbers in citations are not evidence of an amount, duration or
+    rate, so this deliberately inspects source text rather than citation data.
+    """
+
+    text = str(source.get("text") or "")
+    normalized = _normalize_scope_text(question)
+    if any(term in normalized for term in ("luong", "tien", "gia", "muc dong")):
+        return _MONEY_VALUE_RE.search(text) is not None
+    if any(
+        term in normalized
+        for term in ("bao lau", "thoi han", "bao truoc", "may ngay", "may thang")
+    ):
+        return _TIME_VALUE_RE.search(text) is not None
+    if any(
+        term in normalized
+        for term in ("ty le", "phan tram", "gap", "may lan", "bao nhieu lan")
+    ):
+        return _RATE_VALUE_RE.search(text) is not None
+    return _GENERIC_VALUE_RE.search(text) is not None
 
 # ---------------------------------------------------------------------------
 # Prompt-injection guard (Python layer — runs before LLM and catalog dispatch)
@@ -1154,11 +1213,18 @@ async def _evidence_gated_sources(
         they must never be promoted to answer evidence when that gate fails.
         """
 
+        asks_for_direct_value = _requires_direct_value(original_question)
         safe_ids = tuple(
             str(row.get("source_id") or "")
             for row in rows
-            if "intent_anchor_semantic_fallback"
-            not in {str(reason) for reason in row.get("reasons", [])}
+            if (
+                "intent_anchor_semantic_fallback"
+                not in {str(reason) for reason in row.get("reasons", [])}
+                and (
+                    not asks_for_direct_value
+                    or _source_contains_requested_value(original_question, row)
+                )
+            )
         )
         return selected_sources(rows, safe_ids)
 
@@ -1600,6 +1666,10 @@ def _validate_answer_plan_coverage(
 
     if not answer_plan:
         return
+    if _OUT_OF_SCOPE_ANSWER_RE.search(value):
+        raise _AnswerCoverageError(
+            "Câu trả lời từ chối theo phạm vi mặc dù hệ thống đã cung cấp căn cứ liên quan."
+        )
     raw_anchors = answer_plan.get("intent_anchor_phrases")
     if isinstance(raw_anchors, list):
         normalized_answer = _normalized_legal_reference(value)
@@ -2074,7 +2144,7 @@ async def _complete_with_citation_repair(
             type(exc).__name__,
             draft_safety_valid,
         )
-        if draft_safety_valid:
+        if draft_safety_valid and validation_kind != "answer_plan_coverage":
             log_progress(
                 logger,
                 "answer_generation",
@@ -3044,27 +3114,88 @@ async def chat(
                     generation_ms,
                     _gen_timeout,
                 )
-                answer = AI_TEMPORARILY_UNAVAILABLE_MESSAGE
-                generation_fallback = True
-                sources = []
-                verification = VerificationReport(
-                    checked=False,
-                    all_current=False,
-                    checked_at=datetime.now(UTC),
-                    items=[],
-                    note=AI_TEMPORARILY_UNAVAILABLE_MESSAGE,
-                ).model_dump(mode="json")
-                cache_mode = "miss"
-                log_progress(
-                    logger,
-                    "chat",
-                    "answer_generation_fallback",
-                    operation_started,
-                    route=retrieval_route,
-                    error_type=type(exc).__name__,
-                    generation_ms=generation_ms,
-                    outcome="ai_unavailable",
-                )
+                # A transient Vertex retry must not erase already retrieved
+                # legal evidence. Try once more with a compact, structured
+                # prompt and no thinking budget before returning an outage
+                # message. This path is intentionally source-grounded and is
+                # useful for both narrative scenarios and ordinary lookups.
+                rescue_sources = compact_context_sources(
+                    sources,
+                    retrieval_query,
+                    max_chars=4_800,
+                    per_source_chars=800,
+                )[:6]
+                rescue_timeout = max(12.0, min(20.0, _gen_timeout))
+                try:
+                    answer = await _complete_with_citation_repair(
+                        ai,
+                        LEGAL_SYSTEM_PROMPT,
+                        "KẾ HOẠCH PHỦ CÂU HỎI:\n"
+                        f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
+                        "KIỂM TRA HIỆU LỰC:\n"
+                        f"{_verification_prompt(verification)}\n\n"
+                        "NGUỒN TRỰC TIẾP:\n"
+                        f"{build_context(rescue_sources)}\n\n"
+                        "CÂU HỎI HIỆN TẠI:\n"
+                        f"{untrusted_data_block('CURRENT_QUESTION', current_question)}\n\n"
+                        "Hãy trả lời ngắn gọn nhưng đầy đủ trọng tâm. Với tình huống, "
+                        "nêu kết luận có điều kiện, áp dụng vào dữ kiện và hành động thực tế; "
+                        "không từ chối theo phạm vi khi nguồn đã được cung cấp.",
+                        allowed_ids=[source["source_id"] for source in rescue_sources],
+                        sources=rescue_sources,
+                        answer_plan=answer_plan,
+                        max_tokens=min(processing_profile.max_output_tokens, 1_800),
+                        thinking_budget=0,
+                        structured_initial=True,
+                        skip_soft_repair=True,
+                        generation_timeout=rescue_timeout,
+                        citation_repair_timeout=_repair_timeout,
+                        telemetry=telemetry_details,
+                    )
+                except GeminiError as rescue_exc:
+                    logger.warning(
+                        "Compact grounded generation also unavailable "
+                        "error_type=%s error=%s timeout=%.1f",
+                        type(rescue_exc).__name__,
+                        str(rescue_exc)[:200],
+                        rescue_timeout,
+                    )
+                    answer = AI_TEMPORARILY_UNAVAILABLE_MESSAGE
+                    generation_fallback = True
+                    sources = []
+                    verification = VerificationReport(
+                        checked=False,
+                        all_current=False,
+                        checked_at=datetime.now(UTC),
+                        items=[],
+                        note=AI_TEMPORARILY_UNAVAILABLE_MESSAGE,
+                    ).model_dump(mode="json")
+                    cache_mode = "miss"
+                    log_progress(
+                        logger,
+                        "chat",
+                        "answer_generation_fallback",
+                        operation_started,
+                        route=retrieval_route,
+                        error_type=type(rescue_exc).__name__,
+                        generation_ms=generation_ms,
+                        outcome="ai_unavailable",
+                    )
+                else:
+                    sources = rescue_sources
+                    generation_ms = round(
+                        (time.perf_counter() - generation_started) * 1000
+                    )
+                    log_progress(
+                        logger,
+                        "chat",
+                        "answer_generation_completed",
+                        operation_started,
+                        answer_chars=len(answer),
+                        generation_ms=generation_ms,
+                        source_count=len(sources),
+                        outcome="compact_grounded_retry",
+                    )
             else:
                 generation_ms = round((time.perf_counter() - generation_started) * 1000)
                 log_progress(

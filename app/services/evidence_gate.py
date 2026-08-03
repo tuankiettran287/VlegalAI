@@ -80,7 +80,10 @@ def _schema(source_ids: list[str]) -> dict[str, Any]:
                 "type": "string",
                 "maxLength": 800,
             },
-            "reason": {"type": "string", "maxLength": 300},
+            # Explanations from Gemini occasionally exceed 300 characters even
+            # when every decision field is valid.  Do not discard the entire
+            # relevance decision for a harmlessly verbose diagnostic string.
+            "reason": {"type": "string", "maxLength": 1000},
         },
     }
 
@@ -253,5 +256,5 @@ async def assess_source_relevance(
         related_source_ids=related,
         refined_search_query=refined,
         attempted=True,
-        reason=str(payload.get("reason") or "")[:300],
+        reason=str(payload.get("reason") or "")[:1000],
     )

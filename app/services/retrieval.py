@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", re.UNICODE)
 _COMPOUND_SPLIT_RE = re.compile(
-    r"(?:[;?]\s*|,\s+(?=(?:khi|nếu|còn|đồng thời)\b)|"
-    r"\s+(?:và|còn|đồng thời)\s+(?=(?:khi|nếu|tôi|bạn|công ty|"
+    r"(?:[;?]\s*|,\s+(?=(?:khi|nếu|nhưng|còn|đồng thời)\b)|"
+    r"\s+(?:và|nhưng|còn|đồng thời)\s+(?=(?:khi|nếu|tôi|bạn|công ty|"
     r"người lao động|người sử dụng lao động|cách|mức|thời|điều kiện|"
     r"bị|được|phải|ở đâu|biện pháp|quyền|nghĩa vụ)\b))",
     re.IGNORECASE,
@@ -107,6 +107,26 @@ _MULTI_HOP_PATTERNS = (
 )
 _LEGAL_REFERENCE_RE = re.compile(
     r"\b(?:dieu|khoan|diem)\s+\d+[a-z]?\b",
+    re.IGNORECASE,
+)
+_SCENARIO_ACTOR_RE = re.compile(
+    r"\b(?:toi|chung toi|nguoi lao dong|nguoi su dung lao dong|cong ty|"
+    r"doanh nghiep|co quan|don vi)\b",
+    re.IGNORECASE,
+)
+_SCENARIO_EVENT_RE = re.compile(
+    r"\b(?:bi|duoc|khong duoc|ky|giao ket|lam viec|tra luong|cham tra|"
+    r"sa thai|cham dut|ky luat|tai nan|nghi viec|ep buoc|xu ly)\b",
+    re.IGNORECASE,
+)
+_SCENARIO_REQUEST_RE = re.compile(
+    r"\b(?:co quyen|co duoc|duoc khong|phai lam gi|nen lam gi|xu ly the nao|"
+    r"kien|khoi kien|khieu nai|yeu cau|boi thuong|trach nhiem|giai quyet)\b",
+    re.IGNORECASE,
+)
+_SCENARIO_CONTEXT_RE = re.compile(
+    r"\b(?:sau khi|truoc khi|ke tu|den thang|toi thang|trong thoi gian|"
+    r"thang thu|ngay thu|nam thu)\b",
     re.IGNORECASE,
 )
 _INTENT_QUESTION_MARKER_RE = re.compile(
@@ -486,7 +506,7 @@ def _filter_rows_for_query_intent(
         else []
     )
     concept_filtered = False
-    if matched_concepts:
+    if matched_concepts and len(facets) <= 1:
         concept_rows = [
             row
             for row in rows
@@ -498,6 +518,23 @@ def _filter_rows_for_query_intent(
         if concept_rows:
             rows = concept_rows
             concept_filtered = True
+    elif matched_concepts:
+        # A narrative or compound question commonly needs different provisions
+        # for the event, its legality, the remedy and the procedure.  Requiring
+        # every row to mention one detected concept (for example "sa thải")
+        # discards valid evidence about compensation or court procedure.  Keep
+        # the per-row concept signal for ranking, but let facet coverage retain
+        # evidence for the other requested issues.
+        for row in rows:
+            if any(
+                _concept_has_evidence(concept, _row_evidence(row))
+                for concept in matched_concepts
+            ):
+                row["reasons"] = list(
+                    dict.fromkeys(
+                        [*row.get("reasons", []), "ontology_concept_match"]
+                    )
+                )
 
     if "cuong buc lao dong" in query_ascii or "cuong buc" in query_ascii:
         relevant = [
@@ -594,6 +631,10 @@ def _filter_rows_for_query_intent(
     semantic_fallback: list[tuple[float, dict[str, Any]]] = []
     for row in rows:
         evidence = _row_evidence(row)
+        concept_matches = sum(
+            _concept_has_evidence(concept, evidence)
+            for concept in matched_concepts
+        )
         intent_anchor_matches = sum(
             anchor in evidence for anchor in intent_anchors
         )
@@ -618,14 +659,20 @@ def _filter_rows_for_query_intent(
             coverage
             + min(phrase_matches, 2) * 0.1
             + min(intent_anchor_matches, 2) * 0.15
+            + min(concept_matches, 2) * 0.2
         )
-        if relevance >= 0.35 and not needs_semantic_validation:
+        if (
+            relevance >= 0.35
+            and not needs_semantic_validation
+            and (matched >= 1 or concept_matches >= 1)
+        ):
             row["reasons"] = list(
                 dict.fromkeys(
                     [
                         *row.get("reasons", []),
                         f"intent_terms:{matched}/{term_count}",
                         f"intent_anchors:{intent_anchor_matches}",
+                        f"ontology_concepts:{concept_matches}",
                     ]
                 )
             )
@@ -653,6 +700,12 @@ def _filter_rows_for_query_intent(
             )
             hybrid_fallback.append(row)
     if strong:
+        if len(facets) >= 2:
+            strong.sort(key=lambda item: item[0], reverse=True)
+            return [
+                row
+                for _, row in strong[: max(8, len(facets) * 4)]
+            ]
         best_relevance = max(score for score, _ in strong)
         return [
             row
@@ -864,10 +917,22 @@ def classify_retrieval_route(query: str) -> RetrievalRoute:
         or listed_issue_count >= 2
         or (len(normalized) >= 240 and sentence_count >= 3)
     )
+    scenario_question = (
+        len(_significant_terms(normalized)) >= 7
+        and _SCENARIO_ACTOR_RE.search(query_ascii) is not None
+        and _SCENARIO_EVENT_RE.search(query_ascii) is not None
+        and _SCENARIO_REQUEST_RE.search(query_ascii) is not None
+        and (
+            _SCENARIO_CONTEXT_RE.search(query_ascii) is not None
+            or "," in normalized
+            or sentence_count >= 2
+        )
+    )
     if (
         len(facets) >= 2
         or len(legal_references) >= 2
         or structurally_multi_issue
+        or scenario_question
         or any(pattern.search(query_ascii) for pattern in _MULTI_HOP_PATTERNS)
     ):
         return "multi_hop"
@@ -889,6 +954,12 @@ def plan_retrieval_queries(query: str) -> list[str]:
     planned = [normalized]
     facets = _question_facets(normalized)
     matched_concepts = _matched_query_concepts(normalized)
+    # Short canonical concept labels are strong BM25 queries and must not be
+    # crowded out by long narrative facets.  This is especially important for
+    # scenarios that require one rule about the event and another about the
+    # available remedy or procedure.
+    for concept in matched_concepts:
+        planned.append(concept.label)
     if len(facets) >= 2:
         first_ascii = _ascii(facets[0])
         first_terms = [
@@ -912,10 +983,9 @@ def plan_retrieval_queries(query: str) -> list[str]:
         if any(marker in query_ascii for marker in markers):
             planned.append(expansion)
     for concept in matched_concepts:
-        # Keep one short canonical query for the AND-based BM25 branch, then
-        # add the richer ontology description for dense/vector recall. A long
-        # description alone can over-constrain PostgreSQL full-text search.
-        planned.append(concept.label)
+        # Add the richer ontology description for dense/vector recall.  The
+        # short label was inserted above so PostgreSQL full-text search is not
+        # over-constrained by this description.
         planned.append(_concept_retrieval_query(concept))
     return list(dict.fromkeys(planned))[:5]
 
@@ -945,6 +1015,17 @@ def build_answer_plan(query: str) -> dict[str, Any]:
         facets = [question_focus]
     if not facets and planned:
         facets = [planned[0]]
+    scenario_request_facets = [
+        facet
+        for facet in facets
+        if _SCENARIO_REQUEST_RE.search(_ascii(facet)) is not None
+    ]
+    fact_facets: list[str] = []
+    if len(facets) >= 2 and scenario_request_facets:
+        fact_facets = [
+            facet for facet in facets if facet not in scenario_request_facets
+        ]
+        facets = scenario_request_facets
     query_ascii = _ascii(query)
     actor_patterns = (
         ("bạn tôi", r"\bban toi\b"),
@@ -973,6 +1054,8 @@ def build_answer_plan(query: str) -> dict[str, Any]:
         "actors": actors,
         "focus_actor": focus or (actors[-1] if actors else ""),
     }
+    if fact_facets:
+        plan["facts"] = fact_facets
     if question_focus and question_focus != normalized_query:
         plan["question_focus"] = question_focus
     matched_concepts = _matched_query_concepts(question_focus or query)

@@ -240,6 +240,21 @@ def test_answer_plan_rejects_cited_but_off_topic_answer() -> None:
     )
 
 
+def test_answer_plan_rejects_scope_refusal_when_sources_exist() -> None:
+    answer_plan = build_answer_plan(
+        "Người lao động bị sa thải có quyền khởi kiện công ty không?"
+    )
+
+    with pytest.raises(GeminiError, match="từ chối theo phạm vi"):
+        _validate_answer_plan_coverage(
+            (
+                "VLegal AI là trợ lý chuyên sâu về pháp luật lao động. "
+                "Câu hỏi của bạn nằm ngoài phạm vi cơ sở dữ liệu chuyên ngành lao động [S1]."
+            ),
+            answer_plan,
+        )
+
+
 def test_public_salary_concept_rejects_sources_without_the_legal_measure() -> None:
     class _Store:
         def retrieve(self, _: str, __: int) -> list[dict]:
@@ -573,6 +588,67 @@ def test_retrieval_route_distinguishes_single_hop_and_graph_questions() -> None:
         )
         == "multi_abstract"
     )
+
+
+def test_narrative_dismissal_scenario_uses_multi_hop_and_plans_remedy() -> None:
+    query = (
+        "Tôi ký hợp đồng với công ty 6 tháng, nhưng tới tháng thứ 5 thì bị "
+        "sa thải, tôi có quyền kiện công ty không?"
+    )
+
+    assert classify_retrieval_route(query) == "multi_hop"
+    plan = build_answer_plan(query)
+    labels = {
+        concept["label"] for concept in plan.get("required_concepts", [])
+    }
+    planned = plan_retrieval_queries(query)
+
+    assert "Sa thải" in labels
+    assert "Thủ tục khởi kiện vụ án lao động" in labels
+    assert any("Sa thải" == item for item in planned)
+    assert any("khởi kiện" in item.casefold() for item in planned)
+
+
+def test_compound_scenario_keeps_event_and_procedure_sources() -> None:
+    query = (
+        "Tôi ký hợp đồng với công ty 6 tháng, nhưng tới tháng thứ 5 thì bị "
+        "sa thải, tôi có quyền kiện công ty không?"
+    )
+
+    class _Store:
+        def retrieve(self, planned_query: str, _: int) -> list[dict]:
+            if "khởi kiện" in planned_query.casefold():
+                return [
+                    _source(
+                        "S2",
+                        citation="Bộ luật Tố tụng dân sự > Thủ tục khởi kiện lao động",
+                        text=(
+                            "Người lao động có quyền khởi kiện tranh chấp lao động "
+                            "với công ty tại Tòa án có thẩm quyền."
+                        ),
+                    )
+                ]
+            return [
+                _source(
+                    "S1",
+                    citation="Bộ luật Lao động > Điều 125. Áp dụng hình thức sa thải",
+                    text=(
+                        "Công ty chỉ được áp dụng hình thức sa thải người lao động "
+                        "khi có căn cứ và thực hiện đúng trình tự xử lý kỷ luật."
+                    ),
+                )
+            ]
+
+    service = RetrievalService(
+        SimpleNamespace(retriever_backend="hybrid_rag", retrieval_top_k=10)
+    )
+    service._graph_store = _Store()
+
+    rows = asyncio.run(service.retrieve(query))
+
+    assert len(rows) == 2
+    assert any("sa thải" in row["text"].casefold() for row in rows)
+    assert any("khởi kiện" in row["text"].casefold() for row in rows)
 
 
 def test_single_hop_never_initializes_graph_store(
