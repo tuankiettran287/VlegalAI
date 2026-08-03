@@ -23,6 +23,7 @@ ENV/
 .pytest_cache/
 .tmp/
 .pytest-tmp/
+.tmp-pytest-*/
 .mypy_cache/
 .ruff_cache/
 .tox/
@@ -60,6 +61,12 @@ pnpm-debug.log*
 *.db
 *.db-wal
 *.db-shm
+
+# Local GraphRAG snapshots and compatibility aliases. Canonical JSONL files
+# remain versioned; the complete SQLite snapshot is synchronized through GCS.
+storage/graphrag-backup-*/
+storage/graphrag/chunk.jsonl
+storage/graphrag/document.jsonl
 
 # Generated reports, renders, screenshots and browser artifacts
 output/

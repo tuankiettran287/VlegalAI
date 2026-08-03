@@ -1947,13 +1947,18 @@ class LegalGraphBuilder:
             "",
         ).strip().lower() in {"1", "true", "yes", "on"}
         checkpoint: PostgresEmbeddingCheckpoint | None = None
-        cached: dict[str, tuple[str, list[float]]] = {}
+        cached = self._load_local_embedding_cache()
         if checkpoint_enabled:
             checkpoint = PostgresEmbeddingCheckpoint(
                 os.getenv("DATABASE_URL", ""),
                 self.embedding_config,
             )
-            cached = checkpoint.load()
+            cached.update(
+                {
+                    chunk_id: (content_hash, vector_to_blob(vector))
+                    for chunk_id, (content_hash, vector) in checkpoint.load().items()
+                }
+            )
 
         pending: list[tuple[dict[str, Any], str, str]] = []
         restored = 0
@@ -1961,12 +1966,12 @@ class LegalGraphBuilder:
             content_hash = embedding_content_hash(text)
             cached_row = cached.get(row["chunk_id"])
             if cached_row and cached_row[0] == content_hash:
-                row["vector"] = vector_to_blob(cached_row[1])
+                row["vector"] = cached_row[1]
                 restored += 1
             else:
                 pending.append((row, text, content_hash))
 
-        if checkpoint_enabled:
+        if cached or checkpoint_enabled:
             print(
                 "Embedding checkpoint: "
                 f"restored {restored}/{len(rows)}; pending {len(pending)}.",
@@ -2013,6 +2018,64 @@ class LegalGraphBuilder:
                     f"Embedding checkpoint: saved {completed}/{len(rows)}.",
                     flush=True,
                 )
+
+    def _load_local_embedding_cache(self) -> dict[str, tuple[str, bytes]]:
+        """Reuse matching vectors from the previous local SQLite index.
+
+        Rebuilding the graph changes only a fraction of the corpus most of the
+        time. Stable chunk ids plus an exact content hash let local rebuilds
+        avoid re-embedding unchanged law text while still invalidating vectors
+        whenever the model contract or chunk content changes.
+        """
+
+        if not self.db_path.is_file():
+            return {}
+
+        expected_metadata = {
+            "embedding_model": self.embedding_config.model,
+            "embedding_revision": self.embedding_config.model_revision,
+            "embedding_dimensions": str(self.embedding_config.dimensions),
+        }
+        expected_bytes = self.embedding_config.dimensions * array("f").itemsize
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            metadata = {
+                str(row["key"]): str(row["value"])
+                for row in connection.execute(
+                    "SELECT key, value FROM index_metadata"
+                )
+            }
+            if any(
+                metadata.get(key) != value
+                for key, value in expected_metadata.items()
+            ):
+                return {}
+
+            cached: dict[str, tuple[str, bytes]] = {}
+            for row in connection.execute(
+                "SELECT chunk_id, title, path_label, text, vector FROM chunks"
+            ):
+                vector = bytes(row["vector"] or b"")
+                if len(vector) != expected_bytes:
+                    continue
+                embedding_text = (
+                    f"{row['title']}\n{row['path_label']}\n{row['text']}"
+                )
+                cached[str(row["chunk_id"])] = (
+                    embedding_content_hash(embedding_text),
+                    vector,
+                )
+            return cached
+        except sqlite3.Error as exc:
+            logger.warning(
+                "Cannot reuse local embedding cache from %s: %s",
+                self.db_path,
+                exc,
+            )
+            return {}
+        finally:
+            connection.close()
 
     def _semantic_chunk_text(self, node_id: str, node: dict[str, Any], outgoing: dict[str, list[str]]) -> str:
         """Give a concept node a body worth embedding.

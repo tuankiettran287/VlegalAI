@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from array import array
 from collections import Counter
 from types import SimpleNamespace
 
@@ -9,6 +10,8 @@ from docx import Document
 
 from app.external_graphrag import document_structure_counts
 from app.legal_graphrag import LegalGraphBuilder
+from app.services.embedding_checkpoint import embedding_content_hash
+from app.services.embeddings import EmbeddingConfig
 from app.services.retrieval import (
     RetrievalService,
     classify_retrieval_route,
@@ -80,6 +83,55 @@ def test_builder_materializes_hierarchy_counts_and_inverse_edges(tmp_path) -> No
             """
         ).fetchone()
         assert stored == (2, 3, 2)
+
+
+def test_builder_reuses_only_matching_local_embedding_contract(tmp_path) -> None:
+    storage_dir = tmp_path / "storage"
+    storage_dir.mkdir()
+    config = EmbeddingConfig(dimensions=128)
+    builder = LegalGraphBuilder(tmp_path / "data", storage_dir, config)
+    embedding_text = "Title\nPath\nLegal text"
+    vector = array("f", [0.25] * config.dimensions).tobytes()
+
+    with sqlite3.connect(builder.db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE chunks (
+                chunk_id TEXT PRIMARY KEY,
+                title TEXT,
+                path_label TEXT,
+                text TEXT,
+                vector BLOB
+            );
+            """
+        )
+        connection.executemany(
+            "INSERT INTO index_metadata(key, value) VALUES (?, ?)",
+            [
+                ("embedding_model", config.model),
+                ("embedding_revision", config.model_revision),
+                ("embedding_dimensions", str(config.dimensions)),
+            ],
+        )
+        connection.execute(
+            "INSERT INTO chunks VALUES (?, ?, ?, ?, ?)",
+            ("chunk-1", "Title", "Path", "Legal text", vector),
+        )
+
+    cached = builder._load_local_embedding_cache()
+
+    assert cached == {
+        "chunk-1": (embedding_content_hash(embedding_text), vector)
+    }
+
+    with sqlite3.connect(builder.db_path) as connection:
+        connection.execute(
+            "UPDATE index_metadata SET value = 'different-model' "
+            "WHERE key = 'embedding_model'"
+        )
+
+    assert builder._load_local_embedding_cache() == {}
 
 
 def test_structure_question_uses_graph_count_without_external_freshness() -> None:
