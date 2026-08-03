@@ -328,7 +328,7 @@ function Deploy-Web {
         "--image=$appImage",
         "--execution-environment=gen2", "--service-account=$RunServiceAccount", "--port=8080",
         "--cpu=8", "--memory=16Gi", "--concurrency=16",
-        "--min=0", "--max=5", "--timeout=3600",
+        "--min=0", "--max=2", "--min-instances=0", "--max-instances=2", "--timeout=3600",
         "--allow-unauthenticated",
         "--set-env-vars=$envVars", "--set-secrets=$apiSecrets",
         "--quiet"
