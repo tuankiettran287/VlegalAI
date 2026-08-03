@@ -348,20 +348,23 @@ function SourcePanel({ sources }: { sources?: Source[] | null }) {
       <div className="source-list">
         {sources.map((source) => {
           const sourceUrl = safeSourceUrl(source.source_url);
+          const lookupUrl = safeSourceUrl(source.lookup_url);
+          const openUrl = sourceUrl || lookupUrl;
+          const openLabel = sourceUrl ? "Mở văn bản gốc" : "Tra cứu căn cứ";
           return (
             <article className="source-item" key={`${source.source_id}-${source.citation}`}>
               <div className="source-title">
                 <span className="source-id">{source.source_id}</span>
                 <strong>{source.citation || source.title}</strong>
-                {sourceUrl && (
+                {openUrl && (
                   <a
                     className="source-open-link"
-                    href={sourceUrl}
+                    href={openUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    aria-label={`Mở văn bản gốc: ${source.citation || source.title}`}
+                    aria-label={`${openLabel}: ${source.citation || source.title}`}
                   >
-                    <span>Mở văn bản</span>
+                    <span>{openLabel}</span>
                     <ExternalLink size={13} />
                   </a>
                 )}

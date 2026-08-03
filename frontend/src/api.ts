@@ -110,6 +110,7 @@ function normalizeSources(value: unknown): Source[] {
         : [],
       doc_id: typeof item.doc_id === "string" ? item.doc_id : null,
       source_url: typeof item.source_url === "string" ? item.source_url : null,
+      lookup_url: typeof item.lookup_url === "string" ? item.lookup_url : null,
     }];
   });
 }

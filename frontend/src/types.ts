@@ -18,6 +18,7 @@ export type Source = {
   reasons: string[];
   doc_id?: string | null;
   source_url?: string | null;
+  lookup_url?: string | null;
 };
 
 export type VerificationItem = {

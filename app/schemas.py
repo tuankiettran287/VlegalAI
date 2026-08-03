@@ -1,10 +1,28 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlencode
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+_LEGAL_SOURCE_CODE_RE = re.compile(
+    r"\b\d{1,4}/\d{4}/[A-Z\u0110][A-Z0-9\u0110.\-]*\b",
+    re.IGNORECASE,
+)
+_OFFICIAL_LEGAL_LOOKUP_URL = "https://vanban.chinhphu.vn/"
+
+
+def official_legal_lookup_url(*labels: str) -> str | None:
+    """Build a safe official lookup link when no verified direct URL exists."""
+
+    match = _LEGAL_SOURCE_CODE_RE.search(" ".join(labels).upper())
+    if match is None:
+        return None
+    return f"{_OFFICIAL_LEGAL_LOOKUP_URL}?{urlencode({'pageid': '473', 'q': match.group(0)})}"
 
 
 
@@ -49,6 +67,13 @@ class SourceOut(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     doc_id: str | None = None
     source_url: str | None = None
+    lookup_url: str | None = None
+
+    @model_validator(mode="after")
+    def add_official_lookup_url(self) -> "SourceOut":
+        if not self.source_url and not self.lookup_url:
+            self.lookup_url = official_legal_lookup_url(self.citation, self.title)
+        return self
 
 
 class VerificationItem(BaseModel):
