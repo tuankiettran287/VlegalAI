@@ -453,6 +453,7 @@ def test_article_research_keeps_only_sources_published_on_requested_day() -> Non
                 {
                     "url": "https://laodong.vn/today",
                     "title": "Bản tin lao động hôm nay",
+                    "content": "Quyền của người lao động theo quy định mới.",
                     "raw_content": "Nội dung về quyền của người lao động trong ngày. " * 8,
                     "published_date": "2026-08-03T08:15:00+07:00",
                 },
@@ -474,11 +475,24 @@ def test_article_research_keeps_only_sources_published_on_requested_day() -> Non
                     "raw_content": "International labor and employment article. " * 8,
                     "published_date": "2026-08-03T09:00:00+07:00",
                 },
+                {
+                    "url": "https://chinhphu.vn/xay-dung-dang",
+                    "title": "Hướng tiếp cận hiện đại trong xây dựng Đảng",
+                    "content": "Nội dung chính trị không liên quan đến chủ đề.",
+                    "raw_content": "Menu trang có liên kết lao động và việc làm. " * 8,
+                    "published_date": "2026-08-03T10:00:00+07:00",
+                },
+                {
+                    "url": "https://laodong.vn/the-thao",
+                    "title": "Tin thể thao trong ngày",
+                    "content": "Cầu thủ chuyển sang câu lạc bộ mới sau khi ký hợp đồng.",
+                    "published_date": "2026-08-03T10:30:00+07:00",
+                },
             ]
 
     class _EmptyGoogle:
         async def search(self, *_: object, **__: object) -> dict:
-            return {"results": [], "queries": [], "search_entry_point": None}
+            raise AssertionError("Strict daily publishing must not call Google Search")
 
     ai = _FakeCompletionAI()
 

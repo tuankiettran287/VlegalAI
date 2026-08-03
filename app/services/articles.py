@@ -48,15 +48,8 @@ VIETNAM_LEGAL_NEWS_DOMAINS = [
     "tapchitoaan.vn",
     "baophapluat.vn",
     "plo.vn",
-    "nhandan.vn",
-    "vietnamplus.vn",
     "congthuong.vn",
     "tapchitaichinh.vn",
-    "vneconomy.vn",
-    "vietnamnet.vn",
-    "vnexpress.net",
-    "tuoitre.vn",
-    "thanhnien.vn",
 ]
 EDITORIAL_LEAD_RE = re.compile(
     r"(?im)^\s*(?:dưới đây|sau đây) là "
@@ -178,14 +171,39 @@ ARTICLE_TOPIC_MARKERS = (
     (("moi truong",), ("moi truong", "tai nguyen", "phat thai")),
     (("y te", "giao duc"), ("y te", "giao duc", "bao hiem y te", "hoc phi")),
 )
+ARTICLE_LEGAL_CUES = (
+    "luat",
+    "bo luat",
+    "nghi dinh",
+    "nghi quyet",
+    "thong tu",
+    "quyet dinh",
+    "quy dinh",
+    "chinh sach",
+    "phap luat",
+    "phap ly",
+    "quyen",
+    "nghia vu",
+    "thu tuc",
+    "ho so",
+    "du thao",
+    "de xuat",
+    "xu phat",
+    "tranh chap",
+    "toa an",
+    "ban an",
+    "quoc hoi",
+    "chinh phu",
+)
 
 
 def _is_relevant_article_result(row: dict[str, Any], query: str) -> bool:
     topic = _fold_article_search_text(query.split(";", 1)[0])
     evidence = _fold_article_search_text(
-        f"{row.get('title') or ''} {row.get('content') or ''} "
-        f"{row.get('raw_content') or ''}"
+        f"{row.get('title') or ''} {row.get('content') or ''}"
     )
+    if not any(marker in evidence for marker in ARTICLE_LEGAL_CUES):
+        return False
     for topic_markers, result_markers in ARTICLE_TOPIC_MARKERS:
         if any(marker in topic for marker in topic_markers):
             return any(marker in evidence for marker in result_markers)
@@ -480,27 +498,41 @@ class ArticleResearchService:
                 f"after:{(published_on - timedelta(days=1)).isoformat()} "
                 f"before:{(published_on + timedelta(days=1)).isoformat()}"
             )
-        tavily_response, google_response = await asyncio.gather(
-            self.tavily.search(
-                search_query,
-                max_results=10,
-                include_raw_content=True,
-                topic="news" if published_on is not None else "general",
-                start_date=published_on,
-                end_date=(published_on + timedelta(days=1)) if published_on else None,
-                include_domains=(
-                    VIETNAM_LEGAL_NEWS_DOMAINS if published_on is not None else None
-                ),
+        tavily_call = self.tavily.search(
+            search_query,
+            max_results=10,
+            include_raw_content=True,
+            topic="news" if published_on is not None else "general",
+            start_date=published_on,
+            end_date=(published_on + timedelta(days=1)) if published_on else None,
+            include_domains=(
+                VIETNAM_LEGAL_NEWS_DOMAINS if published_on is not None else None
             ),
-            self.google_search.search(
-                search_query,
-                max_results=10,
-                include_domains=(
-                    VIETNAM_LEGAL_NEWS_DOMAINS if published_on is not None else None
-                ),
-            ),
-            return_exceptions=True,
         )
+        if published_on is not None and not generate_summary:
+            (tavily_response,) = await asyncio.gather(
+                tavily_call,
+                return_exceptions=True,
+            )
+            google_response: dict[str, Any] = {
+                "results": [],
+                "queries": [],
+                "search_entry_point": None,
+            }
+        else:
+            tavily_response, google_response = await asyncio.gather(
+                tavily_call,
+                self.google_search.search(
+                    search_query,
+                    max_results=10,
+                    include_domains=(
+                        VIETNAM_LEGAL_NEWS_DOMAINS
+                        if published_on is not None
+                        else None
+                    ),
+                ),
+                return_exceptions=True,
+            )
 
         warnings: list[str] = []
         if isinstance(tavily_response, Exception):
