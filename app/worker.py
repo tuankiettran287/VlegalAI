@@ -79,11 +79,12 @@ def _article_category(topic: str, title: str, summary: str = "") -> str:
         return "Cập nhật pháp luật"
 
     category_rules = (
+        ("Y tế & giáo dục", ("y te", "benh vien", "tram y te", "giao duc", "hoc phi")),
+        ("Thuế & tài chính", ("thue", "tai chinh", "ngan hang", "hoa don")),
         ("Bảo hiểm & an sinh", ("bao hiem", "an sinh", "luong huu", "tro cap")),
         ("Lao động & việc làm", ("lao dong", "viec lam", "tien luong", "cong doan")),
         ("Hợp đồng & dân sự", ("hop dong", "dan su", "thua ke", "boi thuong")),
         ("Doanh nghiệp & thương mại", ("doanh nghiep", "thuong mai", "kinh doanh", "dau tu")),
-        ("Thuế & tài chính", ("thue", "tai chinh", "ngan hang", "hoa don")),
         ("Đất đai & nhà ở", ("dat dai", "nha o", "bat dong san")),
         ("Dữ liệu & công nghệ", ("du lieu", "cong nghe", "an ninh mang", "tri tue nhan tao")),
         ("Sở hữu trí tuệ", ("so huu tri tue", "ban quyen", "nhan hieu", "sang che")),
@@ -92,6 +93,9 @@ def _article_category(topic: str, title: str, summary: str = "") -> str:
         ("Hành chính & cư trú", ("hanh chinh", "cu tru", "xuat nhap canh", "ho tich")),
         ("Môi trường & xây dựng", ("moi truong", "xay dung", "quy hoach")),
     )
+    for category, markers in category_rules:
+        if any(marker in _fold_article_text(title) for marker in markers):
+            return category
     for category, markers in category_rules:
         if any(marker in text for marker in markers):
             return category

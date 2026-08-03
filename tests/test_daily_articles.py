@@ -399,6 +399,16 @@ def test_worker_and_beat_use_five_daily_publication_times() -> None:
         ("bảo hiểm xã hội", "Hướng dẫn hồ sơ hưu trí", "Bảo hiểm & an sinh"),
         ("sở hữu trí tuệ", "Bảo vệ nhãn hiệu", "Sở hữu trí tuệ"),
         ("pháp luật đất đai", "Thủ tục sang tên nhà ở", "Đất đai & nhà ở"),
+        (
+            "hợp đồng thương mại",
+            "Thông tư bãi bỏ quy định trong lĩnh vực thuế",
+            "Thuế & tài chính",
+        ),
+        (
+            "bảo hiểm xã hội",
+            "Bảo đảm nhân lực cho Trạm Y tế sau sắp xếp",
+            "Y tế & giáo dục",
+        ),
     ],
 )
 def test_article_category_uses_relevant_topic_tags(
