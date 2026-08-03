@@ -109,6 +109,14 @@ _LEGAL_REFERENCE_RE = re.compile(
     r"\b(?:dieu|khoan|diem)\s+\d+[a-z]?\b",
     re.IGNORECASE,
 )
+_INTENT_QUESTION_MARKER_RE = re.compile(
+    r"\b(?:la\s+)?(?:bao\s+nhieu|bao\s+lau|la\s+gi|muc\s+nao|la\s+may)\b",
+    re.IGNORECASE,
+)
+_INTENT_TEMPORAL_QUALIFIER_RE = re.compile(
+    r"\b(?:hien\s+tai|hien\s+nay|bay\s+gio|luc\s+nay)\b",
+    re.IGNORECASE,
+)
 _QUERY_STOP_WORDS = {
     "ai",
     "bao",
@@ -376,6 +384,62 @@ def _row_evidence(row: dict[str, Any]) -> str:
     )
 
 
+def requested_intent_anchors(query: str) -> list[str]:
+    """Extract the concrete concept requested by a fact/definition question.
+
+    The anchors come entirely from the user's wording. They are intentionally
+    topic-agnostic: the same mechanism separates salary from contribution,
+    a deadline from a penalty, or one legal definition from a nearby one.
+    """
+
+    normalized = " ".join(_ascii(query).split())
+    marker = _INTENT_QUESTION_MARKER_RE.search(normalized)
+    if marker is None:
+        return []
+    subject = normalized[: marker.start()].strip(" ,;:-?")
+    if not subject:
+        return []
+    if " cua " in subject:
+        left = subject.rsplit(" cua ", 1)[0].strip()
+        if len(_WORD_RE.findall(left)) >= 2:
+            subject = left
+    subject = _INTENT_TEMPORAL_QUALIFIER_RE.sub(" ", subject)
+    tokens = [
+        token
+        for token in _WORD_RE.findall(subject)
+        if len(token) >= 2
+    ]
+    if len(tokens) < 2:
+        return []
+    # Long fact patterns often start with the actor and end with the requested
+    # act. Keep both edges without turning the whole sentence into one brittle
+    # exact-match requirement.
+    windows = [tokens]
+    if len(tokens) > 8:
+        windows = [tokens[:4], tokens[-5:]]
+    anchors: list[str] = []
+    for window in windows:
+        for size in (3, 2):
+            # Generic quantity heads ("mức", "số", "giá", ...) make the
+            # first bigram too broad to distinguish the requested measure.
+            # Keep semantic heads such as "thời hạn" intact.
+            generic_quantity_heads = {"muc", "so", "gia", "ty", "tong"}
+            start = (
+                1
+                if (
+                    size == 2
+                    and len(window) >= 4
+                    and window[0] in generic_quantity_heads
+                )
+                else 0
+            )
+            anchors.extend(
+                " ".join(window[index : index + size])
+                for index in range(start, len(window) - size + 1)
+            )
+    return list(dict.fromkeys(anchors))[:10]
+
+
 def _filter_rows_for_query_intent(
     query: str,
     rows: list[dict[str, Any]],
@@ -389,6 +453,15 @@ def _filter_rows_for_query_intent(
 
     query_ascii = _ascii(query)
     matched_concepts = _matched_query_concepts(query)
+    facets = _question_facets(query)
+    # A compound question needs evidence for different facets. Applying one
+    # exact concept anchor to every row would discard valid evidence for the
+    # remaining facets, so the strict anchor is reserved for focused lookups.
+    intent_anchors = (
+        requested_intent_anchors(query)
+        if len(facets) <= 1
+        else []
+    )
     concept_filtered = False
     if matched_concepts:
         concept_rows = [
@@ -464,7 +537,6 @@ def _filter_rows_for_query_intent(
     # when it covers enough meaningful query terms; a hybrid lexical+dense row
     # with partial coverage remains an acceptable fallback. This avoids both
     # question-specific branches and the previous all-or-nothing filtering.
-    facets = _question_facets(query)
     facet_groups = [
         (facet, terms)
         for facet in (facets or [query])
@@ -498,6 +570,11 @@ def _filter_rows_for_query_intent(
     hybrid_fallback: list[dict[str, Any]] = []
     for row in rows:
         evidence = _row_evidence(row)
+        intent_anchor_matches = sum(
+            anchor in evidence for anchor in intent_anchors
+        )
+        if intent_anchors and intent_anchor_matches == 0:
+            continue
         evidence_tokens = set(_WORD_RE.findall(evidence))
         group_scores = []
         for terms, phrases in evidence_groups:
@@ -512,11 +589,19 @@ def _filter_rows_for_query_intent(
             "postgres_vector_cosine",
             "postgres_bm25",
         }.issubset(reasons)
-        relevance = coverage + min(phrase_matches, 2) * 0.1
+        relevance = (
+            coverage
+            + min(phrase_matches, 2) * 0.1
+            + min(intent_anchor_matches, 2) * 0.15
+        )
         if relevance >= 0.35:
             row["reasons"] = list(
                 dict.fromkeys(
-                    [*row.get("reasons", []), f"intent_terms:{matched}/{term_count}"]
+                    [
+                        *row.get("reasons", []),
+                        f"intent_terms:{matched}/{term_count}",
+                        f"intent_anchors:{intent_anchor_matches}",
+                    ]
                 )
             )
             strong.append((relevance, row))
@@ -867,6 +952,9 @@ def build_answer_plan(query: str) -> dict[str, Any]:
             }
             for concept in supporting_concepts
         ]
+    intent_anchors = requested_intent_anchors(query)
+    if intent_anchors:
+        plan["intent_anchor_phrases"] = intent_anchors
     return plan
 
 

@@ -22,6 +22,7 @@ from app.services.retrieval import (
     format_source_locator,
     format_source_opening,
     plan_retrieval_queries,
+    requested_intent_anchors,
 )
 
 
@@ -224,7 +225,7 @@ def test_answer_plan_rejects_cited_but_off_topic_answer() -> None:
     )
 
 
-def test_generic_intent_coverage_keeps_context_and_rejects_adjacent_results() -> None:
+def test_generic_intent_coverage_rejects_sources_that_only_share_context() -> None:
     class _Store:
         def retrieve(self, _: str, __: int) -> list[dict]:
             return [
@@ -260,13 +261,72 @@ def test_generic_intent_coverage_keeps_context_and_rejects_adjacent_results() ->
         )
     )
 
+    assert rows == []
+
+
+def test_generic_intent_anchor_separates_requested_measure_from_nearby_one() -> None:
+    query = "Lương cơ bản hiện tại của cán bộ nhà nước là bao nhiêu?"
+
+    class _Store:
+        def retrieve(self, _: str, __: int) -> list[dict]:
+            return [
+                _source(
+                    citation="Nghị định về bảo hiểm xã hội > Điều 43",
+                    text=(
+                        "Cán bộ, công chức thuộc cơ quan nhà nước đóng 0,5% "
+                        "tiền lương làm căn cứ đóng bảo hiểm xã hội."
+                    ),
+                ),
+                _source(
+                    "S2",
+                    citation="Nghị định về chế độ tiền lương > Điều 3",
+                    text=(
+                        "Mức lương cơ sở áp dụng đối với cán bộ, công chức "
+                        "là 2,34 triệu đồng mỗi tháng."
+                    ),
+                ),
+            ]
+
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    service._store = _Store()
+
+    rows = asyncio.run(service.retrieve(query))
+
     assert len(rows) == 1
-    assert "cán bộ, công chức" in rows[0]["text"]
-    assert "tối thiểu" not in rows[0]["text"]
+    assert "lương cơ sở" in rows[0]["text"]
+    assert "đóng bảo hiểm" not in rows[0]["text"]
     assert any(
-        reason.startswith("intent_terms:")
+        reason.startswith("intent_anchors:")
         for reason in rows[0]["reasons"]
     )
+
+
+def test_intent_anchors_and_answer_validation_are_topic_agnostic() -> None:
+    wage_plan = build_answer_plan(
+        "Lương cơ bản hiện tại của cán bộ nhà nước là bao nhiêu?"
+    )
+    deadline_plan = build_answer_plan("Thời hạn báo trước là bao lâu?")
+
+    assert "luong co" in requested_intent_anchors(
+        "Lương cơ bản hiện tại của cán bộ nhà nước là bao nhiêu?"
+    )
+    assert "thoi han" in requested_intent_anchors(
+        "Thời hạn báo trước là bao lâu?"
+    )
+    with pytest.raises(GeminiError):
+        _validate_answer_plan_coverage(
+            "Mức đóng bảo hiểm xã hội là 0,5% tiền lương [S1].",
+            wage_plan,
+        )
+    _validate_answer_plan_coverage(
+        "Mức lương cơ sở được dùng làm căn cứ tính lương [S1].",
+        wage_plan,
+    )
+    with pytest.raises(GeminiError):
+        _validate_answer_plan_coverage(
+            "Mức phạt vi phạm là 10 triệu đồng [S1].",
+            deadline_plan,
+        )
 
 
 def test_generic_intent_filter_does_not_require_a_number_in_the_same_chunk() -> None:

@@ -111,7 +111,8 @@ Quy tắc bắt buộc:
    chuẩn hóa.
 5. rewritten_query phải là một câu hỏi độc lập, tự nhiên, ngắn gọn bằng tiếng Việt.
 6. Khi ngữ cảnh đủ rõ, chuẩn hóa cách gọi đời thường thành thuật ngữ pháp lý tương đương
-   để hỗ trợ tìm kiếm, nhưng không được thêm một khái niệm, chủ thể hoặc phạm vi mới.
+   để hỗ trợ tìm kiếm. Việc thay cách gọi đời thường bằng đúng thuật ngữ pháp lý tương
+   đương không bị xem là thêm khái niệm; vẫn không được thêm chủ thể hoặc phạm vi mới.
 7. Nếu câu gốc đã đủ rõ, trả lại nguyên văn và đặt rewrite_required=false.
 """
 

@@ -120,6 +120,7 @@ from app.services.freshness import (
     LAW_CODE_RE,
     LegalFreshnessService,
 )
+from app.services.evidence_gate import assess_source_relevance
 from app.services.greetings import greeting_response
 from app.services.query_rewrite import (
     rewrite_query_if_needed,
@@ -1100,6 +1101,119 @@ async def _legal_sources(
     # or fail a chat response.
     return freshness_fast_path_result(sources)
 
+
+async def _evidence_gated_sources(
+    *,
+    original_question: str,
+    retrieval_query: str,
+    sources: list[dict[str, Any]],
+    verification: dict[str, Any],
+    ai: GeminiService,
+    retrieval: RetrievalService,
+    freshness: LegalFreshnessService,
+    settings: Settings,
+    telemetry: dict[str, float] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    if not settings.evidence_gate_enabled or not sources:
+        return sources, verification, retrieval_query
+
+    started = time.perf_counter()
+
+    def selected_sources(
+        rows: list[dict[str, Any]],
+        selected_ids: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        allowed = set(selected_ids)
+        selected = [dict(row) for row in rows if row.get("source_id") in allowed]
+        for index, row in enumerate(selected, start=1):
+            row["source_id"] = f"S{index}"
+        return selected
+
+    first = await assess_source_relevance(
+        ai,
+        original_question=original_question,
+        retrieval_query=retrieval_query,
+        sources=sources,
+        timeout_seconds=settings.evidence_gate_timeout_seconds,
+        max_sources=settings.evidence_gate_max_sources,
+    )
+    first_selected = selected_sources(sources, first.relevant_source_ids)
+    log_progress(
+        logger,
+        "evidence_gate",
+        "first_pass_completed",
+        started,
+        coverage=first.coverage,
+        failed=first.failed,
+        refined=bool(first.refined_search_query),
+        selected_count=len(first_selected),
+    )
+    if first.failed or (first.coverage == "sufficient" and first_selected):
+        if telemetry is not None:
+            telemetry["evidence_gate"] = round(
+                (time.perf_counter() - started) * 1000,
+                1,
+            )
+        return first_selected, verification, retrieval_query
+
+    refined_query = first.refined_search_query
+    if refined_query:
+        refined_sources, refined_verification = await _legal_sources(
+            refined_query,
+            retrieval,
+            freshness,
+            allow_empty=True,
+            telemetry=telemetry,
+        )
+        if refined_sources:
+            second = await assess_source_relevance(
+                ai,
+                original_question=original_question,
+                retrieval_query=refined_query,
+                sources=refined_sources,
+                timeout_seconds=settings.evidence_gate_timeout_seconds,
+                max_sources=settings.evidence_gate_max_sources,
+            )
+            second_selected = selected_sources(
+                refined_sources,
+                second.relevant_source_ids,
+            )
+            log_progress(
+                logger,
+                "evidence_gate",
+                "refined_pass_completed",
+                started,
+                coverage=second.coverage,
+                failed=second.failed,
+                selected_count=len(second_selected),
+            )
+            if second_selected:
+                if telemetry is not None:
+                    telemetry["evidence_gate"] = round(
+                        (time.perf_counter() - started) * 1000,
+                        1,
+                    )
+                return second_selected, refined_verification, refined_query
+
+    if telemetry is not None:
+        telemetry["evidence_gate"] = round(
+            (time.perf_counter() - started) * 1000,
+            1,
+        )
+    if first_selected:
+        return first_selected, verification, retrieval_query
+    return (
+        [],
+        VerificationReport(
+            checked=False,
+            all_current=False,
+            checked_at=datetime.now(UTC),
+            items=[],
+            note=LEGAL_DATA_UNAVAILABLE_MESSAGE,
+        ).model_dump(mode="json"),
+        retrieval_query,
+    )
+
 def _verification_prompt(verification: dict[str, Any]) -> str:
     return untrusted_data_block("VERIFICATION_REPORT", verification)
 
@@ -1394,6 +1508,21 @@ def _validate_answer_plan_coverage(
 
     if not answer_plan:
         return
+    raw_anchors = answer_plan.get("intent_anchor_phrases")
+    if isinstance(raw_anchors, list):
+        normalized_answer = _normalized_legal_reference(value)
+        anchors = [
+            _normalized_legal_reference(str(anchor))
+            for anchor in raw_anchors
+            if str(anchor).strip()
+        ]
+        if anchors and not any(
+            anchor in normalized_answer
+            for anchor in anchors
+        ):
+            raise _AnswerCoverageError(
+                "Câu trả lời chưa giải quyết đúng khái niệm hoặc đại lượng được hỏi."
+            )
     raw_concepts = answer_plan.get("required_concepts")
     if not isinstance(raw_concepts, list):
         return
@@ -2198,6 +2327,7 @@ async def chat(
         "rewrite": 0.0,
         "structure": 0.0,
         "retrieval": 0.0,
+        "evidence_gate": 0.0,
         "freshness": 0.0,
         "generation_initial": 0.0,
         "citation_normalize": 0.0,
@@ -2712,6 +2842,25 @@ async def chat(
                 allow_empty=True,
                 telemetry=timings,
             )
+        if (
+            sources
+            and retrieval_route == "single_hop"
+            and not attachment_payloads
+        ):
+            sources, verification, gated_query = await _evidence_gated_sources(
+                original_question=current_question,
+                retrieval_query=retrieval_query,
+                sources=sources,
+                verification=verification,
+                ai=ai,
+                retrieval=retrieval,
+                freshness=freshness,
+                settings=settings,
+                telemetry=timings,
+            )
+            if gated_query != retrieval_query:
+                retrieval_query = gated_query
+                answer_plan = build_answer_plan(retrieval_query)
         if sources and attachment_payloads:
             sources = [
                 *sources,
@@ -3004,7 +3153,7 @@ async def chat(
             "Legal chat failed request_id=%s outcome=fallback route=%s total_ms=%.1f "
             "failed_stage=%s exception_type=%s timeout_configured=%.1f elapsed_actual_ms=%.1f "
             "citation_repair_called=%s auth_ms=%.1f context_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f "
-            "structure_ms=%.1f retrieval_ms=%.1f freshness_ms=%.1f "
+            "structure_ms=%.1f retrieval_ms=%.1f evidence_gate_ms=%.1f freshness_ms=%.1f "
             "generation_initial_ms=%.1f citation_normalize_ms=%.1f citation_repair_ms=%.1f persistence_ms=%.1f",
             request_id,
             retrieval_route,
@@ -3021,6 +3170,7 @@ async def chat(
             timings["rewrite"],
             timings["structure"],
             timings["retrieval"],
+            timings["evidence_gate"],
             timings["freshness"],
             timings["generation_initial"],
             timings["citation_normalize"],
@@ -3031,7 +3181,7 @@ async def chat(
         logger.info(
             "Legal chat completed request_id=%s outcome=%s route=%s total_ms=%.1f "
             "auth_ms=%.1f context_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f "
-            "structure_ms=%.1f retrieval_ms=%.1f freshness_ms=%.1f generation_initial_ms=%.1f "
+            "structure_ms=%.1f retrieval_ms=%.1f evidence_gate_ms=%.1f freshness_ms=%.1f generation_initial_ms=%.1f "
             "citation_normalize_ms=%.1f citation_repair_ms=%.1f persistence_ms=%.1f source_count=%d answer_chars=%d",
             request_id,
             outcome,
@@ -3044,6 +3194,7 @@ async def chat(
             timings["rewrite"],
             timings["structure"],
             timings["retrieval"],
+            timings["evidence_gate"],
             timings["freshness"],
             timings["generation_initial"],
             timings["citation_normalize"],

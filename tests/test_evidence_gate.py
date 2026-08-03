@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+
+from app.api import _evidence_gated_sources
+from app.services.ai import GeminiError
+from app.services.evidence_gate import assess_source_relevance
+
+
+def _sources() -> list[dict]:
+    return [
+        {
+            "source_id": "S1",
+            "citation": "Nguồn một",
+            "title": "Quy định gần nghĩa",
+            "text": "Nguồn có cùng chủ thể nhưng quy định một đại lượng khác.",
+        },
+        {
+            "source_id": "S2",
+            "citation": "Nguồn hai",
+            "title": "Quy định trực tiếp",
+            "text": "Nguồn trực tiếp quy định đúng đại lượng được hỏi.",
+        },
+    ]
+
+
+def test_evidence_gate_keeps_only_direct_sources() -> None:
+    class _AI:
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            return {
+                "relevant_source_ids": ["S2"],
+                "coverage": "sufficient",
+                "refined_search_query": "",
+                "reason": "S2 trực tiếp hỗ trợ đúng đại lượng.",
+            }
+
+    result = asyncio.run(
+        assess_source_relevance(
+            _AI(),  # type: ignore[arg-type]
+            original_question="Đại lượng được hỏi là bao nhiêu?",
+            retrieval_query="Đại lượng pháp lý cần xác định",
+            sources=_sources(),
+            timeout_seconds=2,
+        )
+    )
+
+    assert result.relevant_source_ids == ("S2",)
+    assert result.coverage == "sufficient"
+    assert result.failed is False
+
+
+def test_evidence_gate_returns_safe_refined_query_when_sources_miss_intent() -> None:
+    class _AI:
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            return {
+                "relevant_source_ids": [],
+                "coverage": "none",
+                "refined_search_query": "Thuật ngữ pháp lý đúng của đại lượng cần tìm",
+                "reason": "Các nguồn hiện tại chỉ cùng bối cảnh.",
+            }
+
+    result = asyncio.run(
+        assess_source_relevance(
+            _AI(),  # type: ignore[arg-type]
+            original_question="Đại lượng hiện tại là bao nhiêu?",
+            retrieval_query="Cách gọi đời thường của đại lượng",
+            sources=_sources(),
+            timeout_seconds=2,
+        )
+    )
+
+    assert result.relevant_source_ids == ()
+    assert result.coverage == "none"
+    assert result.refined_search_query == (
+        "Thuật ngữ pháp lý đúng của đại lượng cần tìm"
+    )
+
+
+def test_evidence_gate_rejects_refinement_that_invents_a_number() -> None:
+    class _AI:
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            return {
+                "relevant_source_ids": [],
+                "coverage": "none",
+                "refined_search_query": "Tìm quy định có giá trị 12345 đồng",
+                "reason": "Không đủ nguồn.",
+            }
+
+    result = asyncio.run(
+        assess_source_relevance(
+            _AI(),  # type: ignore[arg-type]
+            original_question="Mức áp dụng là bao nhiêu?",
+            retrieval_query="Mức áp dụng hiện tại",
+            sources=_sources(),
+            timeout_seconds=2,
+        )
+    )
+
+    assert result.refined_search_query == ""
+
+
+def test_evidence_gate_fails_open_when_model_is_unavailable() -> None:
+    class _AI:
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            raise GeminiError("unavailable")
+
+    result = asyncio.run(
+        assess_source_relevance(
+            _AI(),  # type: ignore[arg-type]
+            original_question="Quyền của người lao động là gì?",
+            retrieval_query="Quyền của người lao động",
+            sources=_sources(),
+            timeout_seconds=2,
+        )
+    )
+
+    assert result.relevant_source_ids == ("S1", "S2")
+    assert result.failed is True
+    assert result.reason == "ai_unavailable_fail_open"
+
+
+def test_api_evidence_gate_refines_retrieval_after_off_topic_sources() -> None:
+    class _AI:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_json(self, *_: object, **__: object) -> dict:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "relevant_source_ids": [],
+                    "coverage": "none",
+                    "refined_search_query": "Khái niệm pháp lý chính xác cần tìm",
+                    "reason": "Nguồn đầu tiên chỉ cùng bối cảnh.",
+                }
+            return {
+                "relevant_source_ids": ["S1"],
+                "coverage": "sufficient",
+                "refined_search_query": "",
+                "reason": "Nguồn mới trực tiếp hỗ trợ câu hỏi.",
+            }
+
+    class _Retrieval:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def retrieve(self, query: str) -> list[dict]:
+            self.queries.append(query)
+            return [
+                {
+                    "source_id": "S9",
+                    "citation": "Nguồn sau truy vấn tinh chỉnh",
+                    "title": "Quy định trực tiếp",
+                    "text": "Căn cứ trực tiếp cho đúng khái niệm cần tìm.",
+                }
+            ]
+
+    ai = _AI()
+    retrieval = _Retrieval()
+    settings = SimpleNamespace(
+        evidence_gate_enabled=True,
+        evidence_gate_timeout_seconds=2.0,
+        evidence_gate_max_sources=8,
+    )
+
+    sources, verification, query = asyncio.run(
+        _evidence_gated_sources(
+            original_question="Cách gọi đời thường của khái niệm là gì?",
+            retrieval_query="Cách gọi đời thường của khái niệm",
+            sources=_sources(),
+            verification={"checked": True, "all_current": True},
+            ai=ai,  # type: ignore[arg-type]
+            retrieval=retrieval,  # type: ignore[arg-type]
+            freshness=None,  # type: ignore[arg-type]
+            settings=settings,  # type: ignore[arg-type]
+        )
+    )
+
+    assert ai.calls == 2
+    assert retrieval.queries == ["Khái niệm pháp lý chính xác cần tìm"]
+    assert query == "Khái niệm pháp lý chính xác cần tìm"
+    assert len(sources) == 1
+    assert sources[0]["source_id"] == "S1"
+    assert verification["checked"] is True
