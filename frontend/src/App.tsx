@@ -1,4 +1,5 @@
 import {
+  ClipboardEvent as ReactClipboardEvent,
   FormEvent,
   ReactNode,
   useCallback,
@@ -33,7 +34,6 @@ import {
   MessageSquareText,
   Moon,
   PenTool,
-  Paperclip,
   Plus,
   RefreshCw,
   Scale,
@@ -560,6 +560,7 @@ function ChatPage({
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   // Chat always uses the fast, citation-safe policy. Keep the request field
   // only for backwards compatibility with older API deployments.
   const [effort, setEffort] = useState<ChatEffort>("instant");
@@ -572,7 +573,9 @@ function ChatPage({
   const [feedbackLoadingId, setFeedbackLoadingId] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
-  const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const imageAttachmentInputRef = useRef<HTMLInputElement>(null);
+  const documentAttachmentInputRef = useRef<HTMLInputElement>(null);
+  const attachmentMenuRef = useRef<HTMLDivElement>(null);
   const conversationRequestRef = useRef(0);
   const hasMessages = messages.length > 0;
   const lastMessageId = messages[messages.length - 1]?.id;
@@ -605,10 +608,23 @@ function ChatPage({
   useEffect(() => reloadHistory(), [reloadHistory]);
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setHistoryOpen(false);
+      if (event.key === "Escape") {
+        setHistoryOpen(false);
+        setAttachmentMenuOpen(false);
+      }
+    };
+    const closeAttachmentMenu = (event: PointerEvent) => {
+      const menu = attachmentMenuRef.current;
+      if (menu && !menu.contains(event.target as Node)) {
+        setAttachmentMenuOpen(false);
+      }
     };
     window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    window.addEventListener("pointerdown", closeAttachmentMenu);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("pointerdown", closeAttachmentMenu);
+    };
   }, []);
 
   const openConversation = async (id: string) => {
@@ -632,6 +648,7 @@ function ChatPage({
       setConversationId(id);
       setMessages(data.messages);
       setAttachments([]);
+      setAttachmentMenuOpen(false);
       setFeedbackMessageId(null);
       setFeedbackComment("");
       setHistoryOpen(false);
@@ -653,13 +670,14 @@ function ChatPage({
     setMessages([]);
     setInput("");
     setAttachments([]);
+    setAttachmentMenuOpen(false);
     setError("");
     setFeedbackMessageId(null);
     setFeedbackComment("");
     setCopiedMessageId(null);
   };
 
-  const handleAttachmentFiles = async (files: FileList | null) => {
+  const handleAttachmentFiles = async (files: FileList | File[] | null) => {
     if (!files?.length || attachmentUploading || loading) return;
     const remainingSlots = 3 - attachments.length;
     if (remainingSlots <= 0) {
@@ -672,6 +690,7 @@ function ChatPage({
       return;
     }
     setError("");
+    setAttachmentMenuOpen(false);
     setAttachmentUploading(true);
     const uploaded: ChatAttachment[] = [];
     try {
@@ -686,8 +705,37 @@ function ChatPage({
       setError((reason as Error).message);
     } finally {
       setAttachmentUploading(false);
-      if (attachmentInputRef.current) attachmentInputRef.current.value = "";
+      if (imageAttachmentInputRef.current) imageAttachmentInputRef.current.value = "";
+      if (documentAttachmentInputRef.current) documentAttachmentInputRef.current.value = "";
     }
+  };
+
+  const handleComposerPaste = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const pastedImages = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (!pastedImages.length) return;
+
+    event.preventDefault();
+    const supportedTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+    const unsupported = pastedImages.find((file) => !supportedTypes.has(file.type));
+    if (unsupported) {
+      setError("Ảnh dán vào phải có định dạng JPEG, PNG hoặc WebP.");
+      return;
+    }
+    const extensionByType: Record<string, string> = {
+      "image/jpeg": "jpg",
+      "image/png": "png",
+      "image/webp": "webp",
+    };
+    const timestamp = Date.now();
+    const namedImages = pastedImages.map((file, index) => new File(
+      [file],
+      `anh-dan-${timestamp}-${index + 1}.${extensionByType[file.type]}`,
+      { type: file.type, lastModified: file.lastModified || timestamp },
+    ));
+    void handleAttachmentFiles(namedImages);
   };
 
   const submit = async (question = input) => {
@@ -707,6 +755,7 @@ function ChatPage({
     );
     if (!trimmed || loading || attachmentUploading || loadingConversationId) return;
     setError("");
+    setAttachmentMenuOpen(false);
     setLoading(true);
     const submittedEffort: ChatEffort = "instant";
     const pendingCopy: Record<ChatEffort, string> = {
@@ -932,6 +981,7 @@ function ChatPage({
           rows={1}
           disabled={Boolean(loadingConversationId)}
           onChange={(event) => setInput(event.target.value)}
+          onPaste={handleComposerPaste}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
@@ -974,25 +1024,60 @@ function ChatPage({
           {selectedEffort.description}
         </p>
         <div className="composer-toolbar">
-          <button
-            className="attachment-trigger"
-            type="button"
-            disabled={attachmentUploading || loading || attachments.length >= 3}
-            onClick={() => attachmentInputRef.current?.click()}
-            aria-label="Đính kèm ảnh hoặc tài liệu"
-            title="JPEG, PNG, WebP, PDF, DOCX, TXT hoặc Markdown · tối đa 15 MB"
-          >
-            {attachmentUploading ? <RefreshCw className="spin" size={15} /> : <Paperclip size={15} />}
-            <span>{attachmentUploading ? "Đang đọc tệp…" : "Đính kèm"}</span>
-          </button>
-          <input
-            ref={attachmentInputRef}
-            className="attachment-input"
-            type="file"
-            multiple
-            accept="image/jpeg,image/png,image/webp,.pdf,.docx,.txt,.md"
-            onChange={(event) => void handleAttachmentFiles(event.target.files)}
-          />
+          <div className="attachment-menu-wrap" ref={attachmentMenuRef}>
+            <button
+              className="attachment-plus"
+              type="button"
+              disabled={attachmentUploading || loading || attachments.length >= 3}
+              onClick={() => setAttachmentMenuOpen((current) => !current)}
+              aria-label="Thêm ảnh hoặc tài liệu"
+              aria-haspopup="menu"
+              aria-expanded={attachmentMenuOpen}
+              title="Thêm ảnh hoặc tài liệu"
+            >
+              {attachmentUploading
+                ? <RefreshCw className="spin" size={17} />
+                : <Plus size={19} />}
+            </button>
+            {attachmentMenuOpen && (
+              <div className="attachment-menu" role="menu" aria-label="Chọn loại nội dung tải lên">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => imageAttachmentInputRef.current?.click()}
+                >
+                  <span className="attachment-menu-icon"><FileImage size={18} /></span>
+                  <span><strong>Tải ảnh</strong><small>JPEG, PNG hoặc WebP</small></span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => documentAttachmentInputRef.current?.click()}
+                >
+                  <span className="attachment-menu-icon"><FileText size={18} /></span>
+                  <span><strong>Tải tài liệu</strong><small>PDF, DOCX, TXT hoặc Markdown</small></span>
+                </button>
+                <span className="attachment-paste-hint"><Copy size={14} />Hoặc dán ảnh trực tiếp bằng Ctrl+V</span>
+              </div>
+            )}
+            <input
+              ref={imageAttachmentInputRef}
+              className="attachment-input"
+              type="file"
+              multiple
+              accept="image/jpeg,image/png,image/webp"
+              onChange={(event) => void handleAttachmentFiles(event.target.files)}
+            />
+            <input
+              ref={documentAttachmentInputRef}
+              className="attachment-input"
+              type="file"
+              multiple
+              accept=".pdf,.docx,.txt,.md"
+              onChange={(event) => void handleAttachmentFiles(event.target.files)}
+            />
+          </div>
+          {attachmentUploading && <span className="attachment-upload-status" role="status">Đang đọc tệp…</span>}
           <span className="policy-line">
             <ShieldCheck size={14} />
             Đối chiếu căn cứ và kiểm tra hiệu lực
