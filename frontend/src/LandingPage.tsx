@@ -53,11 +53,24 @@ const trustPoints = [
   "Cho phép đánh giá và tạo lại kết quả",
 ];
 
+export function GoogleMark() {
+  return (
+    <span className="lp-google-mark" aria-hidden="true">
+      <svg viewBox="0 0 18 18" role="presentation">
+        <path fill="#4285F4" d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.258h2.909c1.702-1.567 2.683-3.878 2.683-6.614Z" />
+        <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.181l-2.909-2.258c-.806.54-1.835.859-3.047.859-2.344 0-4.328-1.585-5.037-3.714H.956v2.332A8.999 8.999 0 0 0 9 18Z" />
+        <path fill="#FBBC05" d="M3.963 10.706A5.41 5.41 0 0 1 3.681 9c0-.592.102-1.168.282-1.706V4.962H.956A9.003 9.003 0 0 0 0 9c0 1.45.347 2.824.956 4.038l3.007-2.332Z" />
+        <path fill="#EA4335" d="M9 3.58c1.322 0 2.508.454 3.441 1.345l2.582-2.582C13.463.891 11.427 0 9 0A8.999 8.999 0 0 0 .956 4.962l3.007 2.332C4.672 5.165 6.656 3.58 9 3.58Z" />
+      </svg>
+    </span>
+  );
+}
+
 export function GoogleAction({ authAvailable, loginUrl, compact = false }: LandingPageProps & { compact?: boolean }) {
   if (!authAvailable) {
     return (
       <button className={compact ? "lp-login compact" : "lp-login"} type="button" disabled>
-        <span className="lp-google-mark" aria-hidden="true">G</span>
+        <GoogleMark />
         Đăng nhập tạm gián đoạn
       </button>
     );
@@ -65,7 +78,7 @@ export function GoogleAction({ authAvailable, loginUrl, compact = false }: Landi
 
   return (
     <a className={compact ? "lp-login compact" : "lp-login"} href={loginUrl}>
-      <span className="lp-google-mark" aria-hidden="true">G</span>
+      <GoogleMark />
       {compact ? "Đăng nhập" : "Tiếp tục với Google"}
       <ArrowRight size={compact ? 15 : 17} />
     </a>

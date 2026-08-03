@@ -18,7 +18,7 @@ import {
   Upload,
 } from "lucide-react";
 
-import { GoogleAction } from "./LandingPage";
+import { GoogleAction, GoogleMark } from "./LandingPage";
 
 type GuidePageProps = {
   authAvailable: boolean;
@@ -94,7 +94,7 @@ export default function GuidePage({
                 </ul>
               </div>
               <div className="lp-guide-visual login-visual">
-                <span className="lp-google-mark">G</span><strong>Tiếp tục với Google</strong><ArrowRight size={16} />
+                <GoogleMark /><strong>Tiếp tục với Google</strong><ArrowRight size={16} />
               </div>
             </article>
 

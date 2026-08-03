@@ -226,20 +226,29 @@
   height: 25px;
   flex: 0 0 25px;
   place-items: center;
-  border-radius: 50%;
-  color: #4285f4;
+  overflow: hidden;
+  border: 1px solid rgb(32 33 36 / 10%);
+  border-radius: 8px;
   background: #fff;
-  box-shadow: inset 0 0 0 1px rgb(16 46 43 / 10%);
-  font-size: 13px;
-  font-weight: 900;
+  box-shadow: 0 2px 6px rgb(32 33 36 / 8%);
+}
+
+.lp-google-mark svg {
+  display: block;
+  width: 15px;
+  height: 15px;
 }
 
 .lp-login.compact .lp-google-mark {
   width: 22px;
   height: 22px;
   flex-basis: 22px;
-  background: #f4f6f5;
-  font-size: 11px;
+  border-radius: 7px;
+}
+
+.lp-login.compact .lp-google-mark svg {
+  width: 13px;
+  height: 13px;
 }
 
 .lp-hero {
@@ -1633,11 +1642,7 @@
   }
 
   .lp-login.compact {
-    min-width: 108px;
-  }
-
-  .lp-login.compact .lp-google-mark {
-    display: none;
+    min-width: 124px;
   }
 
   .lp-brand-mark {
