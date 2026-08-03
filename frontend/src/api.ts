@@ -249,7 +249,10 @@ export function askLegalQuestion(
         attachment.token ? [{ token: attachment.token }] : [],
       ),
     }),
-    signal: AbortSignal.timeout(45000),
+    // The backend may need a rewrite, hybrid retrieval and one grounded
+    // generation retry.  Keep the browser deadline above that bounded server
+    // pipeline so a successful response is not reported as a network outage.
+    signal: AbortSignal.timeout(120000),
   });
 }
 

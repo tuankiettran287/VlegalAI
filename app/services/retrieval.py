@@ -1443,16 +1443,24 @@ class RetrievalService:
                 )
             )
             async def retrieve_planned(limit: int) -> list[list[dict[str, Any]]]:
-                result_sets: list[list[dict[str, Any]]] = []
-                for planned_query in planned_queries:
-                    result_sets.append(
-                        await run_in_threadpool(
+                # Each planned query performs its own BM25/vector branch. They
+                # used to run serially, making a three-facet single-hop lookup
+                # take roughly three times one embedding request. Run a small,
+                # bounded fan-out instead. asyncio.gather preserves the input
+                # order, so reciprocal-rank fusion remains deterministic.
+                concurrency = max(1, min(3, len(planned_queries)))
+                semaphore = asyncio.Semaphore(concurrency)
+
+                async def retrieve_one(
+                    planned_query: str,
+                ) -> list[dict[str, Any]]:
+                    async with semaphore:
+                        rows = await run_in_threadpool(
                             store.retrieve,
                             planned_query,
                             limit,
                         )
-                    )
-                    for row in result_sets[-1]:
+                    for row in rows:
                         row["reasons"] = list(
                             dict.fromkeys(
                                 [
@@ -1461,7 +1469,16 @@ class RetrievalService:
                                 ]
                             )
                         )
-                return result_sets
+                    return rows
+
+                return list(
+                    await asyncio.gather(
+                        *(
+                            retrieve_one(planned_query)
+                            for planned_query in planned_queries
+                        )
+                    )
+                )
 
             result_sets = await retrieve_planned(per_query_limit)
             raw_rows = _merge_retrieval_rows(

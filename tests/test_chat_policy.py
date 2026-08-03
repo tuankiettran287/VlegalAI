@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -82,6 +84,36 @@ def test_single_hop_uses_fast_postgres_route() -> None:
     assert routes == ["single_hop"]
     assert store.calls
     assert all(call[1] == 8 for call in store.calls)
+
+
+def test_single_hop_runs_planned_queries_concurrently() -> None:
+    class _Store:
+        def __init__(self) -> None:
+            self.active = 0
+            self.peak_active = 0
+            self.lock = threading.Lock()
+
+        def retrieve(self, _: str, __: int) -> list[dict[str, object]]:
+            with self.lock:
+                self.active += 1
+                self.peak_active = max(self.peak_active, self.active)
+            time.sleep(0.05)
+            with self.lock:
+                self.active -= 1
+            return []
+
+    service = RetrievalService(
+        SimpleNamespace(retriever_backend="hybrid_rag", retrieval_top_k=10)
+    )
+    store = _Store()
+
+    async def get_store(_: str = "single_hop") -> _Store:
+        return store
+
+    service._get_store = get_store  # type: ignore[method-assign]
+    asyncio.run(service.retrieve("Cưỡng bức lao động là gì?"))
+
+    assert store.peak_active >= 2
 
 
 def test_complex_question_automatically_uses_graph_route() -> None:
