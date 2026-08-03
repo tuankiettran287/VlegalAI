@@ -6,7 +6,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.services.chat_effort import ChatEffort
 
 
 class AuthCapabilities(BaseModel):
@@ -173,7 +172,6 @@ class ChatRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
     regenerate_from_message_id: uuid.UUID | None = None
     attachments: list[ChatAttachmentToken] = Field(default_factory=list, max_length=3)
-    effort: ChatEffort = Field(default="medium", description="Deprecated compatibility field; new clients send instant.")
     history: list[ChatTurn] = Field(
         default_factory=list,
         max_length=12,
@@ -202,7 +200,6 @@ class ChatResponse(BaseModel):
         "injection_blocked",
         "out_of_scope",
     ] = "miss"
-    effort: ChatEffort = "instant"
 
 
 class ChatAnswerFeedbackRequest(BaseModel):

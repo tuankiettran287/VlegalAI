@@ -191,7 +191,8 @@ def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() ->
     assert db.committed
     assert [message.message_sequence for message in messages] == [5, 6]
     assert result.conversation_id == conversation_id
-    assert memory.refreshed == [conversation_id]
+    # Fast single-hop turns do not synchronously refresh the long-term summary.
+    assert memory.refreshed == []
     assert "Căn cứ được trích dẫn:" not in result.answer
 
 
@@ -358,7 +359,6 @@ def test_bad_feedback_regenerates_without_duplicating_the_user_question() -> Non
                 message="Nội dung này không được dùng thay câu hỏi gốc",
                 conversation_id=conversation_id,
                 regenerate_from_message_id=answer.id,
-                effort="instant",
             ),
             db=db,
             user=SimpleNamespace(id=user_id, preferred_name="Minh"),

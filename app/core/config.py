@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     gemini_thinking_budget: int = Field(default=0, ge=0, le=24_576)
     gemini_thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     gemini_data_policy: Literal["redact", "deny", "allow"] = "redact"
-    # Per-chat-effort generation timeouts.  These bound the Gemini call
+    # Route-aware generation timeouts. These bound the Gemini call
     # independently of the lower-level httpx socket timeout so that a stalled
     # model call raises GeminiError (→ fallback) rather than waiting the full
     # gemini_timeout_seconds (120 s by default).

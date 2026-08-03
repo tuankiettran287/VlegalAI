@@ -29,6 +29,7 @@ ARTICLE_TIMEZONE = ZoneInfo("Asia/Bangkok")
 ARTICLE_PUBLISH_HOURS = (7, 12, 15, 18, 22)
 ARTICLE_BATCH_SIZE = 10
 ARTICLE_BATCH_DELAY_SECONDS = 45.0
+LEGAL_FRESHNESS_INTERVAL_DAYS = 10
 broker_url, result_backend = postgres_celery_urls(settings.database_url)
 celery_app = Celery(
     "vlegal",
@@ -45,9 +46,9 @@ celery_app.conf.update(
     task_ignore_result=result_backend is None,
     timezone="Asia/Bangkok",
     beat_schedule={
-        "verify-legal-corpus-every-night": {
+        "verify-legal-corpus-every-10-days": {
             "task": "vlegal.verify_legal_corpus",
-            "schedule": 24 * 60 * 60,
+            "schedule": LEGAL_FRESHNESS_INTERVAL_DAYS * 24 * 60 * 60,
         },
         "publish-legal-articles-five-times-daily": {
             "task": "vlegal.publish_daily_legal_article",
@@ -61,16 +62,26 @@ celery_app.conf.update(
 
 
 async def _verify_corpus() -> dict[str, int]:
-    ai = GeminiService(settings)
+    # Chat never performs live freshness checks. This scheduled run explicitly
+    # bypasses the request-time flag and stale-cache window so every law is
+    # checked once per cycle. The indexer only runs when a replacement chain is
+    # discovered.
+    freshness_settings = settings.model_copy(
+        update={
+            "require_freshness_check": True,
+            "legal_freshness_ttl_hours": 0,
+        }
+    )
+    ai = GeminiService(freshness_settings)
     try:
-        tavily = TavilyService(settings)
-        google_search = GoogleSearchService(settings, ai)
+        tavily = TavilyService(freshness_settings)
+        google_search = GoogleSearchService(freshness_settings, ai)
         freshness = LegalFreshnessService(
-            settings,
+            freshness_settings,
             ai,
             tavily,
             google_search,
-            LegalIndexer(settings),
+            LegalIndexer(freshness_settings),
         )
         async with SessionFactory() as db:
             documents = (

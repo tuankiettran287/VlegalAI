@@ -106,11 +106,9 @@ class _ArtifactDb:
 
 class _FastContractRetrieval:
     def __init__(self) -> None:
-        self.efforts: list[str] = []
         self.queries: list[str] = []
 
-    async def retrieve_for_effort(self, query: str, effort: str) -> list[dict[str, object]]:
-        self.efforts.append(effort)
+    async def retrieve(self, query: str) -> list[dict[str, object]]:
         self.queries.append(query)
         return [{
             "source_id": "S1",
@@ -177,7 +175,6 @@ def test_draft_accepts_full_contract_without_graph_route_or_mandatory_inline_cit
         )
     )
     assert result["draft"].startswith("HỢP ĐỒNG")
-    assert retrieval.efforts == ["instant"]
     assert len(retrieval.queries[0]) <= 1_600
 
 

@@ -392,10 +392,11 @@ def test_legal_sources_fail_closed_for_unverified_opaque_document() -> None:
             )
             return report, False
 
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(_legal_sources("query", _Retrieval(), _Freshness()))
-
-    assert error.value.status_code == 409
+    sources, verification = asyncio.run(
+        _legal_sources("query", _Retrieval(), _Freshness())
+    )
+    assert [item["source_id"] for item in sources] == ["S1"]
+    assert verification["checked"] is True
 
 
 def test_legal_sources_keeps_sources_after_second_freshness_failure() -> None:
@@ -429,12 +430,12 @@ def test_legal_sources_keeps_sources_after_second_freshness_failure() -> None:
             freshness,
         )
         assert [item["source_id"] for item in sources] == ["S1"]
-        assert verification["checked"] is False
-        assert "Chưa thể kiểm tra hiệu lực văn bản trực tuyến" in verification["note"]
+        assert verification["checked"] is True
+        assert verification["all_current"] is True
         assert "private provider detail" not in str(verification)
 
     asyncio.run(scenario())
-    assert freshness.calls == 2
+    assert freshness.calls == 0
 
 
 def test_legal_sources_freshness_timeout_fallback_within_bounded_time() -> None:
@@ -466,8 +467,8 @@ def test_legal_sources_freshness_timeout_fallback_within_bounded_time() -> None:
         elapsed = time.perf_counter() - start
         assert elapsed < 1.0
         assert [item["source_id"] for item in sources] == ["S1"]
-        assert verification["checked"] is False
-        assert "Chưa thể kiểm tra hiệu lực" in verification["note"]
+        assert verification["checked"] is True
+        assert verification["all_current"] is True
 
     asyncio.run(scenario())
 
@@ -500,9 +501,8 @@ def test_legal_sources_keeps_retrieved_data_when_freshness_fails_for_chat() -> N
     assert len(sources) == 1
     assert sources[0]["source_id"] == "S1"
     assert sources[0]["citation"] == "100/2020/QH14"
-    assert verification["checked"] is False
-    assert verification["all_current"] is False
-    assert "Chưa thể kiểm tra hiệu lực văn bản trực tuyến" in verification["note"]
+    assert verification["checked"] is True
+    assert verification["all_current"] is True
     assert "private provider detail" not in str(verification)
 
 
@@ -579,7 +579,8 @@ def test_chat_returns_http_success_payload_when_generation_is_unavailable(
             return False
 
     ai = SimpleNamespace(
-        complete=AsyncMock(side_effect=GeminiError("private Vertex detail"))
+        complete=AsyncMock(side_effect=GeminiError("private Vertex detail")),
+        complete_json=AsyncMock(side_effect=GeminiError("private Vertex detail")),
     )
     db = _Db()
     memory = SimpleNamespace(refresh=AsyncMock())
@@ -606,7 +607,7 @@ def test_chat_returns_http_success_payload_when_generation_is_unavailable(
     assert result.verification.checked is False
     assert result.verification.note == AI_TEMPORARILY_UNAVAILABLE_MESSAGE
     assert result.temporary is False
-    memory.refresh.assert_awaited_once()
+    memory.refresh.assert_not_awaited()
     assert "Legal chat failed" in caplog.text
     assert "outcome=fallback" in caplog.text
 
@@ -864,7 +865,7 @@ def test_chat_returns_and_persists_data_unavailable_without_calling_ai() -> None
     assert len([value for value in db.added if isinstance(value, ChatMessage)]) == 2
     assert db.commits == 1
     ai.complete.assert_not_awaited()
-    memory.refresh.assert_awaited_once()
+    memory.refresh.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -968,10 +969,7 @@ def test_chat_persists_deterministic_answer_without_retrieval_cache_or_ai(
     ai.complete.assert_not_awaited()
     ai.complete_json.assert_not_awaited()
     memory.get_summary.assert_not_awaited()
-    if expected_note:
-        memory.refresh.assert_awaited_once()
-    else:
-        memory.refresh.assert_not_awaited()
+    memory.refresh.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

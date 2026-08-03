@@ -51,6 +51,12 @@ def test_clear_query_skips_rewrite(query: str) -> None:
     assert not should_rewrite_query(query)
 
 
+def test_leetspeak_query_requires_rewrite() -> None:
+    assert should_rewrite_query(
+        "lu0ng c0 b4n hj3n t4j cu4 c4n b0 nk4 nu0c l4 b40 nkj3u?"
+    )
+
+
 def test_clear_query_does_not_call_llm() -> None:
     ai = SimpleNamespace(complete_json=AsyncMock())
 
@@ -153,6 +159,28 @@ def test_rewrite_cannot_invent_legal_references_or_numbers() -> None:
 
     assert not result.rewritten
     assert result.retrieval_query == "cty ko trả lương thì lm j?"
+
+
+def test_leetspeak_uses_searchable_fallback_when_llm_is_unavailable() -> None:
+    ai = SimpleNamespace(
+        complete_json=AsyncMock(side_effect=GeminiError("Vertex unavailable"))
+    )
+
+    result = asyncio.run(
+        rewrite_query_if_needed(
+            ai,
+            "lu0ng c0 b4n hj3n t4j cu4 c4n b0 nk4 nu0c l4 b40 nkj3u?",
+            history=[],
+            settings=_settings(),
+        )
+    )
+
+    assert result.attempted
+    assert result.rewritten
+    assert result.reason == "deterministic_teencode_fallback:llm_unavailable"
+    assert result.retrieval_query == (
+        "luong co ban hien tai cua can bo nha nuoc la bao nhieu?"
+    )
 
 
 def test_llm_failure_falls_back_to_original_query() -> None:

@@ -68,11 +68,11 @@ import {
 import { sampleQuestions, templateFallback } from "./data";
 import ArticlesPage from "./ArticlesPage";
 import LandingPage from "./LandingPage";
+import GuidePage from "./GuidePage";
 import OnboardingPage from "./OnboardingPage";
 import type {
   Artifact,
   ChatAttachment,
-  ChatEffort,
   ChatMessage,
   Conversation,
   Risk,
@@ -96,68 +96,6 @@ const routes = [
   { path: "/bai-viet", label: "Bài viết", icon: BookOpen },
   { path: "/thu-vien", label: "Lịch sử & tài liệu", icon: Library },
 ];
-
-const chatEffortOptions: Array<{
-  value: ChatEffort;
-  label: string;
-  time: string;
-  description: string;
-}> = [
-  {
-    value: "instant",
-    label: "Instant",
-    time: "~5–15 giây",
-    description: "Hỏi nhanh, ưu tiên tốc độ; có thể ít chi tiết hơn.",
-  },
-  {
-    value: "medium",
-    label: "Medium",
-    time: "~15–35 giây",
-    description: "Cân bằng tốc độ và độ chính xác cho câu hỏi thông thường.",
-  },
-  {
-    value: "high",
-    label: "High",
-    time: "~30–90 giây",
-    description: "Phân tích sâu cho tình huống, nhiều dữ kiện hoặc nhiều vấn đề.",
-  },
-];
-
-function recommendChatEffort(question: string): ChatEffort {
-  const normalized = question.replace(/\s+/g, " ").trim();
-  if (!normalized) return "medium";
-
-  const wordCount = normalized.match(/[\p{L}\p{N}]+/gu)?.length || 0;
-  const sentenceCount = normalized.split(/[.!?;]+/).filter(Boolean).length;
-  const questionCount = normalized.match(/\?/g)?.length || 0;
-  const paragraphCount = question
-    .split(/\n+/)
-    .filter((part) => part.trim()).length;
-  const listedItemCount = question.match(
-    /(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+/gm,
-  )?.length || 0;
-
-  if (
-    normalized.length >= 240
-    || wordCount >= 45
-    || sentenceCount >= 4
-    || questionCount >= 2
-    || paragraphCount >= 3
-    || listedItemCount >= 2
-  ) {
-    return "high";
-  }
-  if (
-    normalized.length <= 80
-    && wordCount <= 14
-    && sentenceCount <= 1
-    && questionCount <= 1
-    && paragraphCount <= 1
-  ) {
-    return "instant";
-  }
-  return "medium";
-}
 
 function uid() {
   return globalThis.crypto?.randomUUID?.() || String(Date.now() + Math.random());
@@ -561,9 +499,6 @@ function ChatPage({
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
-  // Chat always uses the fast, citation-safe policy. Keep the request field
-  // only for backwards compatibility with older API deployments.
-  const [effort, setEffort] = useState<ChatEffort>("instant");
   const [loading, setLoading] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState("");
@@ -579,13 +514,6 @@ function ChatPage({
   const conversationRequestRef = useRef(0);
   const hasMessages = messages.length > 0;
   const lastMessageId = messages[messages.length - 1]?.id;
-  const recommendedEffort = useMemo(
-    () => recommendChatEffort(input),
-    [input],
-  );
-  const selectedEffort = chatEffortOptions.find(
-    (option) => option.value === effort,
-  ) || chatEffortOptions[1];
 
   const scrollToLatest = useCallback((onlyIfPinned = true) => {
     const container = chatScrollRef.current;
@@ -757,12 +685,6 @@ function ChatPage({
     setError("");
     setAttachmentMenuOpen(false);
     setLoading(true);
-    const submittedEffort: ChatEffort = "instant";
-    const pendingCopy: Record<ChatEffort, string> = {
-      instant: "Thinking · Instant…",
-      medium: "Thinking · Medium…",
-      high: "Thinking · High…",
-    };
     const userMessage: ChatMessage = {
       id: uid(),
       role: "user",
@@ -778,7 +700,7 @@ function ChatPage({
       {
         id: pendingId,
         role: "assistant",
-        content: pendingCopy[submittedEffort],
+        content: "Thinking…",
         pending: true,
       },
     ]);
@@ -788,7 +710,6 @@ function ChatPage({
       const data = await askLegalQuestion(
         trimmed,
         conversationId,
-        submittedEffort,
         { attachments: submittedAttachments },
       );
       setConversationId(data.conversation_id || null);
@@ -902,7 +823,6 @@ function ChatPage({
       const data = await askLegalQuestion(
         question.content,
         conversationId,
-        effort,
         { regenerateFromMessageId: message.id },
       );
       setMessages((current) =>
@@ -990,39 +910,6 @@ function ChatPage({
           }}
           placeholder={attachments.length ? "Bạn muốn hỏi điều gì về tệp này?" : "Hỏi VLegal về tình huống pháp lý của bạn…"}
         />
-        <div className="effort-control">
-          <div
-            className="effort-options"
-            role="group"
-            aria-label="Mức độ phân tích"
-          >
-            {chatEffortOptions.map((option) => (
-              <button
-                key={option.value}
-                className={effort === option.value ? "active" : ""}
-                type="button"
-                aria-pressed={effort === option.value}
-                title={`${option.description} Thời gian thường ${option.time}.`}
-                onClick={() => setEffort(option.value)}
-              >
-                <span>{option.label}</span>
-                <small>{option.time}</small>
-              </button>
-            ))}
-          </div>
-          <span className="effort-recommendation" aria-live="polite">
-            Gợi ý:{" "}
-            <strong>
-              {chatEffortOptions.find(
-                (option) => option.value === recommendedEffort,
-              )?.label}
-            </strong>
-          </span>
-        </div>
-        <p className="effort-description">
-          <Sparkles size={12} />
-          {selectedEffort.description}
-        </p>
         <div className="composer-toolbar">
           <div className="attachment-menu-wrap" ref={attachmentMenuRef}>
             <button
@@ -1802,6 +1689,15 @@ function App() {
   }, []);
 
   if (authLoading) return <div className="app-loading"><Scale size={34} /><span>Đang mở VLegal AI…</span></div>;
+  if (path === "/huong-dan") {
+    return (
+      <GuidePage
+        authAvailable={authAvailable}
+        loginUrl={authApi.loginUrl(path)}
+        authenticated={Boolean(user)}
+      />
+    );
+  }
   if (!user) {
     return (
       <LandingPage

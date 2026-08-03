@@ -19,7 +19,7 @@ from app.external_graphrag import (
     document_structure_counts,
 )
 from app.services.ai import untrusted_data_block
-from app.services.chat_effort import ChatEffort, chat_effort_profile
+from app.services.chat_policy import chat_profile_for_route
 from app.services.embeddings import EmbeddingConfig, embedding_config_from_settings
 
 
@@ -1175,18 +1175,12 @@ class RetrievalService:
             return None
 
     async def retrieve(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
-        return await self._retrieve(query, top_k=top_k, effort="medium")
-
-    async def retrieve_for_effort(
-        self,
-        query: str,
-        effort: ChatEffort,
-    ) -> list[dict[str, Any]]:
-        profile = chat_effort_profile(effort)
+        route = classify_retrieval_route(query)
+        profile = chat_profile_for_route(route)
         return await self._retrieve(
             query,
-            top_k=profile.retrieval_top_k,
-            effort=profile.name,
+            top_k=(top_k if top_k is not None else profile.retrieval_top_k),
+            route=route,
         )
 
     async def _retrieve(
@@ -1194,24 +1188,15 @@ class RetrievalService:
         query: str,
         *,
         top_k: int | None,
-        effort: ChatEffort,
+        route: RetrievalRoute,
     ) -> list[dict[str, Any]]:
         try:
-            profile = chat_effort_profile(effort)
-            # Instant intentionally chooses the direct PostgreSQL path even for
-            # a compound question. The UI labels this speed/coverage trade-off
-            # explicitly; medium and high retain the semantic route classifier.
-            route: RetrievalRoute = (
-                "single_hop"
-                if profile.name == "instant"
-                else classify_retrieval_route(query)
-            )
+            profile = chat_profile_for_route(route)
             store = await self._get_store(route)
             logger.info(
-                "Retrieval route=%s backend=%s effort=%s",
+                "Retrieval route=%s backend=%s",
                 route,
                 getattr(self.settings, "retriever_backend", "rag"),
-                profile.name,
             )
             base_top_k = (
                 top_k
@@ -1223,12 +1208,12 @@ class RetrievalService:
             ]
             result_limit = (
                 base_top_k
-                if profile.name == "instant"
+                if route == "single_hop"
                 else adaptive_retrieval_top_k(query, base_top_k)
             )
             per_query_limit = (
                 base_top_k
-                if profile.name == "instant"
+                if route == "single_hop"
                 else max(
                     base_top_k,
                     min(
@@ -1272,22 +1257,10 @@ class RetrievalService:
             if not _rows_have_query_evidence(query, rows):
                 return []
             answer_limit = {
-                "instant": {
-                    "single_hop": 4,
-                    "multi_hop": 4,
-                    "multi_abstract": 4,
-                },
-                "medium": {
-                    "single_hop": 6,
-                    "multi_hop": 12,
-                    "multi_abstract": 24,
-                },
-                "high": {
-                    "single_hop": 8,
-                    "multi_hop": 16,
-                    "multi_abstract": 28,
-                },
-            }[profile.name][route]
+                "single_hop": 6,
+                "multi_hop": 12,
+                "multi_abstract": 28,
+            }[route]
             serialized = [
                 serialize_source(row)
                 for row in rows[:answer_limit]

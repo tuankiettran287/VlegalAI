@@ -18,6 +18,8 @@ _MIXED_LETTER_ZERO_RE = re.compile(
     r"(?i)(?:[a-zà-ỹđ]+0[a-zà-ỹđ]*|[a-zà-ỹđ]*0[a-zà-ỹđ]+)"
 )
 _UPPERCASE_ABBREVIATION_RE = re.compile(r"(?<!\w)[A-ZĐ]{2,10}(?!\w)")
+_LEET_DIGITS = frozenset("034")
+_TEENCODE_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _STRANGE_CHARACTER_RE = re.compile(r"[@#$^*_+=|\\<>]{1,}")
 _CITATION_RE = re.compile(r"\[(?:S|W)\d+\]", re.IGNORECASE)
 _LEGAL_REFERENCE_RE = re.compile(
@@ -129,14 +131,100 @@ def should_rewrite_query(query: str) -> bool:
     if not normalized:
         return False
 
-    tokens = {token.casefold() for token in _WORD_RE.findall(normalized)}
+    raw_tokens = _WORD_RE.findall(normalized)
+    tokens = {token.casefold() for token in raw_tokens}
+    has_leetspeak = any(
+        any(character.islower() for character in token)
+        and any(character.isalpha() for character in token)
+        and any(character in _LEET_DIGITS for character in token)
+        for token in raw_tokens
+    )
     return bool(
         tokens.intersection(_REWRITE_TRIGGER_TOKENS)
         or _UPPERCASE_ABBREVIATION_RE.search(normalized)
         or _REPEATED_CHARACTER_RE.search(normalized)
         or _MIXED_LETTER_ZERO_RE.search(normalized)
+        or has_leetspeak
         or _STRANGE_CHARACTER_RE.search(normalized)
         or re.search(r"[!?.,]{3,}", normalized)
+    )
+
+
+def _deterministic_teencode_fallback(query: str) -> str | None:
+    """Decode noisy leetspeak into a safe, searchable ASCII query."""
+
+    raw_tokens = _WORD_RE.findall(query)
+    if not any(
+        any(character.islower() for character in token)
+        and any(character.isalpha() for character in token)
+        and any(character in _LEET_DIGITS for character in token)
+        for token in raw_tokens
+    ):
+        return None
+
+    shorthand = {
+        "k": "khong",
+        "ko": "khong",
+        "k0": "khong",
+        "kh": "khong",
+        "dc": "duoc",
+        "đc": "duoc",
+        "ntn": "nhu the nao",
+    }
+
+    def decode(match: re.Match[str]) -> str:
+        token = match.group(0)
+        lowered = token.casefold()
+        if lowered in shorthand:
+            return shorthand[lowered]
+        # Preserve ordinary numbers and uppercase legal references (QH14).
+        if (
+            not any(character.islower() for character in token)
+            or not any(character.isalpha() for character in token)
+            or not any(character in _LEET_DIGITS for character in token)
+        ):
+            return token
+        decoded = lowered.translate(
+            str.maketrans({"0": "o", "4": "a", "3": "e"})
+        )
+        decoded = re.sub(r"^nk", "nh", decoded)
+        return decoded.replace("j", "i")
+
+    normalized = " ".join(
+        _TEENCODE_TOKEN_RE.sub(
+            decode,
+            unicodedata.normalize("NFKC", query),
+        ).split()
+    )
+    if normalized.casefold() == " ".join(query.split()).casefold():
+        return None
+    return normalized
+
+
+def _fallback_result(
+    original: str,
+    *,
+    attempted: bool,
+    reason: str,
+    confidence: float = 0.65,
+) -> QueryRewriteResult:
+    fallback = _deterministic_teencode_fallback(original)
+    if fallback is None:
+        return QueryRewriteResult(
+            original_query=original,
+            retrieval_query=original,
+            attempted=attempted,
+            confidence=confidence,
+            reason=reason,
+        )
+    logger.info("Applied deterministic teencode fallback reason=%s", reason)
+    return QueryRewriteResult(
+        original_query=original,
+        retrieval_query=fallback,
+        attempted=attempted,
+        rewritten=True,
+        confidence=confidence,
+        reason=f"deterministic_teencode_fallback:{reason}"[:240],
     )
 
 
@@ -212,28 +300,13 @@ async def rewrite_query_if_needed(
             "Query rewrite timed out timeout_seconds=%d",
             settings.query_rewrite_timeout_seconds,
         )
-        return QueryRewriteResult(
-            original_query=original,
-            retrieval_query=original,
-            attempted=True,
-            reason="timeout",
-        )
+        return _fallback_result(original, attempted=True, reason="timeout")
     except GeminiError as exc:
         logger.warning("Query rewrite unavailable error_type=%s", type(exc).__name__)
-        return QueryRewriteResult(
-            original_query=original,
-            retrieval_query=original,
-            attempted=True,
-            reason="llm_unavailable",
-        )
+        return _fallback_result(original, attempted=True, reason="llm_unavailable")
     except Exception:
         logger.exception("Unexpected query rewrite failure")
-        return QueryRewriteResult(
-            original_query=original,
-            retrieval_query=original,
-            attempted=True,
-            reason="unexpected_error",
-        )
+        return _fallback_result(original, attempted=True, reason="unexpected_error")
 
     confidence = float(payload["confidence"])
     candidate = _safe_rewrite(original, str(payload["rewritten_query"]))
@@ -243,9 +316,8 @@ async def rewrite_query_if_needed(
         or candidate is None
         or candidate.casefold() == original.casefold()
     ):
-        return QueryRewriteResult(
-            original_query=original,
-            retrieval_query=original,
+        return _fallback_result(
+            original,
             attempted=True,
             confidence=confidence,
             reason=str(payload["reason"])[:240],

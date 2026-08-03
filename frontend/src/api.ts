@@ -3,7 +3,6 @@ import type {
   Artifact,
   ChatAttachment,
   ChatMessage,
-  ChatEffort,
   Conversation,
   Risk,
   Source,
@@ -230,13 +229,11 @@ export type ChatResponse = {
     | "greeting"
     | "unsupported_official_catalog"
     | "injection_blocked";
-  effort: ChatEffort;
 };
 
 export function askLegalQuestion(
   message: string,
   conversationId?: string | null,
-  effort: ChatEffort = "instant",
   options: {
     regenerateFromMessageId?: string | null;
     attachments?: ChatAttachment[];
@@ -251,7 +248,6 @@ export function askLegalQuestion(
       attachments: (options.attachments || []).flatMap((attachment) =>
         attachment.token ? [{ token: attachment.token }] : [],
       ),
-      effort: "instant",
     }),
     signal: AbortSignal.timeout(45000),
   });

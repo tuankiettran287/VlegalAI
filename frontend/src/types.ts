@@ -64,8 +64,6 @@ export type ChatMessage = {
   created_at?: string;
 };
 
-export type ChatEffort = "instant" | "medium" | "high";
-
 export type Conversation = {
   id: string;
   title: string;

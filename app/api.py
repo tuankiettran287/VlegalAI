@@ -83,7 +83,7 @@ from app.services.ai import (
     validate_citations,
 )
 from app.services.articles import ArticleResearchService
-from app.services.chat_effort import ChatEffort, chat_effort_profile
+from app.services.chat_policy import chat_profile_for_route
 from app.services.chat_attachments import (
     MAX_CHAT_ATTACHMENT_BYTES,
     MAX_CHAT_ATTACHMENTS,
@@ -117,9 +117,7 @@ from app.services.embeddings import (
     get_embedding_service,
 )
 from app.services.freshness import (
-    CURRENT_STATUSES,
     LAW_CODE_RE,
-    FreshnessUnavailable,
     LegalFreshnessService,
 )
 from app.services.greetings import greeting_response
@@ -131,6 +129,7 @@ from app.services.retrieval import (
     RetrievalService,
     build_answer_plan,
     build_context,
+    classify_retrieval_route,
     compact_context_sources,
     format_source_locator,
     select_context_sources,
@@ -145,11 +144,6 @@ router = APIRouter()
 router.include_router(auth_router)
 logger = logging.getLogger(__name__)
 LEGAL_DATA_UNAVAILABLE_MESSAGE = "Dữ liệu không có sẵn"
-FRESHNESS_TEMPORARILY_UNAVAILABLE_MESSAGE = (
-    "Chưa thể kiểm tra hiệu lực văn bản trực tuyến tại thời điểm này. "
-    "Câu trả lời sử dụng dữ liệu pháp luật đã được lập chỉ mục; "
-    "vui lòng đối chiếu nguồn gốc trước khi áp dụng."
-)
 AI_TEMPORARILY_UNAVAILABLE_MESSAGE = (
     "Dịch vụ AI tạm thời không khả dụng. Vui lòng thử lại sau."
 )
@@ -974,10 +968,9 @@ async def _load_approved_answer_examples(
 async def _legal_sources(
     query: str,
     retrieval: RetrievalService,
-    freshness: LegalFreshnessService,
+    _freshness: LegalFreshnessService,
     *,
     allow_empty: bool = False,
-    effort: ChatEffort = "medium",
     telemetry: dict[str, float] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     operation_started = time.perf_counter()
@@ -993,13 +986,9 @@ async def _legal_sources(
         "started",
         operation_started,
         allow_empty=allow_empty,
-        effort=effort,
     )
 
     async def retrieve_sources(retrieval_query: str) -> list[dict[str, Any]]:
-        effort_retriever = getattr(retrieval, "retrieve_for_effort", None)
-        if callable(effort_retriever):
-            return await effort_retriever(retrieval_query, effort)
         return await retrieval.retrieve(retrieval_query)
 
     def unavailable_result() -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1033,7 +1022,7 @@ async def _legal_sources(
             "legal_sources",
             "completed",
             operation_started,
-            outcome="freshness_disabled_fast_path",
+            outcome="scheduled_freshness_index",
             source_count=len(retained_sources),
         )
         return (
@@ -1043,44 +1032,11 @@ async def _legal_sources(
                 all_current=True,
                 checked_at=datetime.now(UTC),
                 items=[],
-                note="Căn cứ pháp lý từ CSDL văn bản quy phạm pháp luật đang có hiệu lực.",
+                note="Hiệu lực văn bản được đối chiếu định kỳ từ chỉ mục pháp luật.",
             ).model_dump(mode="json"),
         )
 
-    def freshness_unavailable_result(
-        rows: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        retained_sources = [dict(source) for source in rows]
-        for index, source in enumerate(retained_sources, start=1):
-            source["source_id"] = f"S{index}"
-        log_progress(
-            logger,
-            "legal_sources",
-            "completed",
-            operation_started,
-            outcome="freshness_unavailable_fallback",
-            source_count=len(retained_sources),
-        )
-        return (
-            retained_sources,
-            VerificationReport(
-                checked=False,
-                all_current=False,
-                checked_at=datetime.now(UTC),
-                items=[],
-                note=FRESHNESS_TEMPORARILY_UNAVAILABLE_MESSAGE,
-            ).model_dump(mode="json"),
-        )
-
-    configured_limit = getattr(
-        getattr(freshness, "settings", None),
-        "max_laws_verified_per_request",
-        16,
-    )
-    try:
-        source_limit = max(1, int(configured_limit))
-    except (TypeError, ValueError):
-        source_limit = 16
+    source_limit = 16
 
     def usable_sources(rows: Any) -> list[dict[str, Any]]:
         filtered = [
@@ -1139,219 +1095,10 @@ async def _legal_sources(
             ),
         )
 
-    retrieval_query = query
-    followed_replacements: set[str] = set()
-    verification: Any = None
-    freshness_settings = getattr(freshness, "settings", None)
-    require_freshness = (
-        bool(getattr(freshness_settings, "require_freshness_check", True))
-        if freshness_settings is not None
-        else True
-    )
-    if not require_freshness:
-        log_progress(
-            logger,
-            "legal_sources",
-            "completed",
-            operation_started,
-            outcome="freshness_disabled_fast_path",
-            source_count=len(sources),
-        )
-        return freshness_fast_path_result(sources)
-
-    for attempt in range(1, 4):
-        freshness_started = time.perf_counter()
-        log_progress(
-            logger,
-            "legal_sources",
-            "freshness_started",
-            operation_started,
-            attempt=attempt,
-            source_count=len(sources),
-        )
-        try:
-            freshness_settings = getattr(freshness, "settings", None)
-            freshness_timeout = float(getattr(freshness_settings, "legal_freshness_timeout_seconds", 3.5) or 3.5)
-            verification, updated = await asyncio.wait_for(
-                freshness.verify_sources(sources),
-                timeout=freshness_timeout,
-            )
-        except (FreshnessUnavailable, asyncio.TimeoutError) as exc:
-            add_timing("freshness", freshness_started)
-            logger.warning(
-                "Freshness verification unavailable or timed out error_type=%s",
-                type(exc).__name__,
-            )
-            return freshness_unavailable_result(sources)
-        except Exception as exc:
-            add_timing("freshness", freshness_started)
-            logger.warning(
-                "Freshness verification failed error_type=%s",
-                type(exc).__name__,
-            )
-            return freshness_unavailable_result(sources)
-
-        add_timing("freshness", freshness_started)
-
-        raw_items = getattr(verification, "items", [])
-        verification_items = (
-            list(raw_items or [])
-            if not callable(raw_items)
-            else []
-        )
-        log_progress(
-            logger,
-            "legal_sources",
-            "freshness_completed",
-            operation_started,
-            attempt=attempt,
-            item_count=len(verification_items),
-            phase_ms=round((time.perf_counter() - freshness_started) * 1000),
-            updated=updated,
-        )
-        verified_statuses = {
-            str(getattr(item, "code", "") or "").strip().upper():
-            str(getattr(item, "status", "") or "").strip().upper()
-            for item in verification_items
-        }
-        current_sources = [
-            source
-            for source in sources
-            if verified_statuses.get(source_law_code(source)) in CURRENT_STATUSES
-        ]
-        replacement_codes = []
-        for item in verification_items:
-            replacement_code = str(
-                getattr(item, "replacement_code", "") or ""
-            ).strip().upper()
-            item_status = str(
-                getattr(item, "status", "") or ""
-            ).strip().upper()
-            if (
-                item_status not in CURRENT_STATUSES
-                and replacement_code
-                and replacement_code not in followed_replacements
-            ):
-                replacement_codes.append(replacement_code)
-
-        if updated or replacement_codes:
-            followed_replacements.update(replacement_codes)
-            retrieval_query = " ".join([query, *sorted(followed_replacements)])
-            replacement_retrieval_started = time.perf_counter()
-            log_progress(
-                logger,
-                "legal_sources",
-                "replacement_retrieval_started",
-                operation_started,
-                replacement_count=len(followed_replacements),
-            )
-            sources = usable_sources(await retrieve_sources(retrieval_query))
-            add_timing("retrieval", replacement_retrieval_started)
-            log_progress(
-                logger,
-                "legal_sources",
-                "replacement_retrieval_completed",
-                operation_started,
-                phase_ms=round(
-                    (time.perf_counter() - replacement_retrieval_started) * 1000
-                ),
-                source_count=len(sources),
-            )
-            if not sources:
-                if allow_empty:
-                    return unavailable_result()
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Chỉ mục đã được cập nhật nhưng chưa có văn bản thay thế "
-                        "phù hợp để trả lời an toàn."
-                    ),
-                )
-            continue
-
-        if verification_items:
-            if not current_sources:
-                if allow_empty:
-                    return unavailable_result()
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Các văn bản truy hồi không được xác nhận là còn hiệu lực; "
-                        "hệ thống không thể dùng chúng để kết luận."
-                    ),
-                )
-            sources = current_sources
-        elif require_freshness:
-            return freshness_unavailable_result(sources)
-        break
-    else:
-        if allow_empty:
-            return unavailable_result()
-        raise HTTPException(
-            status_code=409,
-            detail="Chuỗi văn bản thay thế vượt quá giới hạn xử lý an toàn.",
-        )
-
-    final_raw_items = getattr(verification, "items", [])
-    final_items = (
-        list(final_raw_items or [])
-        if not callable(final_raw_items)
-        else []
-    )
-    verified_statuses = {
-        item.code.strip().upper(): item.status.strip().upper()
-        for item in final_items
-    }
-    verification_by_code = {
-        item.code.strip().upper(): item
-        for item in final_items
-    }
-    verified_sources: list[dict[str, Any]] = []
-    for source in sources:
-        code = source_law_code(source)
-        item = verification_by_code.get(code)
-        if item is None or verified_statuses.get(code) not in CURRENT_STATUSES:
-            continue
-        enriched = dict(source)
-        enriched["law_status"] = item.status
-        enriched["source_url"] = (
-            getattr(item, "source_url", None) or enriched.get("source_url")
-        )
-        checked_at = getattr(
-            item,
-            "checked_at",
-            None,
-        )
-        enriched["law_checked_at"] = (
-            checked_at.isoformat()
-            if isinstance(checked_at, datetime)
-            else checked_at
-        )
-        verified_sources.append(enriched)
-    if verified_sources:
-        sources = verified_sources
-    for index, source in enumerate(sources, start=1):
-        source["source_id"] = f"S{index}"
-    verification_payload = (
-        verification.model_dump(mode="json")
-        if hasattr(verification, "model_dump")
-        else {
-            "checked": False,
-            "all_current": False,
-            "items": [],
-        }
-    )
-    log_progress(
-        logger,
-        "legal_sources",
-        "completed",
-        operation_started,
-        outcome="verified",
-        source_count=len(sources),
-        verified_law_count=len(final_items),
-    )
-    return sources, verification_payload
-
+    # Legal status is refreshed by the scheduled corpus job. Request handling
+    # only reads the verified index, so external search latency cannot block
+    # or fail a chat response.
+    return freshness_fast_path_result(sources)
 
 def _verification_prompt(verification: dict[str, Any]) -> str:
     return untrusted_data_block("VERIFICATION_REPORT", verification)
@@ -2509,7 +2256,7 @@ async def chat(
 
     operation_started = time.perf_counter()
     context_started = time.perf_counter()
-    effort_profile = chat_effort_profile(payload.effort)
+    processing_profile = chat_profile_for_route("single_hop")
     conversation: Conversation | None = None
     conversation_id: uuid.UUID | None = None
     is_new_conversation = payload.conversation_id is None
@@ -2519,16 +2266,10 @@ async def chat(
         "started",
         operation_started,
         authenticated=True,
-        effort=effort_profile.name,
         has_conversation_id=bool(payload.conversation_id),
         history_turn_count=0,
     )
-    cache_effort = (
-        "medium"
-        if effort_profile.name == "instant"
-        else effort_profile.name
-    )
-    cache_scope = f"user:{authenticated_user_id}:effort:{cache_effort}"
+    cache_scope = f"user:{authenticated_user_id}:auto-route-v1"
     summary_context = ""
     history_turns: list[tuple[str, str]] = []
     greeting_answer = (
@@ -2715,7 +2456,7 @@ async def chat(
                 rewrite_started = time.perf_counter()
                 log_progress(logger, "chat", "query_rewrite_started", operation_started)
                 rewrite_triggered = should_rewrite_query(current_question)
-                if effort_profile.skip_query_rewrite or not rewrite_triggered:
+                if not rewrite_triggered:
                     retrieval_query = current_question
                     query_was_rewritten = False
                     rewrite_attempted = False
@@ -2740,16 +2481,24 @@ async def chat(
                     "query_rewrite_completed",
                     operation_started,
                     attempted=rewrite_attempted,
-                    effort=effort_profile.name,
                     phase_ms=round((time.perf_counter() - rewrite_started) * 1000),
                     rewritten=query_was_rewritten,
-                    skipped_for_effort=effort_profile.skip_query_rewrite,
                     trigger_detected=rewrite_triggered,
                 )
                 timings["rewrite"] = round(
                     (time.perf_counter() - rewrite_started) * 1000,
                     1,
                 )
+
+    retrieval_route = classify_retrieval_route(retrieval_query)
+    processing_profile = chat_profile_for_route(retrieval_route)
+    log_progress(
+        logger,
+        "chat",
+        "automatic_route_selected",
+        operation_started,
+        route=retrieval_route,
+    )
 
     timings["routing"] = max(
         0.0,
@@ -2858,7 +2607,7 @@ async def chat(
     if cache_eligible:
         try:
             exact_lookup = getattr(answer_cache, "lookup_exact", None)
-            if effort_profile.name == "instant" and callable(exact_lookup):
+            if retrieval_route == "single_hop" and callable(exact_lookup):
                 cache_lookup = await exact_lookup(
                     retrieval_query,
                     scope=cache_scope,
@@ -2899,7 +2648,6 @@ async def chat(
                 retrieval,
                 freshness,
                 allow_empty=True,
-                effort=effort_profile.name,
                 telemetry=timings,
             )
             fingerprint_matches = (
@@ -2962,7 +2710,6 @@ async def chat(
                 retrieval,
                 freshness,
                 allow_empty=True,
-                effort=effort_profile.name,
                 telemetry=timings,
             )
         if sources and attachment_payloads:
@@ -2994,7 +2741,7 @@ async def chat(
             generation_started = time.perf_counter()
             _gen_timeout = (
                 settings.legal_chat_fast_timeout_seconds
-                if effort_profile.name == "instant"
+                if retrieval_route == "single_hop"
                 else settings.legal_chat_generation_timeout_seconds
             )
             _repair_timeout = settings.legal_chat_citation_repair_timeout_seconds
@@ -3008,7 +2755,7 @@ async def chat(
                     "KẾ HOẠCH PHỦ CÂU HỎI:\n"
                     f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
                     f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-                    f"NGUỒN:\n{build_context(compact_context_sources(sources, retrieval_query, max_chars=(4500 if effort_profile.name == 'instant' else 9000), per_source_chars=(900 if effort_profile.name == 'instant' else 1200)))}\n\n"
+                    f"NGUỒN:\n{build_context(compact_context_sources(sources, retrieval_query, max_chars=(6000 if retrieval_route == 'single_hop' else 9000), per_source_chars=(1000 if retrieval_route == 'single_hop' else 1200)))}\n\n"
                     "TỆP ĐÍNH KÈM DO NGƯỜI DÙNG CUNG CẤP:\n"
                     f"{untrusted_data_block('USER_ATTACHMENTS', attachment_payloads) if attachment_payloads else '(Không có)'}\n\n"
                     f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', current_question)}"
@@ -3029,10 +2776,10 @@ async def chat(
                     allowed_ids=[source["source_id"] for source in sources],
                     sources=sources,
                     answer_plan=answer_plan,
-                    max_tokens=effort_profile.max_output_tokens,
-                    thinking_budget=effort_profile.thinking_budget,
-                    structured_initial=(effort_profile.name == "instant"),
-                    skip_soft_repair=(effort_profile.name == "instant"),
+                    max_tokens=processing_profile.max_output_tokens,
+                    thinking_budget=processing_profile.thinking_budget,
+                    structured_initial=(retrieval_route == "single_hop"),
+                    skip_soft_repair=(retrieval_route == "single_hop"),
                     generation_timeout=_gen_timeout,
                     citation_repair_timeout=_repair_timeout,
                     telemetry=telemetry_details,
@@ -3041,10 +2788,10 @@ async def chat(
                 generation_ms = round((time.perf_counter() - generation_started) * 1000)
                 logger.warning(
                     "Chat generation unavailable error_type=%s error=%s "
-                    "effort=%s generation_ms=%d generation_timeout=%.1f",
+                    "route=%s generation_ms=%d generation_timeout=%.1f",
                     type(exc).__name__,
                     str(exc)[:200],
-                    effort_profile.name,
+                    retrieval_route,
                     generation_ms,
                     _gen_timeout,
                 )
@@ -3064,7 +2811,7 @@ async def chat(
                     "chat",
                     "answer_generation_fallback",
                     operation_started,
-                    effort=effort_profile.name,
+                    route=retrieval_route,
                     error_type=type(exc).__name__,
                     generation_ms=generation_ms,
                     outcome="ai_unavailable",
@@ -3081,7 +2828,7 @@ async def chat(
                     source_count=len(sources),
                 )
             if (
-                effort_profile.name != "instant"
+                retrieval_route != "single_hop"
                 and cache_lookup
                 and verification.get("checked")
                 and verification.get("all_current")
@@ -3222,7 +2969,7 @@ async def chat(
     message_id = assistant_message.id
     if (
         greeting_answer is None
-        and effort_profile.name != "instant"
+        and retrieval_route != "single_hop"
     ):
         try:
             await memory.refresh(conversation_id)
@@ -3254,13 +3001,13 @@ async def chat(
 
     if outcome == "fallback":
         logger.warning(
-            "Legal chat failed request_id=%s outcome=fallback effort=%s total_ms=%.1f "
+            "Legal chat failed request_id=%s outcome=fallback route=%s total_ms=%.1f "
             "failed_stage=%s exception_type=%s timeout_configured=%.1f elapsed_actual_ms=%.1f "
             "citation_repair_called=%s auth_ms=%.1f context_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f "
             "structure_ms=%.1f retrieval_ms=%.1f freshness_ms=%.1f "
             "generation_initial_ms=%.1f citation_normalize_ms=%.1f citation_repair_ms=%.1f persistence_ms=%.1f",
             request_id,
-            effort_profile.name,
+            retrieval_route,
             total_ms,
             telemetry_details.get("failed_stage", "unknown"),
             telemetry_details.get("exception_type", "unknown"),
@@ -3282,13 +3029,13 @@ async def chat(
         )
     else:
         logger.info(
-            "Legal chat completed request_id=%s outcome=%s effort=%s total_ms=%.1f "
+            "Legal chat completed request_id=%s outcome=%s route=%s total_ms=%.1f "
             "auth_ms=%.1f context_ms=%.1f routing_ms=%.1f cache_ms=%.1f rewrite_ms=%.1f "
             "structure_ms=%.1f retrieval_ms=%.1f freshness_ms=%.1f generation_initial_ms=%.1f "
             "citation_normalize_ms=%.1f citation_repair_ms=%.1f persistence_ms=%.1f source_count=%d answer_chars=%d",
             request_id,
             outcome,
-            effort_profile.name,
+            retrieval_route,
             total_ms,
             timings["auth"],
             timings["context"],
@@ -3316,7 +3063,6 @@ async def chat(
         cache_hit=cache_hit,
         cache_similarity=cache_similarity,
         cache_mode=cache_mode,
-        effort=effort_profile.name,
     )
 
 
@@ -3385,7 +3131,6 @@ async def draft_contract(
         query,
         retrieval,
         freshness,
-        effort="instant",
     )
     log_progress(
         logger,
@@ -3471,7 +3216,6 @@ async def review_contract(
         query,
         retrieval,
         freshness,
-        effort="instant",
     )
     log_progress(
         logger,
@@ -3583,7 +3327,6 @@ async def compare_contracts(
         query,
         retrieval,
         freshness,
-        effort="instant",
     )
     log_progress(
         logger,

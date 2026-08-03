@@ -372,6 +372,16 @@ def test_worker_closes_ai_when_later_dependency_construction_fails(
     assert ai.closed
 
 
+def test_legal_freshness_runs_every_ten_days() -> None:
+    from app import worker
+
+    schedule = worker.celery_app.conf.beat_schedule[
+        "verify-legal-corpus-every-10-days"
+    ]["schedule"]
+
+    assert schedule == 10 * 24 * 60 * 60
+
+
 def test_contract_draft_releases_auth_transaction_before_external_calls() -> None:
     from app.api import draft_contract
 
