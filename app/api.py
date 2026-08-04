@@ -1205,7 +1205,16 @@ async def _legal_sources(
         return selected
 
     def source_law_code(source: dict[str, Any]) -> str:
-        label = f"{source.get('citation', '')} {source.get('title', '')}"
+        label = " ".join(
+            str(source.get(field) or "")
+            for field in (
+                "document_code",
+                "law_code",
+                "code",
+                "citation",
+                "title",
+            )
+        )
         match = LAW_CODE_RE.search(label.upper())
         if match:
             return match.group(0).upper()
@@ -1536,7 +1545,16 @@ def _validate_grounded_legal_references(
         match.group(0).upper()
         for source in sources
         for match in LAW_CODE_RE.finditer(
-            f"{source.get('citation', '')} {source.get('title', '')}"
+            " ".join(
+                str(source.get(field) or "")
+                for field in (
+                    "document_code",
+                    "law_code",
+                    "code",
+                    "citation",
+                    "title",
+                )
+            )
         )
     }
     referenced_codes = {

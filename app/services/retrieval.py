@@ -1559,6 +1559,12 @@ class RetrievalService:
 
 
 def serialize_source(source: dict[str, Any]) -> dict[str, Any]:
+    document_code = str(
+        source.get("document_code")
+        or source.get("law_code")
+        or source.get("code")
+        or ""
+    ).strip()
     return {
         "source_id": str(source.get("source_id", "")),
         "score": round(float(source.get("score", 0) or 0), 4),
@@ -1570,6 +1576,10 @@ def serialize_source(source: dict[str, Any]) -> dict[str, Any]:
         "doc_id": str(source.get("doc_id")) if source.get("doc_id") else None,
         "node_id": str(source.get("node_id")) if source.get("node_id") else None,
         "source_url": source.get("source_url"),
+        # Keep the authoritative corpus code even when a compact citation only
+        # contains an article title.  Answer validation must not reject a law
+        # that was actually present in the retrieved row.
+        "document_code": document_code or None,
         "law_status": source.get("law_status"),
         "law_version": source.get("law_version"),
         "effective_date": (
@@ -1672,7 +1682,14 @@ def format_source_locator(source: dict[str, Any]) -> str:
     code_match = re.search(
         r"\b(?:\d{1,4}/\d{4}/[A-ZĐ][A-ZĐ0-9-]{1,30}|"
         r"\d{1,4}/VBHN-[A-ZĐ0-9-]{1,30})\b",
-        document,
+        " ".join(
+            [
+                document,
+                str(source.get("document_code") or ""),
+                str(source.get("law_code") or ""),
+                str(source.get("code") or ""),
+            ]
+        ),
         re.IGNORECASE,
     )
     code = code_match.group(0).upper() if code_match else ""
@@ -1801,6 +1818,7 @@ def build_context(sources: list[dict[str, Any]], max_chars: int = 48000) -> str:
         {
             "source_id": str(source["source_id"]),
             "citation": str(source["citation"]),
+            "document_code": source.get("document_code"),
             "citation_format": (
                 f"Theo {format_source_inline_locator(source)} "
                 f"[{str(source['source_id'])}]"

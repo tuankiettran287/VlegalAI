@@ -17,6 +17,7 @@ from app.api import (
     _check_non_labor_scope,
     _normalize_scope_text,
     _complete_with_citation_repair,
+    _validate_grounded_legal_references,
     _legal_sources,
     _summary_prompt,
     _verification_prompt,
@@ -29,7 +30,11 @@ from app.schemas import ChatRequest, VerificationItem, VerificationReport
 from app.services.ai import GeminiError, validate_citations
 from app.services.articles import ArticleResearchError
 from app.services.freshness import FreshnessUnavailable, LegalFreshnessService
-from app.services.retrieval import build_context, select_context_sources
+from app.services.retrieval import (
+    build_context,
+    select_context_sources,
+    serialize_source,
+)
 from app.services.tavily import TavilyError
 
 
@@ -137,6 +142,36 @@ def test_instant_chat_generates_structured_citations_in_one_model_call() -> None
     assert answer.count("[S1]") == 2
     ai.complete_json.assert_awaited_once()
     ai.complete.assert_not_awaited()
+
+
+def test_retrieved_law_code_survives_source_serialization() -> None:
+    source = serialize_source(
+        {
+            "source_id": "S1",
+            "citation": "Dieu 98. Tien luong lam viec vao ban dem",
+            "title": "Tien luong lam viec vao ban dem",
+            "text": "Nguoi lao dong duoc tra them it nhat 30%.",
+            "law_code": "45/2019/QH14",
+        }
+    )
+
+    assert source["document_code"] == "45/2019/QH14"
+    assert "45/2019/QH14" in build_context([source])
+
+
+def test_legal_reference_validator_accepts_explicit_source_document_code() -> None:
+    _validate_grounded_legal_references(
+        "Theo Bo luat Lao dong so 45/2019/QH14, nguoi lao dong duoc tra them [S1].",
+        [
+            {
+                "source_id": "S1",
+                "citation": "Dieu 98. Tien luong lam viec vao ban dem",
+                "title": "Tien luong lam viec vao ban dem",
+                "text": "Nguoi lao dong duoc tra them it nhat 30%.",
+                "document_code": "45/2019/QH14",
+            }
+        ],
+    )
 
 
 def test_structured_generation_normalizes_malformed_inline_citation() -> None:
