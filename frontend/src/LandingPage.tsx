@@ -1,4 +1,3 @@
-import { useState } from "react";
 import {
   ArrowRight,
   CheckCircle2,
@@ -153,14 +152,8 @@ export default function LandingPage({ authAvailable, loginUrl }: LandingPageProp
             </video>
             <div className="lp-hero-video-footer">
               <span><Video size={15} /><strong id="lp-hero-video-title">Xem cách đặt câu hỏi và kiểm tra căn cứ</strong></span>
-              </footer>
+              <a href="#capabilities">Hướng dẫn đầy đủ <ArrowRight size={15} /></a>
             </div>
-          )}
-
-          <div className="lp-floating-note">
-            <CheckCircle2 size={15} />
-            <span>Không cần cài đặt - bắt đầu ngay trên trình duyệt</span>
->>>>>>> 84a7229 (feat(frontend): integrate 30s tutorial video and subtitles on landing page)
           </div>
           <span className="lp-hero-video-note"><CheckCircle2 size={15} /> Không cần cài đặt · bắt đầu ngay trên trình duyệt</span>
         </div>
