@@ -2947,6 +2947,8 @@ main:focus-visible {
 }
 
 .article-ai-card {
+  display: grid;
+  gap: 10px;
   padding: 18px;
   background:
     linear-gradient(145deg, color-mix(in srgb, var(--brand-soft) 72%, var(--surface)), var(--surface));
@@ -2977,6 +2979,67 @@ main:focus-visible {
   color: var(--muted);
   font-size: 10px;
   line-height: 1.6;
+}
+
+.article-ai-card h2,
+.article-ai-card p {
+  margin: 0;
+}
+
+.article-ai-card > label {
+  margin-top: 3px;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.article-research-input {
+  display: grid;
+  min-height: 45px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--muted);
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+
+.article-research-input:focus-within {
+  border-color: color-mix(in srgb, var(--brand) 58%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 10%, transparent);
+}
+
+.article-research-input input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+}
+
+.article-research-input > button {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.article-ai-card > small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .article-ai-card > button {

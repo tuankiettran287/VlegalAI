@@ -21,6 +21,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -246,6 +247,7 @@ function ArticleDetail({
 
 export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
   const [query, setQuery] = useState("");
+  const [researchTopic, setResearchTopic] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState(ALL_CATEGORIES);
   const [articles, setArticles] = useState<Article[]>([]);
@@ -257,6 +259,7 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
   const [detailLoading, setDetailLoading] = useState(Boolean(slug));
   const [researchLoading, setResearchLoading] = useState(false);
   const [error, setError] = useState("");
+  const researchInputRef = useRef<HTMLInputElement>(null);
 
   const loadArticles = useCallback(async (
     value = "",
@@ -354,12 +357,14 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
     void loadArticles(query);
   };
 
-  const runResearch = async () => {
-    const researchQuery = query.trim() || activeQuery;
+  const runResearch = async (topicOverride?: string) => {
+    const researchQuery = (topicOverride ?? researchTopic).trim();
     if (researchQuery.length < 2) {
       setError("Hãy nhập chủ đề bạn muốn nghiên cứu.");
+      researchInputRef.current?.focus();
       return;
     }
+    setResearchTopic(researchQuery);
     setResearchLoading(true);
     setError("");
     try {
@@ -522,7 +527,11 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
                   : "Bài viết đầu tiên sẽ xuất hiện sau lịch cập nhật gần nhất. Bạn vẫn có thể nghiên cứu ngay một chủ đề cụ thể."}
               </p>
               {(query.trim() || activeQuery) && (
-                <button type="button" onClick={() => void runResearch()} disabled={researchLoading}>
+                <button
+                  type="button"
+                  onClick={() => void runResearch(query.trim() || activeQuery)}
+                  disabled={researchLoading}
+                >
                   <Sparkles size={16} /> {researchLoading ? "Đang nghiên cứu…" : "Nghiên cứu chủ đề này"}
                 </button>
               )}
@@ -564,15 +573,49 @@ export default function ArticlesPage({ slug, onNavigate }: ArticlesPageProps) {
             <button type="submit" disabled={listLoading}>Tìm bài viết</button>
           </form>
 
-          <section className="article-ai-card">
+          <form
+            className="article-ai-card"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void runResearch();
+            }}
+          >
             <span><Sparkles size={16} /> Nghiên cứu bằng AI</span>
             <h2>Chưa có bài bạn cần?</h2>
             <p>VLegal có thể tổng hợp một chủ đề mới từ các nguồn công khai và trình bày kèm dẫn nguồn.</p>
-            <button type="button" onClick={() => void runResearch()} disabled={researchLoading}>
+            <label htmlFor="article-research-topic">Chủ đề cần nghiên cứu</label>
+            <div className="article-research-input">
+              <Sparkles size={18} aria-hidden="true" />
+              <input
+                id="article-research-topic"
+                ref={researchInputRef}
+                value={researchTopic}
+                onChange={(event) => {
+                  setResearchTopic(event.target.value);
+                  if (error === "Hãy nhập chủ đề bạn muốn nghiên cứu.") setError("");
+                }}
+                placeholder="Ví dụ: quyền đơn phương chấm dứt hợp đồng"
+                autoComplete="off"
+              />
+              {researchTopic && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResearchTopic("");
+                    researchInputRef.current?.focus();
+                  }}
+                  aria-label="Xóa chủ đề nghiên cứu"
+                >
+                  <X size={15} />
+                </button>
+              )}
+            </div>
+            <small>Nhấn Enter hoặc nút bên dưới để bắt đầu tổng hợp.</small>
+            <button type="submit" disabled={researchLoading}>
               {researchLoading ? "Đang tổng hợp…" : "Nghiên cứu chủ đề"}
               {!researchLoading && <ArrowRight size={15} />}
             </button>
-          </section>
+          </form>
 
           <section className="article-quick-actions">
             <h2>Công cụ pháp lý</h2>
