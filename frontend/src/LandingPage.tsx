@@ -86,8 +86,6 @@ export function GoogleAction({ authAvailable, loginUrl, compact = false }: Landi
 }
 
 export default function LandingPage({ authAvailable, loginUrl }: LandingPageProps) {
-  const [sceneMode, setSceneMode] = useState<"video" | "preview">("video");
-
   return (
     <main className="lp-page">
       <header className="lp-nav" aria-label="Điều hướng VLegal AI">
