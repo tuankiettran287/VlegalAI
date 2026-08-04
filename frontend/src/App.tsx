@@ -361,7 +361,7 @@ function VerificationBadge({ report }: { report?: VerificationReport | null }) {
   );
 }
 
-function SourcePanel({ sources }: { sources?: Source[] | null }) {
+export function SourcePanel({ sources }: { sources?: Source[] | null }) {
   if (!Array.isArray(sources) || !sources.length) return null;
 
   const safeSourceUrl = (value?: string | null) => {
@@ -574,7 +574,7 @@ function DocumentInput({
   );
 }
 
-function ChatPage({
+export function ChatPage({
   onNavigate,
   userName,
   initialConversationId,
