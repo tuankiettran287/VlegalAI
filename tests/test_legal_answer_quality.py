@@ -756,7 +756,12 @@ def test_multi_hop_uses_graph_store(
 
     assert rows
     assert postgres.queries == []
-    assert graph.queries == plan_retrieval_queries(query)
+    planned_queries = plan_retrieval_queries(query)
+    # Retrieval branches execute concurrently, so completion order is not a
+    # behavioral contract. Assert the complete query set without introducing
+    # an order-dependent CI failure.
+    assert len(graph.queries) == len(planned_queries)
+    assert set(graph.queries) == set(planned_queries)
     assert "retrieval_route:multi_hop" in rows[0]["reasons"]
 
 
