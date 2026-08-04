@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   ArrowRight,
   CheckCircle2,
@@ -86,6 +87,8 @@ export function GoogleAction({ authAvailable, loginUrl, compact = false }: Landi
 }
 
 export default function LandingPage({ authAvailable, loginUrl }: LandingPageProps) {
+  const [sceneMode, setSceneMode] = useState<"video" | "preview">("video");
+
   return (
     <main className="lp-page">
       <header className="lp-nav" aria-label="Điều hướng VLegal AI">
@@ -140,17 +143,24 @@ export default function LandingPage({ authAvailable, loginUrl }: LandingPageProp
               controls
               playsInline
               preload="metadata"
-              poster="/vlegal-guide-poster.jpg"
+              poster="/vlegal-social-card-v2.png"
               aria-label="Video hướng dẫn sử dụng VLegal AI"
             >
+              <source src="/vlegal-guide-30s.mp4" type="video/mp4" />
               <source src="/vlegal-guide.mp4" type="video/mp4" />
-              <track kind="captions" src="/vlegal-guide.vi.vtt" srcLang="vi" label="Tiếng Việt" default />
+              <track kind="subtitles" src="/vlegal-guide-30s.vtt" srcLang="vi" label="Tiếng Việt" default />
               Trình duyệt của bạn chưa hỗ trợ phát video.
             </video>
             <div className="lp-hero-video-footer">
               <span><Video size={15} /><strong id="lp-hero-video-title">Xem cách đặt câu hỏi và kiểm tra căn cứ</strong></span>
-              <a href="/huong-dan">Hướng dẫn đầy đủ <ArrowRight size={15} /></a>
+              </footer>
             </div>
+          )}
+
+          <div className="lp-floating-note">
+            <CheckCircle2 size={15} />
+            <span>Không cần cài đặt - bắt đầu ngay trên trình duyệt</span>
+>>>>>>> 84a7229 (feat(frontend): integrate 30s tutorial video and subtitles on landing page)
           </div>
           <span className="lp-hero-video-note"><CheckCircle2 size={15} /> Không cần cài đặt · bắt đầu ngay trên trình duyệt</span>
         </div>
