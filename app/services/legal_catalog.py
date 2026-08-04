@@ -43,7 +43,7 @@ _TYPE_PATTERNS = (
 )
 _COUNT_RE = re.compile(r"\b(?:co\s+)?bao\s+nhieu\b|\btong\s+so\b")
 _LIST_RE = re.compile(
-    r"\bliet\s+ke\b|\bdanh\s+sach\b|\bgom\s+nhung\b|\bdang\s+co\b|\bco\s+nhung\b",
+    r"\bliet\s+ke\b|\bdanh\s+sach\b|\bdanh\s+muc\b|\bgom\s+nhung\b|\bdang\s+co\b|\bco\s+nhung\b",
     re.IGNORECASE,
 )
 _SUMMARY_RE = re.compile(
@@ -54,6 +54,7 @@ _CATALOG_SCOPE_RE = re.compile(
     r"(?:(?:van\s+ban|luat|du\s+lieu)\s+)?(?:vlegal|phap\s+ly|he\s+thong)?\b"
     r"|\b(?:trong|cua)\s+(?:kho\s+|he\s+thong\s+)?vlegal\b"
     r"|\bdu\s+lieu\s+(?:cua\s+)?vlegal\b"
+    r"|\bvlegal\s+(?:dang\s+)?co\s+"
     r"|\bhe\s+thong\s+(?:co\s+)?bao\s+nhieu\s+(?:van\s+ban|luat|tai\s+lieu)\b"
     r"|\bdanh\s+muc\s+van\s+ban\b"
     r"|\bliet\s+ke\s+(?:cac\s+)?loai\s+van\s+ban\b",
@@ -167,8 +168,13 @@ def parse_catalog_request(query: str) -> CatalogRequest | None:
         if pat.search(normalized):
             return CatalogRequest(action="scope_required")
 
-    if ARTICLE_COUNT_PATTERN.search(normalized) and not (
-        re.search(r"\bco\s+bao\s+nhieu\s+(?:luat|nghi\s+dinh|thong\s+tu)\b", normalized)
+    if (
+        ARTICLE_COUNT_PATTERN.search(normalized)
+        and not re.search(
+            r"\bco\s+bao\s+nhieu\s+(?:luat|nghi\s+dinh|thong\s+tu)\b",
+            normalized,
+        )
+        and not re.search(r"\bluat\s+su\b", normalized)
     ):
         law_code, law_name_hint = _extract_law_info(normalized, query)
         return CatalogRequest(
