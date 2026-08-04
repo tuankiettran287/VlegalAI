@@ -1763,6 +1763,18 @@ summary:focus-visible {
   padding: 32px 0 72px;
 }
 
+/* The app shell intentionally locks page scrolling so chat can manage its own
+   viewport. Legal documents are regular, potentially long pages, so their main
+   content region needs to be the scroll owner instead. */
+.content.content-document-scroll {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
 .legal-document-back {
   display: inline-flex;
   align-items: center;
