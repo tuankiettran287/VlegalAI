@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,12 +15,268 @@ from app.services.contract_documents import (
     extract_contract_document,
 )
 
-
 MAX_CHAT_ATTACHMENTS = 3
 MAX_CHAT_ATTACHMENT_BYTES = 15 * 1024 * 1024
 MAX_ATTACHMENT_TEXT_CHARS = 50_000
 MAX_COMBINED_ATTACHMENT_TEXT_CHARS = 80_000
 ATTACHMENT_TOKEN_TTL_MINUTES = 30
+
+_ATTACHMENT_FACT_TERMS = {
+    "ai",
+    "bao nhieu",
+    "ben nao",
+    "chuc danh",
+    "cong viec",
+    "dia chi",
+    "dia diem",
+    "ghi gi",
+    "gia tri",
+    "ke tu ngay",
+    "luong",
+    "muc luong",
+    "ngay bat dau",
+    "ngay ket thuc",
+    "ngay ky",
+    "noi dung",
+    "quy dinh gi",
+    "so tien",
+    "ten gi",
+    "thoi han",
+    "tien luong",
+    "tom tat",
+    "trich",
+}
+_ATTACHMENT_REFERENCE_TERMS = {
+    "anh nay",
+    "file nay",
+    "hop dong",
+    "noi dung tren",
+    "tai lieu",
+    "tep dinh kem",
+    "tep nay",
+    "van ban nay",
+}
+_LEGAL_ANALYSIS_TERMS = {
+    "bat loi",
+    "boi thuong",
+    "co dung luat",
+    "co hop phap",
+    "co phu hop",
+    "danh gia phap ly",
+    "dung phap luat",
+    "hieu luc phap ly",
+    "khoi kien",
+    "phan tich phap ly",
+    "ra soat rui ro",
+    "review",
+    "theo phap luat",
+    "theo quy dinh phap luat",
+    "trai luat",
+    "vi pham phap luat",
+}
+_ATTACHMENT_QUERY_STOPWORDS = {
+    "anh",
+    "ban",
+    "cua",
+    "cho",
+    "co",
+    "duoc",
+    "gi",
+    "hay",
+    "hop",
+    "la",
+    "mot",
+    "nay",
+    "noi",
+    "toi",
+    "trong",
+    "ve",
+    "voi",
+}
+_ATTACHMENT_TERM_EXPANSIONS = {
+    "luong": {"luong", "muc luong", "tien luong", "thu nhap", "vnd"},
+    "tien": {"so tien", "muc luong", "tien luong", "vnd"},
+    "thoi han": {"thoi han", "ke tu ngay", "den ngay", "thang", "nam"},
+    "ngay": {"ngay ky", "ngay bat dau", "ngay ket thuc", "ke tu ngay"},
+    "cong viec": {"cong viec", "chuc danh", "vi tri", "nhiem vu"},
+    "dia diem": {"dia diem", "noi lam viec", "dia chi"},
+}
+
+
+def _normalize_attachment_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFD", str(value or ""))
+    without_marks = "".join(
+        "d" if character in {"Đ", "đ"} else character
+        for character in normalized
+        if unicodedata.category(character) != "Mn"
+    )
+    return (
+        re.sub(r"\s+", " ", re.sub(r"[^0-9a-zA-Z]+", " ", without_marks))
+        .strip()
+        .casefold()
+    )
+
+
+def is_direct_attachment_question(question: str) -> bool:
+    """Return true when the user asks for facts stated inside an uploaded file.
+
+    Requests to assess legality or risk stay on the hybrid document + law path.
+    """
+
+    normalized = _normalize_attachment_text(question)
+    if not normalized or any(term in normalized for term in _LEGAL_ANALYSIS_TERMS):
+        return False
+    references_attachment = any(
+        term in normalized for term in _ATTACHMENT_REFERENCE_TERMS
+    )
+    asks_for_fact = any(term in normalized for term in _ATTACHMENT_FACT_TERMS)
+    return asks_for_fact or references_attachment
+
+
+def _attachment_query_terms(question: str) -> set[str]:
+    normalized = _normalize_attachment_text(question)
+    terms = {
+        token
+        for token in re.findall(r"[0-9a-z]+", normalized)
+        if len(token) >= 2 and token not in _ATTACHMENT_QUERY_STOPWORDS
+    }
+    phrases = {
+        phrase
+        for phrase in (*_ATTACHMENT_FACT_TERMS, *_ATTACHMENT_REFERENCE_TERMS)
+        if phrase in normalized
+    }
+    terms.update(phrases)
+    for trigger, expansions in _ATTACHMENT_TERM_EXPANSIONS.items():
+        if trigger in normalized:
+            terms.update(expansions)
+    return terms
+
+
+def _attachment_segments(text: str, *, segment_chars: int = 900) -> list[str]:
+    paragraphs = [
+        line.strip()
+        for line in text.replace("\x00", "").replace("\r\n", "\n").splitlines()
+        if line.strip()
+    ]
+    segments: list[str] = []
+    for paragraph in paragraphs:
+        if len(paragraph) <= segment_chars:
+            segments.append(paragraph)
+            continue
+        sentences = re.split(r"(?<=[.!?;:])\s+", paragraph)
+        buffer = ""
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if buffer and len(buffer) + 1 + len(sentence) > segment_chars:
+                segments.append(buffer)
+                buffer = ""
+            if len(sentence) > segment_chars:
+                if buffer:
+                    segments.append(buffer)
+                    buffer = ""
+                segments.extend(
+                    sentence[start : start + segment_chars]
+                    for start in range(0, len(sentence), segment_chars)
+                )
+            else:
+                buffer = f"{buffer} {sentence}".strip()
+        if buffer:
+            segments.append(buffer)
+    return segments
+
+
+def select_relevant_attachment_context(
+    payloads: list[dict[str, Any]],
+    question: str,
+    *,
+    max_chars: int = 12_000,
+    per_file_chars: int = 7_000,
+) -> list[dict[str, Any]]:
+    """Select query-relevant excerpts while preserving file metadata.
+
+    Matching segments include adjacent lines so labels, values and units remain
+    together even when the source DOCX/PDF extractor emitted them separately.
+    """
+
+    query_terms = _attachment_query_terms(question)
+    normalized_question = _normalize_attachment_text(question)
+    summary_request = any(
+        term in normalized_question
+        for term in {"tom tat", "noi dung chinh", "tong quan", "doc tai lieu"}
+    )
+    selected_payloads: list[dict[str, Any]] = []
+    remaining_total = max(0, max_chars)
+
+    for payload in payloads:
+        if remaining_total <= 0:
+            break
+        text = str(payload.get("text") or "").strip()
+        segments = _attachment_segments(text)
+        if not segments:
+            continue
+        file_budget = min(per_file_chars, remaining_total)
+
+        if summary_request:
+            candidate_indexes = list(range(len(segments)))
+        else:
+            scored: list[tuple[float, int]] = []
+            for index, segment in enumerate(segments):
+                normalized_segment = _normalize_attachment_text(segment)
+                score = 0.0
+                for term in query_terms:
+                    normalized_term = _normalize_attachment_text(term)
+                    if not normalized_term:
+                        continue
+                    if " " in normalized_term:
+                        matched = normalized_term in normalized_segment
+                    else:
+                        matched = re.search(
+                            rf"\b{re.escape(normalized_term)}\b",
+                            normalized_segment,
+                        ) is not None
+                    if not matched:
+                        continue
+                    score += 4.0 if " " in normalized_term else 1.5
+                if re.search(r"\b\d[\d.,/\-]*\b", normalized_segment):
+                    score += 0.5
+                if score:
+                    scored.append((score, index))
+            scored.sort(key=lambda item: (-item[0], item[1]))
+            anchors = [index for _, index in scored[:8]]
+            candidate_indexes = sorted(
+                {
+                    neighbor
+                    for index in anchors
+                    for neighbor in range(
+                        max(0, index - 2),
+                        min(len(segments), index + 3),
+                    )
+                }
+            )
+            if not candidate_indexes:
+                candidate_indexes = list(range(min(6, len(segments))))
+
+        excerpts: list[str] = []
+        used = 0
+        for index in candidate_indexes:
+            segment = segments[index]
+            addition = len(segment) + (1 if excerpts else 0)
+            if used + addition > file_budget:
+                remaining_file = file_budget - used
+                if remaining_file >= 120:
+                    excerpts.append(segment[:remaining_file].rstrip())
+                break
+            excerpts.append(segment)
+            used += addition
+        excerpt = "\n".join(excerpts).strip()
+        if not excerpt:
+            continue
+        selected_payloads.append({**payload, "text": excerpt})
+        remaining_total -= len(excerpt)
+
+    return selected_payloads
 
 IMAGE_MIME_BY_EXTENSION = {
     ".jpg": "image/jpeg",

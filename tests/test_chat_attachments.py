@@ -18,6 +18,8 @@ from app.services.chat_attachments import (
     create_attachment_token,
     decode_attachment_token,
     extract_document_attachment,
+    is_direct_attachment_question,
+    select_relevant_attachment_context,
     serialize_attachment_context,
     validate_chat_attachment,
 )
@@ -105,6 +107,47 @@ def test_stored_attachment_context_excludes_token_identity_fields() -> None:
     assert "expires_at" not in payload
     assert payload["filename"] == "anh.jpg"
     assert "22 giờ" in payload["text"]
+
+
+def test_attachment_context_selects_salary_beyond_document_prefix() -> None:
+    filler = "\n".join(
+        f"Điều khoản chung số {index}: nội dung quản lý lao động."
+        for index in range(180)
+    )
+    contract = (
+        f"{filler}\n"
+        "Điều 3. Quyền lợi và nghĩa vụ của người lao động\n"
+        "1.2. Tiền lương tháng, các khoản bổ sung, thu nhập khác, bao gồm:\n"
+        "1.2.1. Mức lương: 5.050.000 VNĐ\n"
+        "Mức lương này là căn cứ đóng bảo hiểm xã hội."
+    )
+    payloads = [
+        {
+            "filename": "hop-dong-lao-dong.docx",
+            "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "kind": "document",
+            "size_bytes": 12_000,
+            "page_count": 5,
+            "truncated": False,
+            "text": contract,
+        }
+    ]
+
+    selected = select_relevant_attachment_context(
+        payloads,
+        "Hợp đồng nói về lương của tôi là bao nhiêu?",
+    )
+
+    assert is_direct_attachment_question(
+        "Hợp đồng nói về lương của tôi là bao nhiêu?"
+    )
+    assert not is_direct_attachment_question(
+        "Điều khoản lương trong hợp đồng này có đúng pháp luật không?"
+    )
+    assert len(contract) > 6_000
+    assert "5.050.000 VNĐ" in selected[0]["text"]
+    assert "Tiền lương tháng" in selected[0]["text"]
+    assert len(selected[0]["text"]) < len(contract)
 
 
 def test_upload_endpoint_extracts_document_and_ocr_image() -> None:

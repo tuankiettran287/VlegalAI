@@ -957,6 +957,97 @@ main:focus-visible {
   line-height: 1.72;
 }
 
+.result-actions,
+.artifact-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.result-download-button {
+  min-height: 42px;
+  padding-inline: 15px;
+  color: var(--brand-deep);
+  white-space: nowrap;
+}
+
+.contract-document-preview {
+  width: min(100%, 760px);
+  min-height: 460px;
+  margin: 18px auto 0;
+  padding: clamp(30px, 5vw, 58px) clamp(24px, 6vw, 66px);
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 14px 38px rgba(15, 49, 45, 0.08);
+  color: #111;
+  font-family: "Times New Roman", Times, serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.contract-document-preview p {
+  margin: 0 0 8px;
+  text-align: justify;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.contract-document-preview .national-heading,
+.contract-document-preview .national-motto,
+.contract-document-preview .contract-title {
+  text-align: center;
+}
+
+.contract-document-preview .national-heading {
+  margin-bottom: 2px;
+  font-weight: 700;
+}
+
+.contract-document-preview .national-motto {
+  margin-bottom: 20px;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.contract-document-preview .contract-title {
+  margin: 20px 0;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.contract-document-preview .contract-article {
+  margin-top: 15px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.contract-document-preview .contract-bullet {
+  padding-left: 20px;
+}
+
+.contract-document-spacer {
+  height: 10px;
+}
+
+.contract-document-signatures {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 28px;
+  margin-top: 8px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.artifact-document > .contract-document-preview {
+  margin-top: clamp(24px, 5vw, 54px);
+  margin-bottom: clamp(24px, 5vw, 54px);
+}
+
 .contract-mode-toggle {
   gap: 4px;
   padding: 4px;
@@ -3997,6 +4088,27 @@ main:focus-visible {
 }
 
 @media (max-width: 720px) {
+  .result-header,
+  .artifact-document > header {
+    align-items: stretch;
+  }
+
+  .result-actions,
+  .artifact-header-actions {
+    justify-content: flex-start;
+  }
+
+  .contract-document-preview {
+    min-height: 360px;
+    padding: 26px 18px;
+    font-size: 14px;
+  }
+
+  .contract-document-signatures {
+    gap: 12px;
+    font-size: 12px;
+  }
+
   .composer-home .input-wrap,
   .composer:not(.composer-home) .input-wrap {
     padding: 11px 11px 9px;

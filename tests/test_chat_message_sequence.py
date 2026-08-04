@@ -160,6 +160,32 @@ class _Cache:
         return False
 
 
+class _AttachmentFactRetrieval:
+    async def retrieve(self, _: str) -> list[dict[str, object]]:
+        raise AssertionError("Direct attachment facts must not run legal retrieval")
+
+
+class _AttachmentFactAI:
+    def __init__(self, db: _ChatSession) -> None:
+        self.db = db
+        self.prompts: list[str] = []
+
+    async def complete(self, *_: object, **__: object) -> str:
+        raise AssertionError("Attachment fact answers should use structured generation")
+
+    async def complete_json(self, *args: object, **__: object) -> dict:
+        assert self.db.rolled_back
+        self.prompts.append(str(args[1]))
+        return {
+            "statements": [
+                {
+                    "text": "Mức lương ghi trong hợp đồng là 5.050.000 VNĐ mỗi tháng.",
+                    "citations": ["S1"],
+                }
+            ]
+        }
+
+
 def test_authenticated_chat_reopens_write_transaction_and_appends_sequences() -> None:
     settings = Settings(_env_file=None, session_secret="chat-sequence-test")
     user_id = uuid.uuid4()
@@ -247,6 +273,64 @@ def test_chat_uses_and_persists_encrypted_attachment_context() -> None:
     )
     assert "22 giờ" in stored[0]["text"]
     assert any("USER_ATTACHMENTS" in prompt and "22 giờ" in prompt for prompt in ai.prompts)
+
+
+def test_chat_answers_direct_fact_from_relevant_attachment_excerpt() -> None:
+    settings = Settings(_env_file=None, session_secret="chat-attachment-fact-test")
+    user_id = uuid.uuid4()
+    conversation_id = uuid.uuid4()
+    conversation = Conversation(id=conversation_id, user_id=user_id)
+    db = _ChatSession(conversation)
+    ai = _AttachmentFactAI(db)
+    filler = "\n".join(
+        f"Điều khoản chung số {index}: nội dung quản lý lao động."
+        for index in range(180)
+    )
+    token = create_attachment_token(
+        ExtractedChatAttachment(
+            filename="hop-dong-lao-dong.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            kind="document",
+            size_bytes=18_000,
+            text=(
+                f"{filler}\n"
+                "Điều 3. Quyền lợi và nghĩa vụ của người lao động\n"
+                "1.2. Tiền lương tháng, các khoản bổ sung, thu nhập khác\n"
+                "1.2.1. Mức lương: 5.050.000 VNĐ\n"
+                "Mức lương này là căn cứ đóng bảo hiểm xã hội."
+            ),
+            truncated=False,
+        ),
+        str(user_id),
+        settings,
+    )
+
+    result = asyncio.run(
+        chat(
+            ChatRequest(
+                message="Hợp đồng nói về lương của tôi là bao nhiêu?",
+                conversation_id=conversation_id,
+                attachments=[{"token": token}],
+            ),
+            db=db,
+            user=SimpleNamespace(id=user_id, preferred_name="Minh"),
+            settings=settings,
+            retrieval=_AttachmentFactRetrieval(),  # type: ignore[arg-type]
+            freshness=_Freshness(db),
+            ai=ai,  # type: ignore[arg-type]
+            memory=_Memory(db),
+            answer_cache=_Cache(),
+        )
+    )
+
+    assert "5.050.000 VNĐ" in result.answer
+    assert result.sources[0].chunk_type == "user_attachment"
+    assert "5.050.000 VNĐ" in result.sources[0].text
+    assert result.verification.note == "user_attachment_factual"
+    assert any(
+        "USER_ATTACHMENTS" in prompt and "5.050.000 VNĐ" in prompt
+        for prompt in ai.prompts
+    )
 
 
 class _RegenerationSession:

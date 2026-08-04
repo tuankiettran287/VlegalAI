@@ -70,6 +70,23 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+async function requestBlob(url: string): Promise<Blob> {
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(url), { credentials: "include" });
+  } catch {
+    throw new ApiError("Không thể tải tài liệu. Vui lòng thử lại sau.", 0, "UNAVAILABLE");
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const detail = isRecord(data) && typeof data.detail === "string"
+      ? data.detail
+      : "Không thể tải tài liệu. Vui lòng thử lại sau.";
+    throw new ApiError(detail, response.status);
+  }
+  return response.blob();
+}
+
 function post<T>(url: string, body: unknown) {
   return requestJson<T>(url, { method: "POST", body: JSON.stringify(body) });
 }
@@ -292,6 +309,7 @@ export type DraftResponse = {
   checklist: string[];
   sources: Source[];
   verification: VerificationReport;
+  download_url: string;
 };
 
 export function draftContract(payload: {
@@ -301,6 +319,18 @@ export function draftContract(payload: {
   source_text?: string;
 }) {
   return post<DraftResponse>("/api/contracts/draft", payload);
+}
+
+export async function downloadContractDocx(artifactId: string, title: string) {
+  const blob = await requestBlob(`/api/contracts/draft/${encodeURIComponent(artifactId)}/docx`);
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = `${title.replace(/[\\/:*?"<>|]+/g, "-").trim() || "hop-dong-lao-dong"}.docx`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
 export type ExtractedContractDocument = {

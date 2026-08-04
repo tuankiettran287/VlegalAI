@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import logging
 import re
 import time
@@ -10,6 +11,7 @@ import uuid
 from binascii import Error as BinasciiError
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 from cryptography.exceptions import InvalidTag
 from fastapi import (
@@ -24,6 +26,7 @@ from fastapi import (
     status,
 )
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy import text as sql_text
@@ -55,17 +58,17 @@ from app.schemas import (
     ArtifactCreate,
     ArtifactOut,
     ArtifactUpdate,
-    ChatRequest,
-    ChatResponse,
     ChatAnswerFeedbackOut,
     ChatAnswerFeedbackRequest,
+    ChatAttachment,
+    ChatAttachmentUploadOut,
+    ChatRequest,
+    ChatResponse,
     CompareContractRequest,
     ConversationCreate,
     ConversationDetailOut,
     ConversationOut,
     ConversationUpdate,
-    ChatAttachment,
-    ChatAttachmentUploadOut,
     DraftContractRequest,
     FeedbackRequest,
     LegalDocumentDetailOut,
@@ -77,6 +80,7 @@ from app.schemas import (
     VerificationReport,
 )
 from app.services.ai import (
+    ATTACHMENT_QA_SYSTEM_PROMPT,
     CONTRACT_SYSTEM_PROMPT,
     LEGAL_SYSTEM_PROMPT,
     GeminiError,
@@ -85,7 +89,6 @@ from app.services.ai import (
     validate_citations,
 )
 from app.services.articles import ArticleResearchService
-from app.services.chat_policy import chat_profile_for_route
 from app.services.chat_attachments import (
     MAX_CHAT_ATTACHMENT_BYTES,
     MAX_CHAT_ATTACHMENTS,
@@ -98,10 +101,12 @@ from app.services.chat_attachments import (
     deserialize_attachment_context,
     extract_document_attachment,
     extracted_ocr_attachment,
+    is_direct_attachment_question,
+    select_relevant_attachment_context,
     serialize_attachment_context,
     validate_chat_attachment,
 )
-from app.services.legal_catalog import LegalCatalogService, parse_catalog_request
+from app.services.chat_policy import chat_profile_for_route
 from app.services.contract_analysis import (
     build_contract_diff,
     contract_retrieval_query,
@@ -112,18 +117,24 @@ from app.services.contract_documents import (
     ContractDocumentError,
     extract_contract_document,
 )
+from app.services.contract_docx import (
+    build_contract_docx,
+    contract_download_filename,
+    normalize_contract_plain_text,
+)
 from app.services.conversation_memory import ConversationMemoryService
 from app.services.embeddings import (
     VertexAIEmbeddingService,
     embedding_config_from_settings,
     get_embedding_service,
 )
+from app.services.evidence_gate import assess_source_relevance
 from app.services.freshness import (
     LAW_CODE_RE,
     LegalFreshnessService,
 )
-from app.services.evidence_gate import assess_source_relevance
 from app.services.greetings import greeting_response
+from app.services.legal_catalog import LegalCatalogService, parse_catalog_request
 from app.services.query_rewrite import (
     rewrite_query_if_needed,
     should_rewrite_query,
@@ -277,7 +288,10 @@ _NON_LABOR_SCOPE_PHRASES = (
 
 
 def _normalize_scope_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", str(value or "").casefold())
+    normalized = unicodedata.normalize(
+        "NFKD",
+        str(value or "").casefold().replace("đ", "d"),
+    )
     without_marks = "".join(
         character
         for character in normalized
@@ -311,14 +325,81 @@ def _check_non_labor_scope(message: str) -> str | None:
 CONTRACT_TEMPLATES = [
     {"id": "employment", "name": "Hợp đồng lao động", "category": "Lao động"},
     {"id": "probation", "name": "Hợp đồng thử việc", "category": "Lao động"},
-
-    {"id": "nda", "name": "Thỏa thuận bảo mật", "category": "Doanh nghiệp"},
-    {"id": "service", "name": "Hợp đồng dịch vụ", "category": "Dịch vụ"},
-    {"id": "sale", "name": "Hợp đồng mua bán hàng hóa", "category": "Thương mại"},
-    {"id": "lease", "name": "Hợp đồng thuê", "category": "Dân sự"},
-    {"id": "loan", "name": "Hợp đồng vay", "category": "Dân sự"},
-    {"id": "agency", "name": "Hợp đồng đại lý", "category": "Thương mại"},
+    {
+        "id": "vocational_training",
+        "name": "Hợp đồng đào tạo nghề",
+        "category": "Lao động",
+    },
+    {
+        "id": "employment_appendix",
+        "name": "Phụ lục hợp đồng lao động",
+        "category": "Lao động",
+    },
+    {
+        "id": "employment_confidentiality",
+        "name": "Thỏa thuận bảo mật trong quan hệ lao động",
+        "category": "Lao động",
+    },
 ]
+
+_LABOR_CONTRACT_TEMPLATE_BY_ID = {item["id"]: item for item in CONTRACT_TEMPLATES}
+_LABOR_CONTRACT_TEMPLATE_BY_NAME = {
+    _normalize_scope_text(item["name"]): item for item in CONTRACT_TEMPLATES
+}
+_LABOR_CONTRACT_SIGNALS = (
+    "hop dong lao dong",
+    "nguoi lao dong",
+    "nguoi su dung lao dong",
+    "thu viec",
+    "dao tao nghe",
+    "vi tri cong viec",
+    "noi lam viec",
+    "tien luong",
+    "bao hiem xa hoi",
+    "thoi gio lam viec",
+)
+
+
+def _resolve_labor_contract_template(payload: DraftContractRequest) -> dict[str, str]:
+    if payload.template_id:
+        template = _LABOR_CONTRACT_TEMPLATE_BY_ID.get(payload.template_id.strip())
+        if template:
+            return template
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Chỉ hỗ trợ soạn các loại hợp đồng và thỏa thuận "
+                "liên quan trực tiếp đến lao động."
+            ),
+        )
+    if payload.template_name:
+        template = _LABOR_CONTRACT_TEMPLATE_BY_NAME.get(
+            _normalize_scope_text(payload.template_name)
+        )
+        if template:
+            return template
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Chỉ hỗ trợ soạn các loại hợp đồng và thỏa thuận "
+                "liên quan trực tiếp đến lao động."
+            ),
+        )
+    return CONTRACT_TEMPLATES[0]
+
+
+def _ensure_labor_contract_source(source_text: str) -> None:
+    if not source_text or not looks_like_contract(source_text):
+        return
+    normalized = _normalize_scope_text(source_text[:20_000])
+    if not any(signal in normalized for signal in _LABOR_CONTRACT_SIGNALS):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Tài liệu tải lên không có dấu hiệu là hợp đồng "
+                "liên quan đến lao động."
+            ),
+        )
 
 
 @router.post("/contracts/extract")
@@ -627,11 +708,14 @@ def _hash_content(value: str) -> str:
 
 
 def _artifact_out(artifact: Artifact, settings: Settings) -> ArtifactOut:
+    content = decrypt_text(artifact.content_ciphertext, settings)
+    if artifact.kind == "CONTRACT_DRAFT":
+        content = normalize_contract_plain_text(content, artifact.title)
     return ArtifactOut(
         id=artifact.id,
         kind=artifact.kind,
         title=artifact.title,
-        content=decrypt_text(artifact.content_ciphertext, settings),
+        content=content,
         metadata=artifact.metadata_json,
         status=artifact.status,
         created_at=artifact.created_at,
@@ -757,10 +841,7 @@ def _attachment_citation_sources(
             "chunk_type": "user_attachment",
             "citation": f"Tệp người dùng cung cấp: {payload['filename']}",
             "title": payload["filename"],
-            "text": (
-                "Tệp do người dùng cung cấp cho lượt hỏi hiện tại. "
-                "Đây là chứng cứ đầu vào, không phải văn bản pháp luật."
-            ),
+            "text": str(payload.get("text") or "").strip(),
             "reasons": ["user_attachment"],
             "doc_id": None,
             "source_url": None,
@@ -2829,6 +2910,14 @@ async def chat(
         summary_available=bool(summary_context),
     )
     timings["context"] = round((time.perf_counter() - context_started) * 1000, 1)
+    attachment_evidence_payloads = select_relevant_attachment_context(
+        attachment_payloads,
+        current_question,
+    )
+    attachment_fact_mode = bool(
+        attachment_evidence_payloads
+        and is_direct_attachment_question(current_question)
+    )
     routing_started = time.perf_counter()
     catalog_answer: str | None = None
     guard_answer: str | None = None
@@ -2870,7 +2959,7 @@ async def chat(
         )
     else:
         # --- Prompt injection and Out-of-Scope guards (Python layer) ---
-        injection_block = _check_prompt_injection(payload.message)
+        injection_block = _check_prompt_injection(current_question)
         if injection_block is not None:
             guard_answer = injection_block
             guard_cache_mode = "injection_blocked"
@@ -2885,7 +2974,7 @@ async def chat(
             answer_plan = {}
             query_was_rewritten = False
         else:
-            scope_block = _check_non_labor_scope(payload.message)
+            scope_block = _check_non_labor_scope(current_question)
             if scope_block is not None:
                 guard_answer = scope_block
                 guard_cache_mode = "out_of_scope"
@@ -2899,6 +2988,17 @@ async def chat(
                 retrieval_query = current_question
                 answer_plan = {}
                 query_was_rewritten = False
+            elif attachment_fact_mode:
+                retrieval_query = current_question
+                answer_plan = {}
+                query_was_rewritten = False
+                log_progress(
+                    logger,
+                    "chat",
+                    "attachment_fact_route_selected",
+                    operation_started,
+                    attachment_count=len(attachment_evidence_payloads),
+                )
             else:
                 rewrite_started = time.perf_counter()
                 log_progress(logger, "chat", "query_rewrite_started", operation_started)
@@ -2919,7 +3019,7 @@ async def chat(
                     rewrite_attempted = query_rewrite.attempted
                 retrieval_query = _retrieval_query_with_attachments(
                     retrieval_query,
-                    attachment_payloads,
+                    attachment_evidence_payloads,
                 )
                 answer_plan = build_answer_plan(retrieval_query)
                 log_progress(
@@ -3147,42 +3247,55 @@ async def chat(
                 logger.exception("Cannot invalidate semantic answer cache entry %s", cached.id)
 
     if not answer_ready:
-        data_unavailable = (
-            not sources
-            and verification.get("note") == LEGAL_DATA_UNAVAILABLE_MESSAGE
-        )
-        if not sources and not data_unavailable:
-            sources, verification = await _legal_sources(
-                retrieval_query,
-                retrieval,
-                freshness,
-                allow_empty=True,
-                telemetry=timings,
+        if attachment_fact_mode:
+            sources = _attachment_citation_sources(
+                attachment_evidence_payloads,
+                start_index=1,
             )
-        if (
-            sources
-            and retrieval_route == "single_hop"
-            and not attachment_payloads
-        ):
-            sources, verification, gated_query = await _evidence_gated_sources(
-                original_question=current_question,
-                retrieval_query=retrieval_query,
-                sources=sources,
-                verification=verification,
-                ai=ai,
-                retrieval=retrieval,
-                freshness=freshness,
-                settings=settings,
-                telemetry=timings,
+            verification = VerificationReport(
+                checked=False,
+                all_current=False,
+                checked_at=datetime.now(UTC),
+                items=[],
+                note="user_attachment_factual",
+            ).model_dump(mode="json")
+        else:
+            data_unavailable = (
+                not sources
+                and verification.get("note") == LEGAL_DATA_UNAVAILABLE_MESSAGE
             )
-            if gated_query != retrieval_query:
-                retrieval_query = gated_query
-                answer_plan = build_answer_plan(retrieval_query)
-        if sources and attachment_payloads:
+            if not sources and not data_unavailable:
+                sources, verification = await _legal_sources(
+                    retrieval_query,
+                    retrieval,
+                    freshness,
+                    allow_empty=True,
+                    telemetry=timings,
+                )
+            if (
+                sources
+                and retrieval_route == "single_hop"
+                and not attachment_payloads
+            ):
+                sources, verification, gated_query = await _evidence_gated_sources(
+                    original_question=current_question,
+                    retrieval_query=retrieval_query,
+                    sources=sources,
+                    verification=verification,
+                    ai=ai,
+                    retrieval=retrieval,
+                    freshness=freshness,
+                    settings=settings,
+                    telemetry=timings,
+                )
+                if gated_query != retrieval_query:
+                    retrieval_query = gated_query
+                    answer_plan = build_answer_plan(retrieval_query)
+        if attachment_evidence_payloads and not attachment_fact_mode:
             sources = [
                 *sources,
                 *_attachment_citation_sources(
-                    attachment_payloads,
+                    attachment_evidence_payloads,
                     start_index=len(sources) + 1,
                 ),
             ]
@@ -3211,19 +3324,38 @@ async def chat(
                 else settings.legal_chat_generation_timeout_seconds
             )
             _repair_timeout = settings.legal_chat_citation_repair_timeout_seconds
+            generation_system = (
+                ATTACHMENT_QA_SYSTEM_PROMPT
+                if attachment_fact_mode
+                else LEGAL_SYSTEM_PROMPT
+            )
+            context_sources = compact_context_sources(
+                sources,
+                retrieval_query,
+                max_chars=(
+                    12_000
+                    if attachment_fact_mode
+                    else (6_000 if retrieval_route == "single_hop" else 9_000)
+                ),
+                per_source_chars=(
+                    7_000
+                    if attachment_fact_mode
+                    else (1_000 if retrieval_route == "single_hop" else 1_200)
+                ),
+            )
             try:
                 answer = await _complete_with_citation_repair(
                     ai,
-                    LEGAL_SYSTEM_PROMPT,
+                    generation_system,
                     "BỘ NHỚ TÓM TẮT:\n"
                     f"{_summary_prompt(summary_context)}\n\n"
                     f"LỊCH SỬ HỘI THOẠI GẦN ĐÂY:\n{_chat_history_prompt(history_turns)}\n\n"
                     "KẾ HOẠCH PHỦ CÂU HỎI:\n"
                     f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
                     f"KIỂM TRA HIỆU LỰC:\n{_verification_prompt(verification)}\n\n"
-                    f"NGUỒN:\n{build_context(compact_context_sources(sources, retrieval_query, max_chars=(6000 if retrieval_route == 'single_hop' else 9000), per_source_chars=(1000 if retrieval_route == 'single_hop' else 1200)))}\n\n"
+                    f"NGUỒN:\n{build_context(context_sources)}\n\n"
                     "TỆP ĐÍNH KÈM DO NGƯỜI DÙNG CUNG CẤP:\n"
-                    f"{untrusted_data_block('USER_ATTACHMENTS', attachment_payloads) if attachment_payloads else '(Không có)'}\n\n"
+                    f"{untrusted_data_block('USER_ATTACHMENTS', attachment_evidence_payloads) if attachment_evidence_payloads else '(Không có)'}\n\n"
                     f"CÂU HỎI HIỆN TẠI:\n{untrusted_data_block('CURRENT_QUESTION', current_question)}"
                     "\n\nCÁCH HIỂU ĐÃ CHUẨN HÓA:\n"
                     f"{untrusted_data_block('REWRITTEN_QUERY', retrieval_query) if query_was_rewritten else '(Không cần chuẩn hóa)'}"
@@ -3244,7 +3376,9 @@ async def chat(
                     answer_plan=answer_plan,
                     max_tokens=processing_profile.max_output_tokens,
                     thinking_budget=processing_profile.thinking_budget,
-                    structured_initial=(retrieval_route == "single_hop"),
+                    structured_initial=(
+                        attachment_fact_mode or retrieval_route == "single_hop"
+                    ),
                     skip_soft_repair=(retrieval_route == "single_hop"),
                     generation_timeout=_gen_timeout,
                     citation_repair_timeout=_repair_timeout,
@@ -3276,7 +3410,7 @@ async def chat(
                 try:
                     answer = await _complete_with_citation_repair(
                         ai,
-                        LEGAL_SYSTEM_PROMPT,
+                        generation_system,
                         "KẾ HOẠCH PHỦ CÂU HỎI:\n"
                         f"{untrusted_data_block('ANSWER_PLAN', answer_plan)}\n\n"
                         "KIỂM TRA HIỆU LỰC:\n"
@@ -3640,9 +3774,8 @@ async def draft_contract(
     log_progress(logger, "contract_draft", "started", operation_started)
     user_id = user.id
     await db.rollback()
-    template = payload.template_name or next(
-        (item["name"] for item in CONTRACT_TEMPLATES if item["id"] == payload.template_id), "Hợp đồng"
-    )
+    template_definition = _resolve_labor_contract_template(payload)
+    template = template_definition["name"]
     requirements = payload.prompt.strip()
     source_text = (payload.source_text or "").strip()
     # Backwards compatibility for the old one-field UI: a pasted contract is
@@ -3651,6 +3784,7 @@ async def draft_contract(
     if not source_text and looks_like_contract(requirements):
         source_text = requirements
         requirements = "Rà soát, chuẩn hóa và hoàn thiện bản hợp đồng được cung cấp."
+    _ensure_labor_contract_source(source_text)
 
     query = contract_retrieval_query(
         f"Căn cứ và điều kiện bắt buộc để soạn {template}",
@@ -3680,9 +3814,20 @@ async def draft_contract(
         f"{task}\n"
         f"{untrusted_data_block('CONTRACT_REQUEST', {'template': template, 'requirements': requirements})}\n"
         f"{untrusted_data_block('SOURCE_CONTRACT', source_text) if source_text else ''}\n"
-        "Bao gồm căn cứ và lưu ý pháp lý, định nghĩa, quyền/nghĩa vụ, thanh toán, "
-        "vi phạm, bồi thường, chấm dứt, tranh chấp và phần ký. Chỉ gắn [Sx] vào "
-        "nhận định pháp lý; điều khoản thương mại do người dùng cung cấp không cần trích dẫn.",
+        "PHẠM VI BẮT BUỘC: Chỉ soạn văn bản liên quan trực tiếp đến quan hệ lao động.\n"
+        "ĐỊNH DẠNG BẮT BUỘC:\n"
+        "- Chỉ trả về toàn bộ nội dung văn bản hoàn chỉnh; không có lời mở đầu, lời giải thích, "
+        "checklist hoặc lời kết của trợ lý.\n"
+        "- Dùng văn bản thuần, tuyệt đối không dùng Markdown, ký hiệu #, **, ``` hoặc bảng Markdown.\n"
+        "- Không chèn mã nguồn [S1], [S2] vào nội dung hợp đồng; căn cứ được hiển thị riêng ngoài văn bản.\n"
+        "- Bố cục theo văn bản Việt Nam: quốc hiệu, tiêu ngữ; tên và số hợp đồng; căn cứ; "
+        "thông tin người sử dụng lao động và người lao động; các Điều; chữ ký.\n"
+        "- Tùy loại văn bản, phải thể hiện đầy đủ công việc và địa điểm làm việc, thời hạn, "
+        "thời giờ làm việc/nghỉ ngơi, tiền lương và phương thức trả lương, phụ cấp, bảo hiểm, "
+        "an toàn lao động, quyền/nghĩa vụ, sửa đổi/chấm dứt, giải quyết tranh chấp, hiệu lực và số bản.\n"
+        "- Dữ liệu chưa được cung cấp phải để dưới dạng [Thông tin cần điền], không tự bịa.\n"
+        "- Khối ký cuối văn bản dùng hai cột văn bản thuần, ngăn bởi một ký tự TAB; ví dụ tiêu đề hai bên "
+        "trên cùng một dòng và hướng dẫn ký trên dòng kế tiếp.",
         max_tokens=8192,
         temperature=0.12,
         thinking_budget=1024,
@@ -3693,12 +3838,13 @@ async def draft_contract(
         require=False,
         require_claim_coverage=False,
     )
+    draft = normalize_contract_plain_text(draft, template)
     checklist = [
-        "Điền và đối chiếu thông tin pháp lý của các bên.",
-        "Kiểm tra thẩm quyền ký và tài liệu ủy quyền.",
-        "Chốt các mốc bàn giao, nghiệm thu, thanh toán và thuế.",
-        "Rà soát phạt vi phạm, bồi thường, chấm dứt và giải quyết tranh chấp.",
-        "Luật sư kiểm tra bản cuối trước khi ký nếu giao dịch có giá trị hoặc rủi ro cao.",
+        "Điền và đối chiếu thông tin người sử dụng lao động, người lao động và thẩm quyền ký.",
+        "Kiểm tra công việc, địa điểm làm việc, loại và thời hạn hợp đồng.",
+        "Chốt mức lương, hình thức trả lương, phụ cấp, thời giờ làm việc và thời giờ nghỉ ngơi.",
+        "Đối chiếu bảo hiểm bắt buộc, an toàn lao động, quyền đơn phương chấm dứt và trách nhiệm bồi thường.",
+        "Rà soát bản cuối và ký đủ số bản sau khi mọi chỗ [Thông tin cần điền] đã được hoàn thiện.",
     ]
     artifact = await _save_artifact(
         db, user_id, settings, kind="CONTRACT_DRAFT", title=template, content=draft,
@@ -3720,7 +3866,49 @@ async def draft_contract(
     return {
         "artifact_id": str(artifact.id), "title": template, "draft": draft, "checklist": checklist,
         "sources": sources, "verification": verification, "model": settings.gemini_model,
+        "download_url": f"/api/contracts/draft/{artifact.id}/docx",
     }
+
+
+@router.get("/contracts/draft/{artifact_id}/docx")
+async def download_contract_draft_docx(
+    artifact_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    artifact = await db.scalar(
+        select(Artifact).where(
+            Artifact.id == artifact_id,
+            Artifact.user_id == user.id,
+            Artifact.kind == "CONTRACT_DRAFT",
+        )
+    )
+    if not artifact:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy bản hợp đồng lao động",
+        )
+
+    content = decrypt_text(artifact.content_ciphertext, settings)
+    document_bytes = await run_in_threadpool(
+        build_contract_docx,
+        artifact.title,
+        content,
+    )
+    filename = contract_download_filename(artifact.title)
+    encoded_filename = quote(filename)
+    return StreamingResponse(
+        io.BytesIO(document_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"; '
+                f"filename*=UTF-8''{encoded_filename}"
+            ),
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 @router.post("/contracts/review")

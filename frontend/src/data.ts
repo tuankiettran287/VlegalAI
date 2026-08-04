@@ -8,8 +8,11 @@ export const sampleQuestions = [
 export const templateFallback = [
   { id: "employment", name: "Hợp đồng lao động", category: "Lao động" },
   { id: "probation", name: "Hợp đồng thử việc", category: "Lao động" },
-  { id: "nda", name: "Thỏa thuận bảo mật", category: "Doanh nghiệp" },
-  { id: "service", name: "Hợp đồng dịch vụ", category: "Dịch vụ" },
-  { id: "sale", name: "Hợp đồng mua bán hàng hóa", category: "Thương mại" },
-  { id: "lease", name: "Hợp đồng thuê", category: "Dân sự" },
+  { id: "vocational_training", name: "Hợp đồng đào tạo nghề", category: "Lao động" },
+  { id: "employment_appendix", name: "Phụ lục hợp đồng lao động", category: "Lao động" },
+  {
+    id: "employment_confidentiality",
+    name: "Thỏa thuận bảo mật trong quan hệ lao động",
+    category: "Lao động",
+  },
 ];

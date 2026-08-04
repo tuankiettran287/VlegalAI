@@ -22,6 +22,7 @@ import {
   ChevronRight,
   ClipboardCheck,
   Copy,
+  Download,
   ExternalLink,
   FileDiff,
   FileImage,
@@ -55,6 +56,7 @@ import {
   authApi,
   compareContracts,
   conversationApi,
+  downloadContractDocx,
   draftContract,
   extractContractDocument,
   getTemplates,
@@ -312,6 +314,7 @@ function ErrorNotice({ error, onClose }: { error: string; onClose?: () => void }
 
 function VerificationBadge({ report }: { report?: VerificationReport | null }) {
   if (!report) return null;
+  const attachmentFact = report.note === "user_attachment_factual";
   const current = report.checked && report.all_current;
   const items = Array.isArray(report.items) ? report.items : [];
   if (
@@ -322,15 +325,15 @@ function VerificationBadge({ report }: { report?: VerificationReport | null }) {
     return null;
   }
   return (
-    <details className={`verification ${current ? "verified" : "attention"}`}>
+    <details className={`verification ${current || attachmentFact ? "verified" : "attention"}`}>
       <summary>
-        {current ? <CheckCircle2 size={15} /> : <RefreshCw size={15} />}
-        <span>{current ? "Đã kiểm tra hiệu lực" : "Có văn bản cần lưu ý"}</span>
+        {current || attachmentFact ? <CheckCircle2 size={15} /> : <RefreshCw size={15} />}
+        <span>{attachmentFact ? "Đã đọc tài liệu đính kèm" : current ? "Đã kiểm tra hiệu lực" : "Có văn bản cần lưu ý"}</span>
         {report.checked_at && <time>{formatDate(report.checked_at)}</time>}
         <ChevronDown size={14} />
       </summary>
       <div className="verification-body">
-        <p>{report.note}</p>
+        <p>{attachmentFact ? "Câu trả lời này dựa trên nội dung có thể đọc được từ tệp bạn cung cấp." : report.note}</p>
         {items.map((item) => (
           <div className="law-status-row" key={`${item.code}-${item.checked_at}`}>
             <div>
@@ -427,17 +430,63 @@ function SourcePanel({ sources }: { sources?: Source[] | null }) {
   );
 }
 
+function ContractDocumentPreview({ text }: { text: string }) {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  return (
+    <div className="contract-document-preview" aria-label="Nội dung hợp đồng">
+      {lines.map((line, index) => {
+        const value = line.trim();
+        if (!value) return <div className="contract-document-spacer" aria-hidden="true" key={`blank-${index}`} />;
+        const folded = value.toLocaleLowerCase("vi-VN");
+        const isNationalHeading = value === "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM";
+        const isMotto = folded === "độc lập - tự do - hạnh phúc";
+        const isTitle = value === value.toLocaleUpperCase("vi-VN")
+          && (folded.includes("hợp đồng") || folded.includes("thỏa thuận"));
+        const isArticle = /^điều\s+\d+[a-zđ]?(?:[.:]|\s|$)/i.test(value);
+        const isSignature = /\t+|\s+\|\s+/.test(value)
+          && (folded.includes("người lao động") || folded.includes("người sử dụng lao động") || folded.includes("ký, ghi rõ"));
+        if (isSignature) {
+          const cells = value.split(/\t+|\s+\|\s+/).map((cell) => cell.trim());
+          return (
+            <div className="contract-document-signatures" key={`${value}-${index}`}>
+              <span>{cells[0]}</span><span>{cells[1] || ""}</span>
+            </div>
+          );
+        }
+        return (
+          <p
+            className={[
+              isNationalHeading ? "national-heading" : "",
+              isMotto ? "national-motto" : "",
+              isTitle ? "contract-title" : "",
+              isArticle ? "contract-article" : "",
+              value.startsWith("• ") ? "contract-bullet" : "",
+            ].filter(Boolean).join(" ")}
+            key={`${value}-${index}`}
+          >
+            {value}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 function ResultPanel({
   title,
   text,
   sources,
   verification,
+  format = "markdown",
+  actions,
   children,
 }: {
   title: string;
   text: string;
   sources?: Source[];
   verification?: VerificationReport;
+  format?: "markdown" | "document";
+  actions?: ReactNode;
   children?: ReactNode;
 }) {
   return (
@@ -447,12 +496,17 @@ function ResultPanel({
           <span className="eyebrow">Kết quả AI</span>
           <h2>{title}</h2>
         </div>
-        <button className="icon-button" type="button" onClick={() => navigator.clipboard?.writeText(text)} aria-label="Sao chép">
-          <Copy size={17} />
-        </button>
+        <div className="result-actions">
+          {actions}
+          <button className="icon-button" type="button" onClick={() => navigator.clipboard?.writeText(text)} aria-label="Sao chép">
+            <Copy size={17} />
+          </button>
+        </div>
       </header>
       <VerificationBadge report={verification} />
-      <div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(text) }} />
+      {format === "document"
+        ? <ContractDocumentPreview text={text} />
+        : <div className="markdown" dangerouslySetInnerHTML={{ __html: markdown(text) }} />}
       {children}
       <SourcePanel sources={sources} />
     </section>
@@ -1345,6 +1399,7 @@ function ContractPage() {
   const [sourceText, setSourceText] = useState("");
   const [result, setResult] = useState<DraftResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -1379,7 +1434,7 @@ function ContractPage() {
 
   return (
     <section className="tool-page">
-      <PageHeader title="Tạo hợp đồng" subtitle="Tạo bản nháp theo yêu cầu, tự đối chiếu các quy định liên quan và kiểm tra hiệu lực trước khi hoàn thiện." />
+      <PageHeader title="Tạo hợp đồng lao động" subtitle="Soạn và hoàn thiện các hợp đồng, phụ lục và thỏa thuận gắn trực tiếp với quan hệ lao động." />
       {error && <ErrorNotice error={error} onClose={() => setError("")} />}
       <div className="workspace-grid">
         <form className="workspace-card tool-form" onSubmit={submit}>
@@ -1399,7 +1454,7 @@ function ContractPage() {
               <Upload size={16} /> Hoàn thiện bản có sẵn
             </button>
           </div>
-          <div className="section-title"><span>1</span><div><h2>Chọn loại hợp đồng</h2><p>Có thể đổi loại sau khi đã nhập yêu cầu.</p></div></div>
+          <div className="section-title"><span>1</span><div><h2>Chọn loại văn bản lao động</h2><p>Chức năng chỉ hỗ trợ các văn bản liên quan trực tiếp đến quan hệ lao động.</p></div></div>
           <div className="template-grid-inline">
             {templates.map((item) => (
               <button key={item.id} className={selected.id === item.id ? "template-option active" : "template-option"} type="button" onClick={() => setSelected(item)}>
@@ -1414,14 +1469,14 @@ function ContractPage() {
               <h2>{mode === "new" ? "Mô tả yêu cầu" : "Cung cấp hợp đồng hiện có"}</h2>
               <p>
                 {mode === "new"
-                  ? "Nêu các bên, mục đích, giá trị, thời hạn và điều kiện đặc biệt."
-                  : "Tải PDF/DOCX/TXT hoặc dán toàn bộ nội dung cần chỉnh lý."}
+                  ? "Nêu người sử dụng lao động, người lao động, công việc, nơi làm việc, thời hạn, lương và điều kiện đặc biệt."
+                  : "Tải PDF/DOCX/TXT hoặc dán toàn bộ hợp đồng lao động cần chỉnh lý."}
               </p>
             </div>
           </div>
           {mode === "revise" && (
             <DocumentInput
-              title="Hợp đồng cần hoàn thiện"
+              title="Hợp đồng lao động cần hoàn thiện"
               value={sourceText}
               onChange={setSourceText}
               onError={setError}
@@ -1436,7 +1491,7 @@ function ContractPage() {
               maxLength={30000}
               placeholder={
                 mode === "new"
-                  ? "Nêu thông tin giao dịch, quyền và nghĩa vụ mong muốn, mốc thanh toán, thời hạn và điều kiện đặc biệt…"
+                  ? "Ví dụ: loại và thời hạn hợp đồng, vị trí, nơi làm việc, lương, phụ cấp, lịch làm việc, chế độ bảo hiểm và yêu cầu đặc biệt…"
                   : "Nêu các nội dung cần giữ lại, bổ sung hoặc ưu tiên bảo vệ…"
               }
             />
@@ -1460,9 +1515,31 @@ function ContractPage() {
         </form>
         <ResultPanel
           title={result?.title || "Bản nháp sẽ xuất hiện tại đây"}
-          text={result?.draft || "Mô tả yêu cầu càng cụ thể, bản nháp càng sát giao dịch. Kết quả được lưu tự động vào Thư viện tài liệu."}
+          text={result?.draft || "Mô tả yêu cầu càng cụ thể, bản hợp đồng lao động càng sát nhu cầu. Kết quả được lưu tự động vào Thư viện tài liệu."}
           sources={result?.sources}
           verification={result?.verification}
+          format={result ? "document" : "markdown"}
+          actions={result && (
+            <button
+              className="ghost-button result-download-button"
+              type="button"
+              disabled={downloading}
+              onClick={async () => {
+                setDownloading(true);
+                setError("");
+                try {
+                  await downloadContractDocx(result.artifact_id, result.title);
+                } catch (reason) {
+                  setError((reason as Error).message);
+                } finally {
+                  setDownloading(false);
+                }
+              }}
+            >
+              {downloading ? <RefreshCw className="spin" size={16} /> : <Download size={16} />}
+              {downloading ? "Đang tạo DOCX…" : "Tải DOCX"}
+            </button>
+          )}
         >
           {result?.checklist && (
             <div className="checklist-box"><h3>Checklist trước khi ký</h3>{result.checklist.map((item) => <p key={item}><CheckCircle2 size={15} />{item}</p>)}</div>
@@ -1754,6 +1831,7 @@ function LibraryPage({
 function ArtifactPage({ artifactId, onNavigate }: { artifactId: string; onNavigate: (path: string) => void }) {
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const [loading, setLoading] = useState(true);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
 
@@ -1791,23 +1869,48 @@ function ArtifactPage({ artifactId, onNavigate }: { artifactId: string; onNaviga
               <h1>{artifact.title}</h1>
               <p>Cập nhật {formatDate(artifact.updated_at)} · Trạng thái {artifact.status.toLocaleLowerCase("vi-VN")}</p>
             </div>
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(artifact.content);
-                  setCopied(true);
-                  window.setTimeout(() => setCopied(false), 1800);
-                } catch {
-                  setError("Không thể sao chép tài liệu. Vui lòng thử lại.");
-                }
-              }}
-            >
-              <Copy size={15} /> {copied ? "Đã sao chép" : "Sao chép"}
-            </button>
+            <div className="artifact-header-actions">
+              {artifact.kind === "CONTRACT_DRAFT" && (
+                <button
+                  className="ghost-button"
+                  type="button"
+                  disabled={downloading}
+                  onClick={async () => {
+                    setDownloading(true);
+                    setError("");
+                    try {
+                      await downloadContractDocx(artifact.id, artifact.title);
+                    } catch (reason) {
+                      setError((reason as Error).message);
+                    } finally {
+                      setDownloading(false);
+                    }
+                  }}
+                >
+                  {downloading ? <RefreshCw className="spin" size={15} /> : <Download size={15} />}
+                  {downloading ? "Đang tạo DOCX…" : "Tải DOCX"}
+                </button>
+              )}
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(artifact.content);
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 1800);
+                  } catch {
+                    setError("Không thể sao chép tài liệu. Vui lòng thử lại.");
+                  }
+                }}
+              >
+                <Copy size={15} /> {copied ? "Đã sao chép" : "Sao chép"}
+              </button>
+            </div>
           </header>
-          <div className="artifact-document-content" dangerouslySetInnerHTML={{ __html: markdown(artifact.content) }} />
+          {artifact.kind === "CONTRACT_DRAFT"
+            ? <ContractDocumentPreview text={artifact.content} />
+            : <div className="artifact-document-content" dangerouslySetInnerHTML={{ __html: markdown(artifact.content) }} />}
         </article>
       )}
     </section>

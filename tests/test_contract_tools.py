@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from docx import Document
+from fastapi import HTTPException
 
 from app.api import compare_contracts, draft_contract
 from app.schemas import (
@@ -25,6 +26,11 @@ from app.services.contract_documents import (
     MAX_DOCUMENT_BYTES,
     ContractDocumentError,
     extract_contract_document,
+)
+from app.services.contract_docx import (
+    build_contract_docx,
+    contract_download_filename,
+    normalize_contract_plain_text,
 )
 
 
@@ -80,6 +86,42 @@ def test_contract_diff_detects_added_deleted_and_modified_groups() -> None:
     assert result["similarity"] < 100
     assert result["counts"]["modified"] >= 1
     assert result["changes"]
+
+
+def test_contract_draft_is_plain_text_and_docx_uses_legal_page_layout() -> None:
+    raw = (
+        "```markdown\n# **HỢP ĐỒNG LAO ĐỘNG**\n\n"
+        "## Điều 1. Công việc [S1]\n- Người lao động thực hiện [Công việc].\n\n"
+        "NGƯỜI SỬ DỤNG LAO ĐỘNG | NGƯỜI LAO ĐỘNG\n"
+        "(Ký, ghi rõ họ tên) | (Ký, ghi rõ họ tên)\n```"
+    )
+    plain = normalize_contract_plain_text(raw, "Hợp đồng lao động")
+    assert plain.startswith("CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM")
+    assert "Độc lập - Tự do - Hạnh phúc" in plain
+    assert "Điều 1. Công việc" in plain
+    assert "[Công việc]" in plain
+    assert "[S1]" not in plain
+    assert "**" not in plain
+    assert "```" not in plain
+    assert "|" not in plain
+
+    data = build_contract_docx("Hợp đồng lao động", plain)
+    document = Document(io.BytesIO(data))
+    section = document.sections[0]
+    assert section.page_width.cm == pytest.approx(21, abs=0.05)
+    assert section.page_height.cm == pytest.approx(29.7, abs=0.05)
+    assert section.left_margin.cm == pytest.approx(3, abs=0.05)
+    assert section.right_margin.cm == pytest.approx(2, abs=0.05)
+    assert any(
+        "HỢP ĐỒNG LAO ĐỘNG" in paragraph.text for paragraph in document.paragraphs
+    )
+    assert any(
+        "NGƯỜI SỬ DỤNG LAO ĐỘNG" in cell.text
+        for table in document.tables
+        for row in table.rows
+        for cell in row.cells
+    )
+    assert contract_download_filename("Hợp đồng lao động") == "hop-dong-lao-dong.docx"
 
 
 class _ArtifactDb:
@@ -150,18 +192,18 @@ def test_draft_accepts_full_contract_without_graph_route_or_mandatory_inline_cit
     db = _ArtifactDb(user_id)
     retrieval = _FastContractRetrieval()
     full_contract = (
-        "HỢP ĐỒNG DỊCH VỤ\n\nĐiều 1. Phạm vi\n"
-        + ("Nội dung hợp đồng hiện có. " * 60)
-        + "\n\nĐiều 2. Thanh toán"
+        "HỢP ĐỒNG LAO ĐỘNG\n\nĐiều 1. Công việc\n"
+        + ("Người lao động thực hiện công việc hiện có. " * 60)
+        + "\n\nĐiều 2. Tiền lương"
     )
 
     class _Ai:
         async def complete(self, *_: object, **__: object) -> str:
-            return "HỢP ĐỒNG DỊCH VỤ\n\nĐiều 1. Phạm vi đã được hoàn thiện."
+            return "# **HỢP ĐỒNG LAO ĐỘNG**\n\nĐiều 1. Công việc đã được hoàn thiện [S1]."
 
     result = asyncio.run(
         draft_contract(
-            DraftContractRequest(prompt=full_contract, template_name="Hợp đồng dịch vụ"),
+            DraftContractRequest(prompt=full_contract, template_name="Hợp đồng lao động"),
             db,
             SimpleNamespace(id=user_id),
             SimpleNamespace(
@@ -174,8 +216,77 @@ def test_draft_accepts_full_contract_without_graph_route_or_mandatory_inline_cit
             _Ai(),
         )
     )
-    assert result["draft"].startswith("HỢP ĐỒNG")
+    assert result["draft"].startswith("CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM")
+    assert "[S1]" not in result["draft"]
+    assert "**" not in result["draft"]
+    assert result["download_url"].endswith("/docx")
     assert len(retrieval.queries[0]) <= 1_600
+
+
+def test_draft_rejects_non_labor_contract_template_before_retrieval() -> None:
+    user_id = uuid.uuid4()
+    db = _ArtifactDb(user_id)
+
+    class _MustNotRun:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"{name} must not run for an invalid template")
+
+    with pytest.raises(HTTPException, match="liên quan trực tiếp đến lao động") as exc:
+        asyncio.run(
+            draft_contract(
+                DraftContractRequest(
+                    prompt="Soạn hợp đồng dịch vụ phát triển phần mềm.",
+                    template_id="service",
+                ),
+                db,
+                SimpleNamespace(id=user_id),
+                SimpleNamespace(
+                    gemini_model="gemini-2.5-flash",
+                    message_encryption_key="",
+                    session_secret="test-session-secret-at-least-32-bytes",
+                ),
+                _MustNotRun(),
+                _MustNotRun(),
+                _MustNotRun(),
+            )
+        )
+    assert exc.value.status_code == 422
+
+
+def test_draft_rejects_uploaded_contract_outside_labor_scope() -> None:
+    user_id = uuid.uuid4()
+    db = _ArtifactDb(user_id)
+    service_contract = (
+        "HỢP ĐỒNG DỊCH VỤ PHẦN MỀM\n\n"
+        "Điều 1. Phạm vi dịch vụ\n"
+        + ("Bên A thuê Bên B phát triển và bàn giao phần mềm. " * 30)
+        + "\nĐiều 2. Phí dịch vụ"
+    )
+
+    class _MustNotRun:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"{name} must not run for a non-labor contract")
+
+    with pytest.raises(HTTPException, match="không có dấu hiệu") as exc:
+        asyncio.run(
+            draft_contract(
+                DraftContractRequest(
+                    prompt=service_contract,
+                    template_id="employment",
+                ),
+                db,
+                SimpleNamespace(id=user_id),
+                SimpleNamespace(
+                    gemini_model="gemini-2.5-flash",
+                    message_encryption_key="",
+                    session_secret="test-session-secret-at-least-32-bytes",
+                ),
+                _MustNotRun(),
+                _MustNotRun(),
+                _MustNotRun(),
+            )
+        )
+    assert exc.value.status_code == 422
 
 
 def test_identical_contracts_skip_retrieval_and_ai() -> None:

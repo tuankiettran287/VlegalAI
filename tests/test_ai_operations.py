@@ -447,13 +447,16 @@ def test_contract_draft_releases_auth_transaction_before_external_calls() -> Non
     class _AI:
         async def complete(self, *_: object, **__: object) -> str:
             assert not db.active
-            return "Các bên phải thực hiện nghĩa vụ đúng thời hạn [S1]."
+            return (
+                "HỢP ĐỒNG LAO ĐỘNG\n\n"
+                "Điều 1. Các bên thực hiện nghĩa vụ đúng thời hạn [S1]."
+            )
 
     result = asyncio.run(
         draft_contract(
             DraftContractRequest(
-                prompt="Soạn hợp đồng dịch vụ thử nghiệm.",
-                template_name="Hợp đồng dịch vụ",
+                prompt="Soạn hợp đồng lao động xác định thời hạn 12 tháng.",
+                template_name="Hợp đồng lao động",
             ),
             db,
             SimpleNamespace(id=user_id),
@@ -466,4 +469,5 @@ def test_contract_draft_releases_auth_transaction_before_external_calls() -> Non
 
     assert db.committed
     assert db.added
-    assert result["draft"].endswith("[S1].")
+    assert result["draft"].startswith("CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM")
+    assert "[S1]" not in result["draft"]
