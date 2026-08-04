@@ -135,6 +135,7 @@ from app.services.freshness import (
 )
 from app.services.greetings import greeting_response
 from app.services.legal_catalog import LegalCatalogService, parse_catalog_request
+from app.services.official_sources import official_legal_source_url
 from app.services.query_rewrite import (
     rewrite_query_if_needed,
     should_rewrite_query,
@@ -1162,6 +1163,10 @@ async def _legal_sources(
         retained_sources = [dict(source) for source in rows]
         for index, source in enumerate(retained_sources, start=1):
             source["source_id"] = f"S{index}"
+            if not str(source.get("source_url") or "").strip():
+                source["source_url"] = official_legal_source_url(
+                    source_law_code(source)
+                )
         log_progress(
             logger,
             "legal_sources",
@@ -2543,7 +2548,7 @@ async def law_detail(
         source_url=(
             str(metadata["source_url"])
             if metadata["source_url"]
-            else None
+            else official_legal_source_url(str(metadata["code"]))
         ),
         law_version=(
             int(metadata["law_version"])

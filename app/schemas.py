@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.services.official_sources import official_legal_source_url
+
 
 _LEGAL_SOURCE_CODE_RE = re.compile(
     r"\b(?:\d{1,4}/\d{4}/[A-Z\u0110][A-Z0-9\u0110.\-]*|"
@@ -72,6 +74,8 @@ class SourceOut(BaseModel):
     def add_document_code(self) -> "SourceOut":
         if not self.document_code:
             self.document_code = legal_source_code(self.citation, self.title)
+        if not self.source_url:
+            self.source_url = official_legal_source_url(self.document_code)
         return self
 
 

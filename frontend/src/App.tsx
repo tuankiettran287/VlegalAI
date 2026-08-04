@@ -384,40 +384,23 @@ function SourcePanel({ sources }: { sources?: Source[] | null }) {
       <div className="source-list">
         {sources.map((source) => {
           const sourceUrl = safeSourceUrl(source.source_url);
-          const documentUrl = source.document_code
-            ? `/van-ban?code=${encodeURIComponent(source.document_code)}&citation=${encodeURIComponent(source.citation)}`
-            : null;
           return (
             <article className="source-item" key={`${source.source_id}-${source.citation}`}>
               <div className="source-title">
                 <span className="source-id">{source.source_id}</span>
                 <strong>{source.citation || source.title}</strong>
-                {(documentUrl || sourceUrl) && (
+                {sourceUrl && (
                   <span className="source-link-actions">
-                    {documentUrl && (
-                      <a
-                        className="source-open-link"
-                        href={documentUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        aria-label={`Xem căn cứ: ${source.citation || source.title}`}
-                      >
-                        <span>Xem căn cứ</span>
-                        <FileText size={13} />
-                      </a>
-                    )}
-                    {sourceUrl && (
-                      <a
-                        className="source-official-link"
-                        href={sourceUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        aria-label={`Mở nguồn chính thức: ${source.citation || source.title}`}
-                      >
-                        <span>Nguồn chính thức</span>
-                        <ExternalLink size={13} />
-                      </a>
-                    )}
+                    <a
+                      className="source-open-link"
+                      href={sourceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={`Mở văn bản gốc: ${source.citation || source.title}`}
+                    >
+                      <span>Xem văn bản gốc</span>
+                      <ExternalLink size={13} />
+                    </a>
                   </span>
                 )}
               </div>

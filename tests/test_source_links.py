@@ -1,7 +1,7 @@
 from app.schemas import SourceOut
 
 
-def test_source_without_direct_url_gets_internal_document_code() -> None:
+def test_bundled_source_gets_verified_official_document_url() -> None:
     source = SourceOut(
         source_id="S1",
         citation=(
@@ -11,7 +11,10 @@ def test_source_without_direct_url_gets_internal_document_code() -> None:
     )
 
     assert source.document_code == "161/2026/NĐ-CP"
-    assert source.source_url is None
+    assert source.source_url == (
+        "https://vanban.chinhphu.vn/"
+        "?classid=1&docid=218107&orggroupid=2&pageid=27160"
+    )
 
 
 def test_direct_source_url_takes_priority_over_lookup_link() -> None:
