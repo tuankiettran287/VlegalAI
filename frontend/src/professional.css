@@ -789,6 +789,117 @@ main:focus-visible {
   font-size: 11px;
 }
 
+/* Inline legal citations stay compact in the answer while exposing the same
+   source metadata and verified official link as the expanded source panel. */
+.inline-citation-wrap {
+  position: relative;
+  display: inline-flex;
+  vertical-align: baseline;
+}
+
+.inline-citation {
+  display: inline-flex;
+  min-width: 30px;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+  margin-inline: 2px;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--brand) 26%, var(--line));
+  border-radius: 6px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font: inherit;
+  font-size: .82em;
+  font-weight: 800;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    transform 150ms ease;
+}
+
+.inline-citation:hover,
+.inline-citation:focus-visible {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 16%, var(--surface));
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.citation-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  z-index: calc(var(--z-sticky) + 2);
+  display: grid;
+  width: min(360px, calc(100vw - 48px));
+  gap: 7px;
+  padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--line));
+  border-radius: 11px;
+  background: var(--surface);
+  box-shadow: 0 14px 38px rgb(18 47 45 / 18%);
+  color: var(--ink);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.45;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -4px);
+  visibility: hidden;
+  white-space: normal;
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease,
+    visibility 0s linear 140ms;
+}
+
+.citation-tooltip strong,
+.citation-tooltip span,
+.citation-tooltip em {
+  display: block;
+}
+
+.citation-tooltip strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.citation-tooltip span {
+  color: var(--muted);
+}
+
+.citation-tooltip em {
+  color: var(--brand);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.inline-citation-wrap:hover .citation-tooltip,
+.inline-citation-wrap:focus-within .citation-tooltip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+@media (max-width: 640px) {
+  .citation-tooltip {
+    left: 0;
+    width: min(310px, calc(100vw - 34px));
+    transform: translate(0, -4px);
+  }
+
+  .inline-citation-wrap:hover .citation-tooltip,
+  .inline-citation-wrap:focus-within .citation-tooltip {
+    transform: translate(0, 0);
+  }
+}
+
 /* Tool pages */
 
 .tool-page {

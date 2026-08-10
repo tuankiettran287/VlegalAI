@@ -145,7 +145,44 @@ function escapeHtml(value: string) {
     .replaceAll("'", "&#039;");
 }
 
-function markdown(value: string) {
+function safeSourceUrl(value?: string | null) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function citationTooltip(source: Source) {
+  const sourceId = escapeHtml(source.source_id.toUpperCase());
+  const sourceTitle = escapeHtml(source.citation || source.title || "Căn cứ pháp lý");
+  const sourceText = escapeHtml(
+    String(source.text || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 260),
+  );
+  const sourceUrl = safeSourceUrl(source.source_url);
+  const accessibleLabel = escapeHtml(`Mở căn cứ ${source.source_id}: ${source.citation || source.title}`);
+  const citationControl = sourceUrl
+    ? `<a class="inline-citation" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer" aria-label="${accessibleLabel}">[${sourceId}]</a>`
+    : `<button class="inline-citation" type="button" aria-label="Xem thông tin căn cứ ${sourceId}">[${sourceId}]</button>`;
+  const actionHint = sourceUrl
+    ? "Bấm để mở văn bản gốc"
+    : "Nguồn này chưa có liên kết chính thức";
+
+  return `<span class="inline-citation-wrap">${citationControl}<span class="citation-tooltip" role="tooltip"><strong>${sourceId} · ${sourceTitle}</strong>${sourceText ? `<span>${sourceText}</span>` : ""}<em>${actionHint}</em></span></span>`;
+}
+
+function markdown(value: string, sources?: Source[] | null) {
+  const sourceById = new Map(
+    (Array.isArray(sources) ? sources : [])
+      .filter((source) => source?.source_id)
+      .map((source) => [source.source_id.toUpperCase(), source]),
+  );
+
   return escapeHtml((value || "").replace(/\r\n?/g, "\n").trim())
     .replace(/^### (.*)$/gm, "<h3>$1</h3>")
     .replace(/^## (.*)$/gm, "<h2>$1</h2>")
@@ -153,18 +190,41 @@ function markdown(value: string) {
     .replace(/^[-•] (.*)$/gm, "<div class='md-list-item'>• $1</div>")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\[([Ss]\d+)\]/g, (match, sourceId: string) => {
+      const source = sourceById.get(sourceId.toUpperCase());
+      return source ? citationTooltip(source) : match;
+    })
     .replace(/<\/div>\n+(?=<div class='md-list-item'>)/g, "</div>")
     .replace(/\n{2,}/g, "<span class='md-paragraph-gap'></span>")
     .replace(/\n/g, "<br />");
 }
 
+export function CitationMarkdown({
+  text,
+  sources,
+  ariaHidden,
+}: {
+  text: string;
+  sources?: Source[];
+  ariaHidden?: boolean;
+}) {
+  return (
+    <div
+      aria-hidden={ariaHidden ? "true" : undefined}
+      dangerouslySetInnerHTML={{ __html: markdown(text, sources) }}
+    />
+  );
+}
+
 function TypewriterMarkdown({
   text,
+  sources,
   active,
   onComplete,
   onProgress,
 }: {
   text: string;
+  sources?: Source[];
   active: boolean;
   onComplete: () => void;
   onProgress: () => void;
@@ -255,10 +315,7 @@ function TypewriterMarkdown({
   const visibleText = characters.slice(0, visibleCount).join("");
   return (
     <div className={`assistant-answer${active ? " is-typing" : ""}`} aria-busy={active}>
-      <div
-        aria-hidden={active ? "true" : undefined}
-        dangerouslySetInnerHTML={{ __html: markdown(visibleText) }}
-      />
+      <CitationMarkdown text={visibleText} sources={sources} ariaHidden={active} />
       {active && (
         <div className="typing-controls">
           <span className="typing-cursor" aria-hidden="true" />
@@ -363,16 +420,6 @@ function VerificationBadge({ report }: { report?: VerificationReport | null }) {
 
 export function SourcePanel({ sources }: { sources?: Source[] | null }) {
   if (!Array.isArray(sources) || !sources.length) return null;
-
-  const safeSourceUrl = (value?: string | null) => {
-    if (!value) return null;
-    try {
-      const url = new URL(value);
-      return url.protocol === "https:" ? url.toString() : null;
-    } catch {
-      return null;
-    }
-  };
 
   return (
     <details className="source-panel">
@@ -1236,6 +1283,7 @@ export function ChatPage({
                     {message.role === "assistant" ? (
                       <TypewriterMarkdown
                         text={message.content}
+                        sources={message.sources}
                         active={Boolean(message.typing)}
                         onProgress={scrollToLatest}
                         onComplete={() =>

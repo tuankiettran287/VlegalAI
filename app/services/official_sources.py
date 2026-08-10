@@ -6,6 +6,10 @@ from types import MappingProxyType
 
 _OFFICIAL_LEGAL_SOURCE_URLS = MappingProxyType(
     {
+        "45/2019/QH14": (
+            "https://vanban.chinhphu.vn/"
+            "?docid=198540&lang=vi&pageid=27160"
+        ),
         "161/2026/NĐ-CP": (
             "https://vanban.chinhphu.vn/"
             "?classid=1&docid=218107&orggroupid=2&pageid=27160"

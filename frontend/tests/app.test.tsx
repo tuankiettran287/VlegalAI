@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ChatPage, SourcePanel } from "../src/App";
+import { ChatPage, CitationMarkdown, SourcePanel } from "../src/App";
 import { askLegalQuestion, conversationApi } from "../src/api";
 import type { Source } from "../src/types";
 
@@ -50,6 +50,31 @@ describe("SourcePanel", () => {
     fireEvent.click(screen.getByText("1 căn cứ được sử dụng"));
 
     expect(screen.queryByRole("link", { name: /Mở văn bản gốc/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("CitationMarkdown", () => {
+  it("shows source context on hover and links inline citations to the official document", () => {
+    render(<CitationMarkdown text="Áp dụng theo [S1]." sources={[source]} />);
+
+    const citation = screen.getByRole("link", {
+      name: "Mở căn cứ S1: Điều 12 Bộ luật Lao động",
+    });
+    expect(citation).toHaveTextContent("[S1]");
+    expect(citation).toHaveAttribute("href", source.source_url);
+    expect(citation).toHaveAttribute("target", "_blank");
+    expect(citation).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Điều 12 Bộ luật Lao động");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Nội dung căn cứ pháp lý.");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Bấm để mở văn bản gốc");
+  });
+
+  it("still shows a tooltip when a citation has no verified URL", () => {
+    render(<CitationMarkdown text="Áp dụng theo [S1]." sources={[{ ...source, source_url: null }]} />);
+
+    expect(screen.getByRole("button", { name: "Xem thông tin căn cứ S1" }))
+      .toHaveTextContent("[S1]");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Nguồn này chưa có liên kết chính thức");
   });
 });
 

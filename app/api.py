@@ -896,9 +896,15 @@ async def _enrich_stored_source_urls(
     missing_by_code: dict[str, list[SourceOut]] = {}
     for message in messages:
         for source in message.sources:
-            if source.source_url:
+            registry_fallback = official_legal_source_url(source.document_code)
+            # A URL persisted with the source is authoritative. A URL filled
+            # from the small bundled registry is only a fallback: still query
+            # the legal-document catalog so a fresher canonical URL can win.
+            if source.source_url and source.source_url != registry_fallback:
                 continue
-            label = f"{source.citation} {source.title}".upper()
+            label = (
+                f"{source.document_code or ''} {source.citation} {source.title}"
+            ).upper()
             match = LAW_CODE_RE.search(label)
             if match:
                 missing_by_code.setdefault(
