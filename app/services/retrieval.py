@@ -27,10 +27,26 @@ logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[0-9A-Za-zÀ-ỹĐđ]+", re.UNICODE)
 _COMPOUND_SPLIT_RE = re.compile(
-    r"(?:[;?]\s*|,\s+(?=(?:khi|nếu|nhưng|còn|đồng thời)\b)|"
+    r"(?:[;?]\s*|(?:\r?\n)+\s*(?:(?:[-•*]|\d+[.)])\s*)?|"
+    r",\s+(?=(?:khi|nếu|nhưng|còn|đồng thời)\b)|"
     r"\s+(?:và|nhưng|còn|đồng thời)\s+(?=(?:khi|nếu|tôi|bạn|công ty|"
-    r"người lao động|người sử dụng lao động|cách|mức|thời|điều kiện|"
-    r"bị|được|phải|ở đâu|biện pháp|quyền|nghĩa vụ)\b))",
+    r"người lao động|người sử dụng lao động|bị|được|phải|ở đâu)\b))",
+    re.IGNORECASE,
+)
+_COMPOUND_CONJUNCTION_RE = re.compile(
+    r"\s+(?:và|nhưng|còn|đồng thời)\s+",
+    re.IGNORECASE,
+)
+_EXPLICIT_QUESTION_CLAUSE_RE = re.compile(
+    r"\b(?:la gi|bao nhieu|bao lau|bao gio|khi nao|o dau|ai la|"
+    r"co quyen|co duoc|co phai|duoc khong|phai khong|"
+    r"(?:quyen|nghia vu) gi|"
+    r"phai lam gi|nen lam gi|xu ly the nao|giai quyet the nao|"
+    r"the nao|ra sao|kien|khoi kien|khieu nai|yeu cau|boi thuong)\b",
+    re.IGNORECASE,
+)
+_ANAPHORIC_FACET_RE = re.compile(
+    r"^(?:khi|neu|con|dong thoi|truong hop|viec nay|viec do|muc nay|muc do)\b",
     re.IGNORECASE,
 )
 _AGGREGATIVE_MARKERS = (
@@ -536,7 +552,10 @@ def _filter_rows_for_query_intent(
                     )
                 )
 
-    if "cuong buc lao dong" in query_ascii or "cuong buc" in query_ascii:
+    if (
+        len(facets) <= 1
+        and ("cuong buc lao dong" in query_ascii or "cuong buc" in query_ascii)
+    ):
         relevant = [
             row for row in rows
             if "cuong buc" in _row_evidence(row)
@@ -701,7 +720,15 @@ def _filter_rows_for_query_intent(
             hybrid_fallback.append(row)
     if strong:
         if len(facets) >= 2:
-            strong.sort(key=lambda item: item[0], reverse=True)
+            strong.sort(
+                key=lambda item: (
+                    not any(
+                        str(reason).startswith("required_query_facet:")
+                        for reason in item[1].get("reasons", [])
+                    ),
+                    -item[0],
+                )
+            )
             return [
                 row
                 for _, row in strong[: max(8, len(facets) * 4)]
@@ -713,7 +740,15 @@ def _filter_rows_for_query_intent(
             if score >= max(0.35, best_relevance - 0.18)
         ]
     if semantic_fallback:
-        semantic_fallback.sort(key=lambda item: item[0], reverse=True)
+        semantic_fallback.sort(
+            key=lambda item: (
+                not any(
+                    str(reason).startswith("required_query_facet:")
+                    for reason in item[1].get("reasons", [])
+                ),
+                -item[0],
+            )
+        )
         return [row for _, row in semantic_fallback[:8]]
     return hybrid_fallback
 
@@ -843,11 +878,37 @@ def _document_structure_answer(
 
 
 def _question_facets(query: str) -> list[str]:
-    return [
+    initial = [
         facet.strip(" ,.;:?")
         for facet in _COMPOUND_SPLIT_RE.split(query)
         if facet and len(_significant_terms(facet)) >= 1
     ]
+
+    def split_explicit_questions(value: str) -> list[str]:
+        """Split two questions joined by a conjunction without breaking noun pairs."""
+
+        for match in _COMPOUND_CONJUNCTION_RE.finditer(value):
+            left = value[: match.start()].strip(" ,.;:?")
+            right = value[match.end() :].strip(" ,.;:?")
+            if not left or not right:
+                continue
+            if (
+                _EXPLICIT_QUESTION_CLAUSE_RE.search(_ascii(left))
+                and _EXPLICIT_QUESTION_CLAUSE_RE.search(_ascii(right))
+            ):
+                return [
+                    *split_explicit_questions(left),
+                    *split_explicit_questions(right),
+                ]
+        return [value]
+
+    facets = [
+        part
+        for facet in initial
+        for part in split_explicit_questions(facet)
+        if len(_significant_terms(part)) >= 1
+    ]
+    return list(dict.fromkeys(facets))
 
 
 def _question_focus(query: str) -> str:
@@ -952,14 +1013,11 @@ def plan_retrieval_queries(query: str) -> list[str]:
         return []
 
     planned = [normalized]
-    facets = _question_facets(normalized)
+    facets = _question_facets(str(query or ""))
     matched_concepts = _matched_query_concepts(normalized)
-    # Short canonical concept labels are strong BM25 queries and must not be
-    # crowded out by long narrative facets.  This is especially important for
-    # scenarios that require one rule about the event and another about the
-    # available remedy or procedure.
-    for concept in matched_concepts:
-        planned.append(concept.label)
+    # User-authored facets come before ontology expansions so the query limit
+    # can never drop the second issue in favour of several concepts detected
+    # in the first issue.
     if len(facets) >= 2:
         first_ascii = _ascii(facets[0])
         first_terms = [
@@ -970,7 +1028,11 @@ def plan_retrieval_queries(query: str) -> list[str]:
         shared_prefix = " ".join(first_terms)
         for index, facet in enumerate(facets):
             expanded = facet
-            if index and shared_prefix:
+            if (
+                index
+                and shared_prefix
+                and _ANAPHORIC_FACET_RE.search(_ascii(facet))
+            ):
                 facet_terms = set(_significant_terms(facet))
                 if not facet_terms.intersection(
                     _ascii(term) for term in first_terms
@@ -978,6 +1040,10 @@ def plan_retrieval_queries(query: str) -> list[str]:
                     expanded = f"{shared_prefix} {facet}"
             if expanded.casefold() != normalized.casefold():
                 planned.append(expanded)
+    # Short canonical labels remain strong BM25 queries, but only after every
+    # explicit user issue has obtained its own retrieval query.
+    for concept in matched_concepts:
+        planned.append(concept.label)
     query_ascii = _ascii(normalized)
     for markers, expansion in _LEGAL_QUERY_EXPANSIONS:
         if any(marker in query_ascii for marker in markers):
@@ -987,7 +1053,7 @@ def plan_retrieval_queries(query: str) -> list[str]:
         # short label was inserted above so PostgreSQL full-text search is not
         # over-constrained by this description.
         planned.append(_concept_retrieval_query(concept))
-    return list(dict.fromkeys(planned))[:5]
+    return list(dict.fromkeys(planned))[:8]
 
 
 def adaptive_retrieval_top_k(query: str, base_top_k: int) -> int:
@@ -1005,7 +1071,7 @@ def build_answer_plan(query: str) -> dict[str, Any]:
 
     planned = plan_retrieval_queries(query)
     normalized_query = " ".join(str(query or "").split())
-    facets = _question_facets(normalized_query)
+    facets = _question_facets(str(query or ""))
     question_focus = _question_focus(normalized_query)
     if (
         question_focus
@@ -1015,18 +1081,28 @@ def build_answer_plan(query: str) -> dict[str, Any]:
         facets = [question_focus]
     if not facets and planned:
         facets = [planned[0]]
-    scenario_request_facets = [
+    query_ascii = _ascii(query)
+    explicit_question_facets = [
         facet
         for facet in facets
-        if _SCENARIO_REQUEST_RE.search(_ascii(facet)) is not None
+        if _EXPLICIT_QUESTION_CLAUSE_RE.search(_ascii(facet)) is not None
     ]
     fact_facets: list[str] = []
-    if len(facets) >= 2 and scenario_request_facets:
+    narrative_scenario = (
+        len(_significant_terms(normalized_query)) >= 7
+        and _SCENARIO_ACTOR_RE.search(query_ascii) is not None
+        and _SCENARIO_EVENT_RE.search(query_ascii) is not None
+        and _SCENARIO_REQUEST_RE.search(query_ascii) is not None
+    )
+    if (
+        len(facets) >= 2
+        and narrative_scenario
+        and explicit_question_facets
+    ):
         fact_facets = [
-            facet for facet in facets if facet not in scenario_request_facets
+            facet for facet in facets if facet not in explicit_question_facets
         ]
-        facets = scenario_request_facets
-    query_ascii = _ascii(query)
+        facets = explicit_question_facets
     actor_patterns = (
         ("bạn tôi", r"\bban toi\b"),
         ("tôi", r"\btoi\b"),
@@ -1058,7 +1134,47 @@ def build_answer_plan(query: str) -> dict[str, Any]:
         plan["facts"] = fact_facets
     if question_focus and question_focus != normalized_query:
         plan["question_focus"] = question_focus
-    matched_concepts = _matched_query_concepts(question_focus or query)
+    if len(facets) >= 2:
+        facet_terms = [
+            list(dict.fromkeys(_significant_terms(facet)))
+            for facet in facets
+        ]
+        term_frequency: dict[str, int] = {}
+        for terms in facet_terms:
+            for term in set(terms):
+                term_frequency[term] = term_frequency.get(term, 0) + 1
+        requirements: list[dict[str, Any]] = []
+        for facet, terms in zip(facets, facet_terms, strict=True):
+            unique_terms = [
+                term
+                for term in terms
+                if term_frequency.get(term, 0) == 1
+            ]
+            requirements.append(
+                {
+                    "question": facet,
+                    "coverage_terms": (unique_terms or terms)[:8],
+                    "concepts": [
+                        concept.label
+                        for concept in _matched_query_concepts(facet)
+                    ],
+                }
+            )
+        plan["facet_requirements"] = requirements
+        plan["response_format"] = {
+            "style": "numbered_sections",
+            "section_count": len(facets),
+            "section_titles": facets,
+            "requirements": [
+                "Mỗi section chỉ trả lời một ý tương ứng trong must_answer.",
+                "Mở đầu section bằng kết luận trực tiếp và căn cứ hỗ trợ.",
+                "Nêu điều kiện, ngoại lệ và cách áp dụng khi nguồn có dữ kiện.",
+                "Chỉ đưa ví dụ khi có thể suy ra an toàn từ nguồn; không tự tạo số liệu.",
+            ],
+        }
+    matched_concepts = _matched_query_concepts(
+        query if len(facets) >= 2 else (question_focus or query)
+    )
     if matched_concepts:
         plan["required_concepts"] = [
             {
@@ -1144,6 +1260,7 @@ def _merge_retrieval_rows(
     result_sets: list[list[dict[str, Any]]],
     limit: int,
     queries: list[str] | None = None,
+    required_query_indexes: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     scores: dict[str, float] = {}
@@ -1202,16 +1319,51 @@ def _merge_retrieval_rows(
             str(row.get("chunk_id") or row.get("citation") or ""),
         ),
     )
+    def row_key(row: dict[str, Any]) -> str:
+        return str(
+            row.get("chunk_id")
+            or row.get("node_id")
+            or f"{row.get('doc_id', '')}:{row.get('citation', '')}:{row.get('text', '')[:120]}"
+        )
+
     selected: list[dict[str, Any]] = []
+    selected_keys: set[str] = set()
+    for query_index in sorted(required_query_indexes or set()):
+        if query_index >= len(result_sets):
+            continue
+        for raw_row in result_sets[query_index]:
+            key = row_key(raw_row)
+            if key in selected_keys or key not in merged:
+                continue
+            row = merged[key]
+            row["reasons"] = list(
+                dict.fromkeys(
+                    [
+                        *row.get("reasons", []),
+                        f"required_query_facet:{query_index}",
+                    ]
+                )
+            )
+            selected.append(row)
+            selected_keys.add(key)
+            break
+
     per_document: dict[str, int] = {}
+    for row in selected:
+        document = str(row.get("doc_id") or row.get("citation") or "")
+        per_document[document] = per_document.get(document, 0) + 1
     deferred: list[dict[str, Any]] = []
     document_cap = max(5, int(limit * 0.45))
     for row in ranked:
+        key = row_key(row)
+        if key in selected_keys:
+            continue
         document = str(row.get("doc_id") or row.get("citation") or "")
         if per_document.get(document, 0) >= document_cap:
             deferred.append(row)
             continue
         selected.append(row)
+        selected_keys.add(key)
         per_document[document] = per_document.get(document, 0) + 1
         if len(selected) >= limit:
             return selected
@@ -1417,6 +1569,20 @@ class RetrievalService:
             planned_queries = plan_retrieval_queries(query)[
                 : profile.retrieval_query_limit
             ]
+            explicit_facets = _question_facets(query)
+            required_query_indexes = (
+                set(
+                    range(
+                        1,
+                        min(
+                            len(planned_queries),
+                            len(explicit_facets) + 1,
+                        ),
+                    )
+                )
+                if len(explicit_facets) >= 2
+                else set()
+            )
             query_complexity = max(1, len(_significant_terms(query)))
             result_limit = (
                 base_top_k
@@ -1485,6 +1651,7 @@ class RetrievalService:
                 result_sets,
                 result_limit,
                 planned_queries,
+                required_query_indexes,
             )
             rows = _filter_rows_for_query_intent(query, raw_rows)
             # Keep ordinary single-hop lookups fast. Only widen the hybrid
@@ -1506,6 +1673,7 @@ class RetrievalService:
                         recovery_sets,
                         recovery_limit,
                         planned_queries,
+                        required_query_indexes,
                     )
                     recovery_rows = _filter_rows_for_query_intent(
                         query,

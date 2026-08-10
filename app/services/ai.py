@@ -244,7 +244,10 @@ def _is_organizational_heading(value: str) -> bool:
         return False
     if (
         re.match(r"^#{1,6}\s+\S", stripped)
-        and not re.search(r"[.!?;]\s*$", stripped)
+        and (
+            not re.search(r"[.!?;]\s*$", stripped)
+            or stripped.endswith("?")
+        )
     ):
         return True
     heading_candidate = re.sub(
@@ -1188,8 +1191,8 @@ rõ chi tiết nào chưa có đủ căn cứ, rồi giải thích phần thông
 thực sự chứng minh được.
 
 CÁCH MỞ ĐẦU CÂU TRẢ LỜI — BẮT BUỘC
-- Khi có đủ căn cứ, ký tự đầu tiên của câu trả lời phải là “Theo”. Không chào hỏi, không
-đặt tiêu đề và không mở đầu bằng “Dựa trên…”, “Dưới đây là…” hoặc “Theo thông tin…”.
+- Khi có đủ căn cứ, ký tự đầu tiên của câu trả lời phải là “Theo”. Không chào hỏi và không
+mở đầu bằng “Dựa trên…”, “Dưới đây là…” hoặc “Theo thông tin…”.
 - Dùng trường citation_format của nguồn phù hợp nhất và viết thành một câu ngắn:
 “Theo Điều [số], khoản [số], điểm [chữ], [tên văn bản] số [số hiệu] [Sx],
 [kết luận trực tiếp cho câu hỏi].”
@@ -1200,6 +1203,9 @@ ngày…” khi effective_date có trong nguồn. Không biến law_checked_at t
 hiệu lực.
 - Câu mở đầu phải vừa nêu căn cứ vừa trả lời ngay kết quả chính; không viết một câu căn cứ
 rỗng rồi mới đưa kết luận ở đoạn sau.
+- Riêng câu hỏi có từ hai vế trở lên, câu mở đầu chỉ cần xác nhận đang trả lời theo các căn
+cứ được cung cấp và có [Sx]; kết luận trực tiếp của từng vế phải nằm ngay đầu mục tương ứng,
+tránh nhồi nhiều kết luận không liên quan vào một câu mở đầu.
 
 CẤU TRÚC CHATBOT SAU CÂU MỞ ĐẦU
 - Với câu hỏi đơn giản: trả lời trong 2–4 đoạn ngắn. Sau câu mở đầu, dùng “Hiểu đơn giản:”
@@ -1210,7 +1216,12 @@ Không chỉ chép lại điều luật rồi chuyển sang danh sách nguồn.
 - Với tình huống cụ thể: dùng mục “Áp dụng vào trường hợp của bạn:” và phân biệt rõ hành vi,
 quyền, nghĩa vụ hoặc rủi ro của từng người. Nếu ANSWER_PLAN có focus_actor, phải trả lời
 chủ thể đó trước, không chỉ phân tích người thứ ba.
-- Với câu hỏi nhiều vế: lần lượt trả lời đủ mọi mục trong must_answer, theo đúng thứ tự.
+- Với câu hỏi có từ hai vế trở lên, sau câu mở đầu phải tạo đúng một mục cho mỗi phần tử
+trong must_answer, theo đúng thứ tự và định dạng `### 1. [ý hỏi]`, `### 2. [ý hỏi]`... .
+Không gộp hai ý vào một mục, không đưa câu trả lời của ý này sang mục khác và không bỏ ý.
+Trong mỗi mục: (1) kết luận trực tiếp; (2) căn cứ; (3) điều kiện, trường hợp áp dụng hoặc
+ngoại lệ nếu nguồn có; (4) cách áp dụng thực tế hoặc ví dụ ngắn khi hữu ích và đủ căn cứ.
+Không bắt buộc mọi mục đều có ví dụ và tuyệt đối không tự tạo số liệu cho ví dụ.
 - Với câu hỏi so sánh hoặc tổng hợp: dùng bảng ngắn hoặc các tiêu chí rõ ràng; không lặp lại
 cùng một nội dung dưới nhiều tiêu đề.
 - Với phép tính: nêu công thức, số liệu đầu vào, kết quả và giả định còn thiếu. Không cho

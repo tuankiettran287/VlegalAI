@@ -1669,6 +1669,82 @@ class _AnswerCoverageError(GeminiError):
     """A grounded answer omitted a requested concept after synthesis."""
 
 
+_NUMBERED_ANSWER_SECTION_RE = re.compile(
+    r"(?m)^\s*#{1,6}\s+(\d+)[.)]\s+(.+?)\s*$"
+)
+
+
+def _answer_plan_section_titles(
+    answer_plan: dict[str, Any] | None,
+) -> list[str]:
+    if not answer_plan:
+        return []
+    raw_titles = answer_plan.get("must_answer")
+    if not isinstance(raw_titles, list):
+        return []
+    return [
+        " ".join(str(title).split())
+        for title in raw_titles
+        if str(title).strip()
+    ]
+
+
+def _numbered_answer_sections(value: str) -> dict[int, str]:
+    matches = list(_NUMBERED_ANSWER_SECTION_RE.finditer(str(value or "")))
+    sections: dict[int, str] = {}
+    for index, match in enumerate(matches):
+        section_number = int(match.group(1))
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
+        sections[section_number] = value[match.start() : end].strip()
+    return sections
+
+
+def _validate_answer_structure(
+    value: str,
+    answer_plan: dict[str, Any] | None,
+) -> None:
+    """Require one clearly separated, correctly ordered section per user issue."""
+
+    titles = _answer_plan_section_titles(answer_plan)
+    if len(titles) < 2:
+        return
+    sections = _numbered_answer_sections(value)
+    expected = set(range(1, len(titles) + 1))
+    if set(sections) != expected:
+        raise _AnswerCoverageError(
+            "Câu trả lời nhiều ý phải có đúng một mục đánh số cho từng ý được hỏi."
+        )
+    requirements = answer_plan.get("facet_requirements", []) if answer_plan else []
+    for section_number, title in enumerate(titles, start=1):
+        section = sections[section_number]
+        if not re.search(r"\[S\d+\]", section, re.IGNORECASE):
+            raise _AnswerCoverageError(
+                f"Mục {section_number} chưa có câu trả lời và căn cứ riêng."
+            )
+        if not isinstance(requirements, list) or section_number > len(requirements):
+            continue
+        requirement = requirements[section_number - 1]
+        if not isinstance(requirement, dict):
+            continue
+        heading_match = _NUMBERED_ANSWER_SECTION_RE.search(section)
+        heading = _normalized_legal_reference(
+            heading_match.group(2) if heading_match else ""
+        )
+        terms = {
+            _normalized_legal_reference(str(term))
+            for term in requirement.get("coverage_terms", [])
+            if str(term).strip()
+        }
+        terms.discard("")
+        if terms and not any(
+            re.search(rf"\b{re.escape(term)}\b", heading)
+            for term in terms
+        ):
+            raise _AnswerCoverageError(
+                f"Mục {section_number} không tương ứng với ý hỏi: {title}"
+            )
+
+
 def _answer_validation_kind(exc: BaseException) -> str:
     if isinstance(exc, _AnswerCoverageError):
         return "answer_plan_coverage"
@@ -1776,9 +1852,50 @@ def _validate_answer_plan_coverage(
         raise _AnswerCoverageError(
             "Câu trả lời từ chối theo phạm vi mặc dù hệ thống đã cung cấp căn cứ liên quan."
         )
+    normalized_answer = _normalized_legal_reference(value)
+    raw_facets = answer_plan.get("facet_requirements")
+    missing_facets: list[str] = []
+    if isinstance(raw_facets, list) and len(raw_facets) >= 2:
+        numbered_sections = _numbered_answer_sections(value)
+        for facet_index, raw_facet in enumerate(raw_facets, start=1):
+            if not isinstance(raw_facet, dict):
+                continue
+            question = str(raw_facet.get("question") or "").strip()
+            normalized_facet_answer = _normalized_legal_reference(
+                numbered_sections.get(facet_index, value)
+            )
+            concepts = [
+                _normalized_legal_reference(str(concept))
+                for concept in raw_facet.get("concepts", [])
+                if str(concept).strip()
+            ]
+            if any(concept in normalized_facet_answer for concept in concepts):
+                continue
+            terms = {
+                _normalized_legal_reference(str(term))
+                for term in raw_facet.get("coverage_terms", [])
+                if len(_normalized_legal_reference(str(term))) >= 2
+            }
+            terms.discard("")
+            if not terms and not concepts:
+                continue
+            matched = sum(
+                re.search(
+                    rf"\b{re.escape(term)}\b",
+                    normalized_facet_answer,
+                )
+                is not None
+                for term in terms
+            )
+            if matched < min(2, len(terms)):
+                missing_facets.append(question)
+        if missing_facets:
+            raise _AnswerCoverageError(
+                "Câu trả lời chưa giải quyết đầy đủ từng ý được hỏi: "
+                + "; ".join(missing_facets)
+            )
     raw_anchors = answer_plan.get("intent_anchor_phrases")
     if isinstance(raw_anchors, list):
-        normalized_answer = _normalized_legal_reference(value)
         anchors = [
             _normalized_legal_reference(str(anchor))
             for anchor in raw_anchors
@@ -1795,7 +1912,6 @@ def _validate_answer_plan_coverage(
     if not isinstance(raw_concepts, list):
         return
 
-    normalized_answer = _normalized_legal_reference(value)
     missing: list[str] = []
     for raw_concept in raw_concepts:
         if not isinstance(raw_concept, dict):
@@ -1825,9 +1941,33 @@ def _validate_answer_plan_coverage(
         )
 
 
-def _citation_response_schema(allowed_ids: list[str]) -> dict[str, Any]:
+def _citation_response_schema(
+    allowed_ids: list[str],
+    *,
+    answer_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Constrain one model response to grounded, individually cited claims."""
 
+    section_titles = _answer_plan_section_titles(answer_plan)
+    section_count = len(section_titles) if len(section_titles) >= 2 else 0
+    statement_required = ["text", "citations"]
+    statement_properties: dict[str, Any] = {
+        "text": {"type": "string"},
+        "citations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "string",
+                "enum": allowed_ids,
+            },
+        },
+    }
+    if section_count:
+        statement_required.append("section")
+        statement_properties["section"] = {
+            "type": "integer",
+            "enum": list(range(1, section_count + 1)),
+        }
     return {
         "type": "object",
         "additionalProperties": False,
@@ -1836,22 +1976,12 @@ def _citation_response_schema(allowed_ids: list[str]) -> dict[str, Any]:
             "statements": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 8,
+                "maxItems": max(8, min(40, section_count * 6)),
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["text", "citations"],
-                    "properties": {
-                        "text": {"type": "string"},
-                        "citations": {
-                            "type": "array",
-                            "minItems": 1,
-                            "items": {
-                                "type": "string",
-                                "enum": allowed_ids,
-                            },
-                        },
-                    },
+                    "required": statement_required,
+                    "properties": statement_properties,
                 },
             }
         },
@@ -1863,6 +1993,7 @@ def _render_citation_statements(
     allowed_ids: list[str],
     *,
     sources: list[dict[str, Any]] | None = None,
+    answer_plan: dict[str, Any] | None = None,
 ) -> str:
     """Render schema-constrained claims with a citation on every sentence."""
 
@@ -1889,6 +2020,7 @@ def _render_citation_statements(
             {
                 "text": text,
                 "citations": raw_statement.get("citations", []),
+                "section": raw_statement.get("section"),
             }
         )
     normalized = {"statements": normalized_statements}
@@ -1897,6 +2029,61 @@ def _render_citation_statements(
         str(source.get("source_id") or "").strip().upper(): source
         for source in sources or []
     }
+    section_titles = _answer_plan_section_titles(answer_plan)
+    if len(section_titles) >= 2:
+        grouped: dict[int, list[dict[str, Any]]] = {
+            index: [] for index in range(1, len(section_titles) + 1)
+        }
+        for statement in normalized["statements"]:
+            try:
+                section = int(statement.get("section"))
+            except (TypeError, ValueError) as exc:
+                raise GeminiError(
+                    "Câu trả lời nhiều ý thiếu thông tin phân mục."
+                ) from exc
+            if section not in grouped:
+                raise GeminiError("Câu trả lời chứa số mục không hợp lệ.")
+            grouped[section].append(statement)
+        if any(not statements for statements in grouped.values()):
+            raise GeminiError("Câu trả lời chưa có nội dung riêng cho mọi ý được hỏi.")
+
+        first_statement = grouped[1][0]
+        first_citation = str(first_statement["citations"][0]).strip().upper()
+        parts = [
+            f"Theo các căn cứ pháp luật được cung cấp [{first_citation}]:"
+        ]
+        for section, title in enumerate(section_titles, start=1):
+            clean_title = " ".join(title.strip(" #*-.:?").split())[:300]
+            parts.append(f"### {section}. {clean_title}?")
+            section_units: list[str] = []
+            for statement in grouped[section]:
+                citations = list(
+                    dict.fromkeys(
+                        str(item).strip().upper()
+                        for item in statement["citations"]
+                    )
+                )
+                suffix = " ".join(f"[{item}]" for item in citations)
+                text = re.sub(
+                    r"\s+([,.!?;:])",
+                    r"\1",
+                    str(statement["text"]),
+                )
+                for unit in re.split(r"(?<=[.!?;])\s+|\n+", text):
+                    unit = unit.strip()
+                    if not unit:
+                        continue
+                    terminal = unit[-1] if unit[-1] in ".!?;" else ""
+                    body = unit[:-1].rstrip() if terminal else unit
+                    if not section_units and not body.lstrip().startswith("Theo "):
+                        source = sources_by_id.get(citations[0])
+                        if source is not None:
+                            body = f"Theo {format_source_locator(source)}, {body}"
+                    prefix = "" if not section_units else "- "
+                    section_units.append(f"{prefix}{body} {suffix}{terminal}")
+            parts.append("\n".join(section_units))
+        return "\n\n".join(parts)
+
     rendered_units: list[str] = []
     for statement in normalized["statements"]:
         citations = list(
@@ -1966,7 +2153,10 @@ async def _complete_with_citation_repair(
             structured = await ai.complete_json(
                 system,
                 prompt,
-                schema=_citation_response_schema(allowed_ids),
+                schema=_citation_response_schema(
+                    allowed_ids,
+                    answer_plan=answer_plan,
+                ),
                 max_tokens=max_tokens,
                 temperature=temperature,
                 thinking_budget=thinking_budget,
@@ -1975,6 +2165,7 @@ async def _complete_with_citation_repair(
                 structured,
                 allowed_ids,
                 sources=sources,
+                answer_plan=answer_plan,
             )
         return await ai.complete(
             system,
@@ -2025,6 +2216,7 @@ async def _complete_with_citation_repair(
         draft_safety_valid = True
         if sources is not None:
             _validate_professional_legal_opening(answer)
+        _validate_answer_structure(answer, answer_plan)
         _validate_answer_plan_coverage(answer, answer_plan)
         log_progress(
             logger,
@@ -2054,6 +2246,7 @@ async def _complete_with_citation_repair(
                 draft_safety_valid = True
                 if sources is not None:
                     _validate_professional_legal_opening(normalized_draft)
+                _validate_answer_structure(normalized_draft, answer_plan)
                 _validate_answer_plan_coverage(normalized_draft, answer_plan)
                 log_progress(
                     logger,
@@ -2107,10 +2300,18 @@ async def _complete_with_citation_repair(
             "Phải giải quyết trực tiếp và đầy đủ mọi required_concepts trong "
             "ANSWER_PLAN; không thay bằng khái niệm rộng hoặc gần nghĩa. Khi "
             "nguồn có con số, tỷ lệ, điều kiện hay công thức trực tiếp, phải "
-            "nêu và giải thích cách áp dụng.\n"
+            "nêu và giải thích cách áp dụng. Phải trả lời riêng từng ý trong "
+            "must_answer theo đúng thứ tự, kể cả khi các ý không liên quan; "
+            "không được gộp hoặc bỏ qua bất kỳ ý nào. Khi ANSWER_PLAN có "
+            "response_format.style=numbered_sections, gán trường section cho "
+            "từng nhận định theo đúng số mục tương ứng; mỗi mục phải có ít nhất "
+            "một kết luận và căn cứ riêng.\n"
             f"{untrusted_data_block('DRAFT_WITH_INVALID_CITATIONS', answer)}"
         )
-        repair_schema = _citation_response_schema(allowed_ids)
+        repair_schema = _citation_response_schema(
+            allowed_ids,
+            answer_plan=answer_plan,
+        )
         _repair_timeout = citation_repair_timeout or 0
         repair_start = time.perf_counter()
         try:
@@ -2172,6 +2373,7 @@ async def _complete_with_citation_repair(
             structured,
             allowed_ids,
             sources=sources,
+            answer_plan=answer_plan,
         )
         try:
             _validate_answer_safety(
@@ -2212,6 +2414,7 @@ async def _complete_with_citation_repair(
                     _answer_validation_kind(opening_exc)
                 )
         try:
+            _validate_answer_structure(repaired, answer_plan)
             _validate_answer_plan_coverage(repaired, answer_plan)
         except _AnswerCoverageError as coverage_exc:
             soft_validation_failures.append(

@@ -6,9 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.api import (
+    _citation_response_schema,
     _complete_with_citation_repair,
     _legal_sources,
+    _render_citation_statements,
     _validate_answer_plan_coverage,
+    _validate_answer_structure,
 )
 from app.services.ai import GeminiError, LEGAL_SYSTEM_PROMPT
 from app.services import retrieval as retrieval_module
@@ -63,6 +66,176 @@ def test_compound_question_is_split_and_keeps_focus_actor() -> None:
     assert actor_plan["actors"] == ["bạn tôi", "tôi"]
     assert actor_plan["focus_actor"] == "tôi"
     assert len(actor_plan["must_answer"]) == 2
+
+
+def test_unrelated_compound_questions_keep_every_explicit_issue() -> None:
+    query = (
+        "Mức lương tối thiểu là bao nhiêu? "
+        "Người lao động được nghỉ hằng năm bao nhiêu ngày?"
+    )
+
+    answer_plan = build_answer_plan(query)
+    planned = plan_retrieval_queries(query)
+
+    assert classify_retrieval_route(query) == "multi_hop"
+    assert answer_plan["must_answer"] == [
+        "Mức lương tối thiểu là bao nhiêu",
+        "Người lao động được nghỉ hằng năm bao nhiêu ngày",
+    ]
+    assert planned[1:3] == answer_plan["must_answer"]
+    assert "lương" not in planned[2].casefold()
+    assert len(answer_plan["facet_requirements"]) == 2
+
+
+def test_related_compound_questions_are_not_collapsed_to_last_issue() -> None:
+    query = (
+        "Người lao động có được đơn phương chấm dứt hợp đồng không "
+        "và phải báo trước bao lâu?"
+    )
+
+    answer_plan = build_answer_plan(query)
+
+    assert answer_plan["must_answer"] == [
+        "Người lao động có được đơn phương chấm dứt hợp đồng không",
+        "phải báo trước bao lâu",
+    ]
+    assert len(answer_plan["facet_requirements"]) == 2
+
+
+def test_noun_pair_is_not_mistaken_for_two_questions() -> None:
+    answer_plan = build_answer_plan(
+        "Quyền và nghĩa vụ của người lao động là gì?"
+    )
+
+    assert answer_plan["must_answer"] == [
+        "Quyền và nghĩa vụ của người lao động là gì"
+    ]
+    assert "facet_requirements" not in answer_plan
+
+
+def test_answer_plan_rejects_response_that_omits_one_compound_issue() -> None:
+    answer_plan = build_answer_plan(
+        "Mức lương tối thiểu là bao nhiêu? "
+        "Người lao động được nghỉ hằng năm bao nhiêu ngày?"
+    )
+
+    with pytest.raises(GeminiError, match="chưa giải quyết đầy đủ từng ý"):
+        _validate_answer_plan_coverage(
+            "Mức lương tối thiểu được xác lập theo vùng [S1].",
+            answer_plan,
+        )
+
+    _validate_answer_plan_coverage(
+        (
+            "Mức lương tối thiểu được xác lập theo vùng [S1]. "
+            "Người lao động được nghỉ hằng năm theo thâm niên [S2]."
+        ),
+        answer_plan,
+    )
+
+
+def test_compound_answer_plan_declares_numbered_response_contract() -> None:
+    answer_plan = build_answer_plan(
+        "Mức lương tối thiểu là bao nhiêu? "
+        "Người lao động được nghỉ hằng năm bao nhiêu ngày?"
+    )
+
+    assert answer_plan["response_format"] == {
+        "style": "numbered_sections",
+        "section_count": 2,
+        "section_titles": answer_plan["must_answer"],
+        "requirements": [
+            "Mỗi section chỉ trả lời một ý tương ứng trong must_answer.",
+            "Mở đầu section bằng kết luận trực tiếp và căn cứ hỗ trợ.",
+            "Nêu điều kiện, ngoại lệ và cách áp dụng khi nguồn có dữ kiện.",
+            "Chỉ đưa ví dụ khi có thể suy ra an toàn từ nguồn; không tự tạo số liệu.",
+        ],
+    }
+
+
+def test_compound_structured_answer_renders_one_cited_section_per_issue() -> None:
+    answer_plan = build_answer_plan(
+        "Mức lương tối thiểu là bao nhiêu? "
+        "Người lao động được nghỉ hằng năm bao nhiêu ngày?"
+    )
+    sources = [
+        _source(
+            "S1",
+            citation="Bộ Luật Lao Động (45/2019/QH14) > Điều 91",
+            text="Mức lương tối thiểu được xác lập theo vùng.",
+        ),
+        _source(
+            "S2",
+            citation="Bộ Luật Lao Động (45/2019/QH14) > Điều 113",
+            text="Người lao động được nghỉ hằng năm theo quy định.",
+        ),
+    ]
+    structured = {
+        "statements": [
+            {
+                "section": 1,
+                "text": "Mức lương tối thiểu được xác lập theo vùng.",
+                "citations": ["S1"],
+            },
+            {
+                "section": 2,
+                "text": "Người lao động được nghỉ hằng năm theo thâm niên.",
+                "citations": ["S2"],
+            },
+        ]
+    }
+
+    answer = _render_citation_statements(
+        structured,
+        ["S1", "S2"],
+        sources=sources,
+        answer_plan=answer_plan,
+    )
+
+    assert answer.startswith("Theo các căn cứ pháp luật được cung cấp [S1]:")
+    assert "### 1. Mức lương tối thiểu là bao nhiêu?" in answer
+    assert "### 2. Người lao động được nghỉ hằng năm bao nhiêu ngày?" in answer
+    assert answer.index("### 1.") < answer.index("### 2.")
+    _validate_answer_structure(answer, answer_plan)
+    _validate_answer_plan_coverage(answer, answer_plan)
+
+
+def test_compound_answer_schema_requires_valid_section_number() -> None:
+    answer_plan = build_answer_plan(
+        "Mức lương tối thiểu là bao nhiêu? Nghỉ hằng năm bao nhiêu ngày?"
+    )
+
+    schema = _citation_response_schema(
+        ["S1", "S2"],
+        answer_plan=answer_plan,
+    )
+    statement_schema = schema["properties"]["statements"]["items"]
+
+    assert "section" in statement_schema["required"]
+    assert statement_schema["properties"]["section"]["enum"] == [1, 2]
+
+
+def test_compound_answer_rejects_flat_or_mislabelled_sections() -> None:
+    answer_plan = build_answer_plan(
+        "Mức lương tối thiểu là bao nhiêu? "
+        "Người lao động được nghỉ hằng năm bao nhiêu ngày?"
+    )
+    flat_answer = (
+        "Theo Điều 91 Bộ luật Lao động, mức lương tối thiểu được xác lập "
+        "theo vùng [S1]. Người lao động được nghỉ hằng năm [S2]."
+    )
+    swapped_headings = (
+        "Theo các căn cứ được cung cấp [S1]:\n\n"
+        "### 1. Người lao động được nghỉ hằng năm bao nhiêu ngày?\n\n"
+        "Người lao động được nghỉ hằng năm [S2].\n\n"
+        "### 2. Mức lương tối thiểu là bao nhiêu?\n\n"
+        "Mức lương tối thiểu được xác lập theo vùng [S1]."
+    )
+
+    with pytest.raises(GeminiError, match="đúng một mục đánh số"):
+        _validate_answer_structure(flat_answer, answer_plan)
+    with pytest.raises(GeminiError, match="không tương ứng với ý hỏi"):
+        _validate_answer_structure(swapped_headings, answer_plan)
 
 
 def test_planner_maps_public_sector_base_salary_to_legal_term() -> None:
@@ -803,6 +976,69 @@ def test_retrieval_runs_each_compound_facet_and_merges_results() -> None:
     assert len(store.queries) == len(planned_queries)
     assert set(store.queries) == set(planned_queries)
     assert {row["node_id"] for row in rows} == {"node-S1", "node-S2"}
+    assert any(
+        "required_query_facet:1" in row["reasons"]
+        for row in rows
+        if row["node_id"] == "node-S1"
+    )
+    assert any(
+        "required_query_facet:2" in row["reasons"]
+        for row in rows
+        if row["node_id"] == "node-S2"
+    )
+
+
+def test_retrieval_preserves_evidence_for_two_unrelated_questions() -> None:
+    class _Store:
+        def retrieve(self, query: str, _: int) -> list[dict]:
+            if "nghỉ hằng năm" in query.casefold():
+                return [
+                    _source(
+                        "S2",
+                        citation=(
+                            "Bộ Luật Lao Động (45/2019/QH14) > "
+                            "Điều 113. Nghỉ hằng năm"
+                        ),
+                        text=(
+                            "Người lao động làm việc đủ 12 tháng được nghỉ "
+                            "hằng năm 12 ngày làm việc."
+                        ),
+                    )
+                ]
+            return [
+                _source(
+                    "S1",
+                    citation=(
+                        "Bộ Luật Lao Động (45/2019/QH14) > "
+                        "Điều 91. Mức lương tối thiểu"
+                    ),
+                    text=(
+                        "Mức lương tối thiểu được xác lập theo vùng, "
+                        "ấn định theo tháng, giờ."
+                    ),
+                )
+            ]
+
+    query = (
+        "Mức lương tối thiểu là bao nhiêu? "
+        "Người lao động được nghỉ hằng năm bao nhiêu ngày?"
+    )
+    service = RetrievalService(SimpleNamespace(retrieval_top_k=10))
+    service._store = _Store()
+
+    rows = asyncio.run(service.retrieve(query))
+
+    assert {row["node_id"] for row in rows} == {"node-S1", "node-S2"}
+    assert any(
+        "required_query_facet:1" in row["reasons"]
+        for row in rows
+        if row["node_id"] == "node-S1"
+    )
+    assert any(
+        "required_query_facet:2" in row["reasons"]
+        for row in rows
+        if row["node_id"] == "node-S2"
+    )
 
 
 def test_out_of_scope_vector_results_are_rejected() -> None:

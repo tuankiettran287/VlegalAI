@@ -29,14 +29,14 @@ CHAT_PROCESSING_PROFILES: dict[RetrievalRoute, ChatProcessingProfile] = {
         thinking_budget=1_024,
         max_output_tokens=3_600,
         retrieval_top_k=None,
-        retrieval_query_limit=5,
+        retrieval_query_limit=8,
     ),
     "multi_abstract": ChatProcessingProfile(
         route="multi_abstract",
         thinking_budget=4_096,
         max_output_tokens=8_192,
         retrieval_top_k=16,
-        retrieval_query_limit=5,
+        retrieval_query_limit=8,
     ),
 }
 
