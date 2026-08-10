@@ -26,7 +26,7 @@ from app.services.embeddings import EmbeddingConfig, get_embedding_service
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATA_DIR = PROJECT_ROOT / "Data (1)"
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "legal-documents"
 DEFAULT_STORAGE_DIR = PROJECT_ROOT / "storage" / "graphrag"
 DEFAULT_DB_PATH = DEFAULT_STORAGE_DIR / "legal_graphrag.sqlite"
 

@@ -84,7 +84,7 @@ services:
       LEGAL_GRAPHRAG_DB: /app/storage/graphrag/legal_graphrag.sqlite
     volumes:
       - type: bind
-        source: "./Data (1)"
+        source: "./data/legal-documents"
         target: /app/legal-data
         read_only: true
       - type: bind

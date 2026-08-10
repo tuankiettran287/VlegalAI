@@ -10,7 +10,7 @@ services:
     <<: *build
     image: "${GCP_REGION:-asia-southeast1}-docker.pkg.dev/${GCP_PROJECT_ID:?Set GCP_PROJECT_ID}/${GCP_REPOSITORY:-vlegal}/vlegal-app:${IMAGE_TAG:-latest}"
     build:
-      context: .
+      context: ../..
       dockerfile: docker/app.Dockerfile
       args:
         VCS_REF: "${IMAGE_TAG:-latest}"

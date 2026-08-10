@@ -99,7 +99,7 @@ jobs:
           : > .env
           printf '{}\n' > "${GCP_CREDENTIALS_FILE}"
           docker compose --file docker-compose.yml config --quiet
-          docker compose --file compose.gcp.yml config --quiet
+          docker compose --file deployment/gcp/compose.gcp.yml config --quiet
 
       - name: Run backend tests
         run: python -m pytest -q
@@ -359,7 +359,7 @@ jobs:
             $parameters.ExecuteReindex = $true
           }
 
-          ./scripts/gcp/deploy.ps1 @parameters
+          ./deployment/gcp/scripts/deploy.ps1 @parameters
 
       - name: Verify production health
         shell: bash

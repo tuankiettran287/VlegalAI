@@ -6,12 +6,13 @@ Tài liệu mô tả cấu trúc đồ thị tri thức, quy tắc trích xuất
 
 | Thành phần | Tệp |
 | --- | --- |
-| Từ điển bản thể học (ontology) | [app/legal_ontology.py](app/legal_ontology.py) |
-| Bộ dựng đồ thị + kho truy hồi cục bộ | [app/legal_graphrag.py](app/legal_graphrag.py) |
-| Đồng bộ Neo4j + PostgreSQL/pgvector | [app/external_graphrag.py](app/external_graphrag.py) |
-| Script dựng chỉ mục | [scripts/build_graphrag.py](scripts/build_graphrag.py) |
-| Bộ câu hỏi kiểm thử | [evaluation/question_bank.json](evaluation/question_bank.json) |
-| Trình chạy đánh giá | [scripts/run_question_bank.py](scripts/run_question_bank.py) |
+| Từ điển bản thể học (ontology) | [app/legal_ontology.py](../../app/legal_ontology.py) |
+| Bộ dựng đồ thị + kho truy hồi cục bộ | [app/legal_graphrag.py](../../app/legal_graphrag.py) |
+| Đồng bộ Neo4j + PostgreSQL/pgvector | [app/external_graphrag.py](../../app/external_graphrag.py) |
+| Script dựng chỉ mục | [scripts/build_graphrag.py](../../scripts/build_graphrag.py) |
+| Bộ dữ liệu benchmark | [questions_100_gemini.jsonl](../../evaluation/benchmarks/ragas-gemini-100/questions_100_gemini.jsonl) |
+| Tổng hợp kết quả benchmark | [benchmark_summary.json](../../evaluation/benchmarks/ragas-gemini-100/benchmark_summary.json) |
+| Trình chạy đánh giá | [scripts/run_question_bank.py](../../scripts/run_question_bank.py) |
 
 ---
 
@@ -28,7 +29,7 @@ Kho dữ liệu gồm **57 văn bản quy phạm pháp luật** (Bộ luật Lao
  Tầng 6 · Thời gian & thời hiệu
  Tầng 5 · Quy trình & thủ tục hành chính
  Tầng 4 · Chủ thể & quan hệ lao động
- Tầng 3 · TIỀN LƯƠNG & TIỀN THƯỞNG          ← tầng nghiệp vụ trọng tâm
+ Tầng 3 · TIỀN LƯƠNG & TIỀN THƯỞNG
  Tầng 2 · Thuật ngữ & chủ đề
  Tầng 1 · Cấu trúc văn bản (Chương/Mục/Điều/Khoản/Điểm/Bảng)
  Tầng 0 · Nguồn & hiệu lực (văn bản, cơ quan ban hành, ngày hiệu lực)
@@ -151,7 +152,7 @@ Hành vi vi phạm được **khai thác tự động từ tiêu đề điều l
 * Nút: `ÁnLệ`, `TìnhTiếtCốtLõi`, `PhánQuyết`
 * Quan hệ: `ÁP_DỤNG_ĐIỀU_LUẬT`, `CÓ_TÌNH_TIẾT_TƯƠNG_TỰ`, `DẪN_ĐẾN_PHÁN_QUYẾT`
 
-Kho dữ liệu hiện tại chưa có bản án nên tầng này sẵn sàng nhưng rỗng; chỉ cần thả tệp bản án vào `Data (1)` là tầng tự sinh.
+Kho dữ liệu hiện tại chưa có bản án nên tầng này sẵn sàng nhưng rỗng; chỉ cần thả tệp bản án vào `data/legal-documents` là tầng tự sinh.
 
 ---
 
@@ -253,7 +254,7 @@ Riêng thay đổi này nâng tỷ lệ đạt của tầng multi-abstract từ 
 
 ### 5.3 Trọng số quan hệ
 
-Điểm của nút mở rộng = điểm nút gốc × trọng số quan hệ. Bảng đầy đủ nằm trong `RELATIONS` của [app/legal_ontology.py](app/legal_ontology.py); một số giá trị tiêu biểu:
+Điểm của nút mở rộng = điểm nút gốc × trọng số quan hệ. Bảng đầy đủ nằm trong `RELATIONS` của [app/legal_ontology.py](../../app/legal_ontology.py); một số giá trị tiêu biểu:
 
 | Quan hệ | Trọng số |
 | --- | ---: |
@@ -280,39 +281,30 @@ Khi câu hỏi chứa dấu hiệu tổng hợp (*"tổng hợp"*, *"liệt kê"
 
 ### 6.1 Bộ câu hỏi
 
-[evaluation/question_bank.json](evaluation/question_bank.json) gồm **70 câu hỏi**, phân theo độ sâu suy luận:
+[questions_100_gemini.jsonl](../../evaluation/benchmarks/ragas-gemini-100/questions_100_gemini.jsonl) gồm **100 câu hỏi** do Gemini sinh, phân theo kiểu tổng hợp:
 
 | Tầng | Số câu | Mô tả |
 | --- | ---: | --- |
-| **Single-hop** | 25 | Câu trả lời nằm gọn trong một điều/khoản (định nghĩa, con số, tỷ lệ). |
-| **Multi-hop** | 30 | Phải nối ≥2 nút: nhiều điều cùng văn bản, hoặc luật gốc ↔ nghị định hướng dẫn ↔ nghị định xử phạt. |
-| **Multi-abstract** | 15 | Không đoạn văn nào chứa sẵn câu trả lời — phải so sánh, tổng hợp hoặc trừu tượng hoá trên nhiều nguồn. |
+| **Single-hop specific** | 50 | Câu trả lời nằm trong một ngữ cảnh pháp lý cụ thể. |
+| **Multi-hop specific** | 25 | Phải nối nhiều ngữ cảnh để trả lời một vấn đề cụ thể. |
+| **Multi-hop abstract** | 25 | Phải tổng hợp hoặc trừu tượng hoá trên nhiều ngữ cảnh. |
 
 Mỗi câu khai báo:
-* `expect_any` / `expect_all` / `expect_min` — các căn cứ pháp lý bắt buộc (đã đối chiếu tay với kho văn bản);
-* `expect_text` — dữ kiện bắt buộc phải có trong **nguồn truy hồi**;
-* `answer_must_contain` — dữ kiện bắt buộc phải có trong **câu trả lời cuối cùng**.
+* `user_input` / `reference` — câu hỏi và câu trả lời tham chiếu;
+* `reference_context_ids` / `reference_contexts` — ngữ cảnh chuẩn để đối chiếu truy hồi;
+* `reference_citations` / `doc_ids` — căn cứ và văn bản nguồn;
+* `synthesizer` / `relation` — kiểu tổng hợp và quan hệ được kiểm thử.
 
-### 6.2 Chạy đánh giá
+### 6.2 Artifact đánh giá
 
-```bash
-# Chỉ chấm truy hồi (nhanh, không cần LLM)
-python scripts/run_question_bank.py --top-k 16
+Toàn bộ một lần chạy được giữ cùng nhau trong `evaluation/benchmarks/ragas-gemini-100/`:
 
-# Chạy toàn bộ đường ống: truy hồi → dựng ngữ cảnh → Gemini → chấm điểm
-GEMINI_USE_ADC=true python scripts/run_question_bank.py \
-    --mode full --judge --top-k 16 \
-    --report storage/eval/full_system.json \
-    --markdown storage/eval/BAO_CAO_DANH_GIA.md
+* `retrieval_*.jsonl` — ngữ cảnh và điểm truy hồi theo kiến trúc;
+* `answers_*.jsonl` — câu trả lời, trích dẫn và độ trễ;
+* `ragas_*_checkpoint.jsonl` / `ragas_scores_*.csv` — checkpoint và điểm RAGAS;
+* `benchmark_summary.json` / `architecture_comparison.*` — tổng hợp và biểu đồ so sánh.
 
-# Lọc theo tầng / chủ đề
-python scripts/run_question_bank.py --tier multi_abstract
-python scripts/run_question_bank.py --topic tien-luong-tien-thuong
-```
-
-Chỉ số được đo: `hit@k`, `citation recall`, độ phủ dữ kiện trong nguồn và trong câu trả lời, tỷ lệ trích dẫn `[Sx]` hợp lệ (phát hiện bịa nguồn), điểm LLM-judge 0–5, và độ trễ p50/p95 tách riêng cho truy hồi và sinh câu trả lời.
-
-Báo cáo kết quả mới nhất: [storage/eval/BAO_CAO_DANH_GIA.md](storage/eval/BAO_CAO_DANH_GIA.md).
+Tóm tắt máy đọc được mới nhất nằm tại [benchmark_summary.json](../../evaluation/benchmarks/ragas-gemini-100/benchmark_summary.json).
 
 ---
 
@@ -320,13 +312,13 @@ Báo cáo kết quả mới nhất: [storage/eval/BAO_CAO_DANH_GIA.md](storage/e
 
 Thứ tự thử kết nối khi phục vụ API: **Neo4j + PostgreSQL (hybrid)** → **PostgreSQL** → **Neo4j** → **SQLite cục bộ**. Khi mọi cơ sở dữ liệu ngoài mất kết nối, hệ thống tự chuyển sang `GraphRAGStore` cục bộ và giao diện hiển thị cảnh báo đang chạy ở chế độ ngoại tuyến.
 
-Ánh xạ tên quan hệ tiếng Việt sang nhãn Neo4j được sinh trực tiếp từ `RELATIONS` trong ontology (xem `RELATION_TYPE_MAP` trong [app/external_graphrag.py](app/external_graphrag.py)), nên thêm một quan hệ mới vào ontology là đủ để nó chảy qua toàn bộ hệ thống.
+Ánh xạ tên quan hệ tiếng Việt sang nhãn Neo4j được sinh trực tiếp từ `RELATIONS` trong ontology (xem `RELATION_TYPE_MAP` trong [app/external_graphrag.py](../../app/external_graphrag.py)), nên thêm một quan hệ mới vào ontology là đủ để nó chảy qua toàn bộ hệ thống.
 
 ---
 
 ## 8. Mở rộng đồ thị
 
-Thêm một khái niệm mới chỉ cần sửa dữ liệu trong [app/legal_ontology.py](app/legal_ontology.py):
+Thêm một khái niệm mới chỉ cần sửa dữ liệu trong [app/legal_ontology.py](../../app/legal_ontology.py):
 
 ```python
 WAGE_COMPONENTS = (

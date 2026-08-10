@@ -56,7 +56,7 @@ if (
     }
 }
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
 if ([string]::IsNullOrWhiteSpace($Tag)) {
     $Tag = (& git -C $repoRoot rev-parse --short HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($Tag)) {

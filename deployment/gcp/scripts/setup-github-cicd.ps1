@@ -11,7 +11,7 @@ param(
 
     [string]$Region = "asia-southeast1",
     [ValidatePattern("^[A-Za-z0-9._/-]+$")]
-    [string]$Branch = "master",
+    [string]$Branch = "deploy/unified-cloud-run",
     [ValidatePattern("^[a-z][a-z0-9-]{3,31}$")]
     [string]$PoolId = "github-actions",
     [ValidatePattern("^[a-z][a-z0-9-]{3,31}$")]

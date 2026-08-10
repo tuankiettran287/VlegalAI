@@ -178,7 +178,7 @@ class Settings(BaseSettings):
     bm25_k1: float = Field(default=1.5, gt=0)
     bm25_b: float = Field(default=0.75, ge=0, le=1)
 
-    legal_data_dir: str = str(PROJECT_ROOT / "Data (1)")
+    legal_data_dir: str = str(PROJECT_ROOT / "data" / "legal-documents")
     legal_storage_dir: str = str(PROJECT_ROOT / "storage" / "graphrag")
     legal_graphrag_db: str = str(PROJECT_ROOT / "storage" / "graphrag" / "legal_graphrag.sqlite")
 

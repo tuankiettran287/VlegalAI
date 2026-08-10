@@ -41,13 +41,15 @@ thái từng văn bản, URL chính thức và việc chỉ mục có vừa đư
 - `app/legal_ontology.py`: bản thể học 10 tầng của đồ thị pháp luật (loại nút, quan hệ,
   trọng số truy hồi, từ điển tiền lương/tiền thưởng, chế tài, chủ đề).
 - `app/legal_graphrag.py`: bộ dựng đồ thị từ `.docx` và kho truy hồi cục bộ SQLite + FTS5.
-- `evaluation/question_bank.json` + `scripts/run_question_bank.py`: bộ 70 câu hỏi phân tầng
-  single-hop → multi-hop → multi-abstract và trình chạy đo độ chính xác, độ trễ.
-  Chi tiết kiến trúc: [GraphRAG_Documentation.md](GraphRAG_Documentation.md).
+- `evaluation/benchmarks/ragas-gemini-100/`: bộ benchmark 100 câu và toàn bộ
+  artifact truy hồi, câu trả lời, checkpoint RAGAS, bảng điểm và biểu đồ so sánh.
+  Chi tiết kiến trúc: [docs/architecture/GraphRAG_Documentation.md](docs/architecture/GraphRAG_Documentation.md).
 - `app/worker.py`: Celery refresh toàn bộ kho luật theo lịch.
 - `migrations/`: Alembic PostgreSQL migrations.
-- `compose.gcp.yml`: build/tag các image `linux/amd64` cho Google Artifact Registry.
-- `scripts/gcp/`: build và deploy Cloud Run Service, Worker Pool và Job.
+- `data/legal-documents/`: corpus văn bản pháp luật nguồn.
+- `docs/architecture/`: tài liệu và sơ đồ kiến trúc.
+- `evaluation/benchmarks/`: dữ liệu đầu vào và kết quả benchmark.
+- `deployment/gcp/`: manifest, tài liệu và script triển khai Google Cloud.
 
 Nội dung hội thoại, tài liệu hợp đồng, feedback và văn bản trong gói ký được mã
 hóa AES-256-GCM trước khi lưu PostgreSQL. PostgreSQL cũng lưu rate limit, cung
@@ -71,7 +73,7 @@ Câu hỏi có ngữ cảnh riêng luôn sinh câu trả lời mới.
 ## Cấu hình
 
 Cho môi trường local, sao chép `.env.example` thành `.env`. Trên GCP, cấu hình
-runtime được truyền bởi `scripts/gcp/deploy.ps1`; secret được đọc từ Secret Manager
+runtime được truyền bởi `deployment/gcp/scripts/deploy.ps1`; secret được đọc từ Secret Manager
 và Gemini dùng service identity qua ADC. Các biến bắt buộc cho production:
 
 - `DATABASE_URL`
@@ -96,9 +98,8 @@ Suggestions trong Vertex AI.
 Trên Cloud Run, đặt `GEMINI_USE_ADC=true` để dùng service identity; file
 `GEMINI_CREDENTIALS_PATH` chỉ cần cho môi trường local không dùng ADC.
 
-Deploy thủ công API từ Cloud Shell bằng Buildpacks và nhập credential kín vào
-Secret Manager theo
-[`scripts/gcp/CLOUD_SHELL_BUILDPACKS.md`](scripts/gcp/CLOUD_SHELL_BUILDPACKS.md).
+Deploy thủ công và nhập credential kín vào Secret Manager theo
+[hướng dẫn Cloud Run](deployment/gcp/deploy-gcp-cloud-run.md).
 
 `GEMINI_DATA_POLICY=redact` là mặc định: email, số điện thoại, định danh, số tài
 khoản và secret phổ biến được che trước khi gửi ra Vertex AI/Tavily/Google Search.
@@ -203,13 +204,13 @@ Service account phải có `roles/aiplatform.user` và project phải bật
 `aiplatform.googleapis.com`. Reindex sẽ gửi corpus tới Vertex AI để tạo lại toàn
 bộ vector.
 
-Xem [hướng dẫn Cloud Run](deploy-gcp-cloud-run.md) để build và triển khai lên GCP.
+Xem [hướng dẫn Cloud Run](deployment/gcp/deploy-gcp-cloud-run.md) để build và triển khai lên GCP.
 Frontend/API dùng chung một service `vlegalai` với URL `run.app`; worker/beat là
 Worker Pool, migration/reindex là Job. PostgreSQL chạy trên Cloud SQL và Neo4j
 chạy trên Neo4j Aura.
 
 Để tự động test, build và deploy mỗi khi push vào `master`, xem
-[hướng dẫn CI/CD GitHub Actions](cicd-gcp.md). Workflow dùng Workload Identity
+[hướng dẫn CI/CD GitHub Actions](deployment/gcp/cicd-gcp.md). Workflow dùng Workload Identity
 Federation, không lưu service-account JSON key trong GitHub.
 
 > VLegal AI hỗ trợ nghiên cứu và nghiệp vụ, không thay thế ý kiến của luật sư

@@ -1,7 +1,7 @@
 # CI/CD VLegalAI với GitHub Actions và Google Cloud
 
-Workflow [`.github/workflows/deploy-gcp.yml`](.github/workflows/deploy-gcp.yml)
-chạy CI khi có pull request vào `master`; khi push vào `master` hoặc chạy thủ
+Workflow [`.github/workflows/deploy-gcp.yml`](../../.github/workflows/deploy-gcp.yml)
+chạy CI khi có pull request vào `master`; khi push vào `deploy/unified-cloud-run` hoặc chạy thủ
 công, workflow tiếp tục chạy toàn bộ CD production:
 
 1. Kiểm tra dependency Python, compile source, Alembic chỉ có một head, cú pháp
@@ -13,7 +13,7 @@ công, workflow tiếp tục chạy toàn bộ CD production:
 5. Đăng nhập Google Cloud bằng GitHub OIDC/Workload Identity Federation.
 6. Build và push image `vlegal-app` bằng tag Git commit SHA bất biến.
 7. Chạy Cloud Run migration job và chờ hoàn tất.
-8. Deploy service hợp nhất `vlegal-unified`, Celery worker/beat và cập nhật reindex job.
+8. Deploy service hợp nhất `vlegalai`, Celery worker/beat và cập nhật reindex job.
 9. Gọi cả `/api/health/live` và `/api/health/ready` qua service hợp nhất.
 10. Chỉ sau khi hai health check thành công mới chuyển tag `latest` sang image
     vừa được xác minh.
@@ -31,7 +31,7 @@ Script đã mặc định khóa vào repository `tuankiettran287/VlegalAI` với
 ID `1299341579` và owner ID `148296828`. Chạy bootstrap một lần:
 
 ```powershell
-.\scripts\gcp\setup-github-cicd.ps1 `
+.\deployment\gcp\scripts\setup-github-cicd.ps1 `
   -ProjectId "YOUR_PROJECT_ID" `
   -Region "asia-southeast1"
 ```
@@ -45,7 +45,7 @@ Script thực hiện idempotent:
 - tạo deployment/runtime service account nếu chưa có;
 - cấp quyền Cloud Run, Artifact Registry, Vertex AI, Cloud SQL và Secret Manager;
 - tạo GitHub OIDC provider;
-- chỉ cho phép đúng numeric repository ID, owner ID và nhánh `master`;
+- chỉ cho phép đúng numeric repository ID, owner ID và nhánh `deploy/unified-cloud-run`;
 - in ra toàn bộ giá trị cần thêm vào GitHub.
 
 Sau khi tạo mới Workload Identity Pool/Provider, có thể cần chờ vài phút để IAM
@@ -66,7 +66,7 @@ Thêm các environment variables do script bootstrap in ra:
 | `EMBEDDING_VERTEX_LOCATIONS` | `asia-east1|asia-east2|...|us-west4` (bỏ trống để dùng pool mặc định) |
 | `EMBEDDING_VERTEX_REQUESTS_PER_MINUTE` | `4.5` |
 | `GCP_REPOSITORY` | `vlegal` |
-| `GCP_RUN_SERVICE` | `vlegal-unified` |
+| `GCP_RUN_SERVICE` | `vlegalai` |
 | `GCP_RUN_SERVICE_ACCOUNT` | `vlegal-run@PROJECT_ID.iam.gserviceaccount.com` |
 | `GCP_DEPLOY_SERVICE_ACCOUNT` | `vlegal-github-deploy@PROJECT_ID.iam.gserviceaccount.com` |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/providers/vlegal` |
@@ -96,12 +96,12 @@ Các secret ứng dụng sau vẫn phải tồn tại trong Google Secret Manage
 
 ## 3. Deploy tự động
 
-Commit các file CI/CD và push lên `master`:
+Commit các file CI/CD và push lên `deploy/unified-cloud-run`:
 
 ```powershell
 git add .
 git commit -m "Add GCP CI/CD"
-git push origin master
+git push origin deploy/unified-cloud-run
 ```
 
 Theo dõi workflow:
@@ -122,7 +122,7 @@ Sau khi thay model embedding, task type, vector dimension hoặc corpus:
 
 ```powershell
 gh workflow run deploy-gcp.yml `
-  --ref master `
+  --ref deploy/unified-cloud-run `
   -f run_reindex=true
 ```
 

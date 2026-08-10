@@ -65,12 +65,12 @@ gcloud storage buckets add-iam-policy-binding "gs://$CORPUS_BUCKET" `
   --member="serviceAccount:$RUN_SA" `
   --role="roles/storage.objectViewer"
 
-gcloud storage rsync ".\Data (1)" "gs://$CORPUS_BUCKET" --recursive
+gcloud storage rsync ".\data\legal-documents" "gs://$CORPUS_BUCKET" --recursive
 ```
 
 ## 3. Secret Manager
 
-Tạo các secret mà `scripts/gcp/deploy.ps1` tham chiếu:
+Tạo các secret mà `deployment/gcp/scripts/deploy.ps1` tham chiếu:
 
 - `vlegal-database-url`
 - `vlegal-neo4j-password`
@@ -93,7 +93,7 @@ Nếu secret đã tồn tại, thêm version mới bằng `gcloud secrets versio
 ## 4. Build và push image
 
 ```powershell
-.\scripts\gcp\build-images.ps1 `
+.\deployment\gcp\scripts\build-images.ps1 `
   -ProjectId $PROJECT_ID `
   -Region $REGION `
   -Repository $AR_REPO `
@@ -107,7 +107,7 @@ Cloud Run cấu hình command/args riêng cho migration, reindex và Celery.
 ## 5. Deploy và reindex
 
 ```powershell
-.\scripts\gcp\deploy.ps1 `
+.\deployment\gcp\scripts\deploy.ps1 `
   -ProjectId $PROJECT_ID `
   -Region $REGION `
   -EmbeddingLocation $EMBEDDING_LOCATION `
@@ -161,7 +161,7 @@ tra hiệu lực pháp luật bắt buộc.
 Sau mọi thay đổi model embedding hoặc task type, chạy:
 
 ```powershell
-.\scripts\gcp\deploy.ps1 `
+.\deployment\gcp\scripts\deploy.ps1 `
   -ProjectId $PROJECT_ID `
   -Region $REGION `
   -EmbeddingLocation $EMBEDDING_LOCATION `
@@ -180,5 +180,5 @@ truy hồi vector.
 
 ## 8. CI/CD
 
-Để tự động test, build image hợp nhất và deploy khi push vào nhánh `master`, xem
+Để tự động test, build image hợp nhất và deploy khi push vào nhánh `deploy/unified-cloud-run`, xem
 [CI/CD với GitHub Actions và Workload Identity Federation](cicd-gcp.md).

@@ -13,7 +13,7 @@ RUNTIME_SERVICE_ACCOUNT="${GCP_RUN_SERVICE_ACCOUNT:-}"
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/gcp/setup-secret-manager.sh [options]
+  ./deployment/gcp/scripts/setup-secret-manager.sh [options]
 
 Options:
   --project PROJECT_ID
