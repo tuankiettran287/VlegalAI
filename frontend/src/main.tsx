@@ -6,6 +6,7 @@ import "./styles.css";
 import "./redesign.css";
 import "./professional.css";
 import "./landing.css";
+import "./onboarding.css";
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>

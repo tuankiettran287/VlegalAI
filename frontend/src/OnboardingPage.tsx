@@ -1,5 +1,13 @@
 import { FormEvent, useState } from "react";
-import { ArrowRight, Scale, ShieldCheck } from "lucide-react";
+import {
+  ArrowRight,
+  CheckCircle2,
+  MessageSquareText,
+  Scale,
+  ShieldCheck,
+  Sparkles,
+  UserRound,
+} from "lucide-react";
 
 import type { User } from "./types";
 
@@ -32,66 +40,88 @@ export default function OnboardingPage({ user, onComplete }: OnboardingPageProps
 
   return (
     <main className="onboarding-page">
-      <section className="onboarding-copy" aria-labelledby="onboarding-title">
-        <div className="onboarding-brand">
-          <span><Scale size={22} /></span>
-          VLegal AI
-        </div>
-        <p className="onboarding-step">Bước cuối trước khi bắt đầu</p>
-        <h1 id="onboarding-title">Tôi nên gọi bạn là gì?</h1>
-        <p className="onboarding-intro">
-          Nhập tên hoặc biệt danh bạn thấy thoải mái. VLegal sẽ dùng tên này để
-          chào bạn trong cuộc trò chuyện mới.
-        </p>
-
-        <form className="onboarding-form" onSubmit={submit}>
-          <label htmlFor="preferred-name">Tên hoặc biệt danh</label>
-          <div className="onboarding-input-row">
-            <input
-              id="preferred-name"
-              name="preferred-name"
-              value={preferredName}
-              maxLength={60}
-              autoComplete="nickname"
-              autoFocus
-              placeholder="Ví dụ: Minh, An, Luật sư Mây…"
-              onChange={(event) => setPreferredName(event.target.value)}
-              aria-describedby={error ? "onboarding-error" : "onboarding-help"}
-            />
-            <button type="submit" disabled={saving || !preferredName.trim()}>
-              {saving ? "Đang lưu…" : "Bắt đầu trò chuyện"}
-              {!saving && <ArrowRight size={17} />}
-            </button>
+      <div className="onboarding-shell">
+        <section className="onboarding-copy" aria-labelledby="onboarding-title">
+          <div className="onboarding-brand">
+            <span><Scale size={22} /></span>
+            <div>
+              <strong>VLegal</strong>
+              <small>Legal Intelligence</small>
+            </div>
           </div>
-          {error ? (
-            <p className="onboarding-error" id="onboarding-error" role="alert">{error}</p>
-          ) : (
-            <p className="onboarding-help" id="onboarding-help">Bạn có thể dùng tối đa 60 ký tự.</p>
-          )}
-        </form>
 
-        <div className="onboarding-account">
-          <span className="onboarding-avatar">
-            {user.avatar_url
-              ? <img src={user.avatar_url} alt="" />
-              : user.display_name.charAt(0).toUpperCase()}
-          </span>
-          <span>
-            <strong>Đã đăng nhập bằng Google</strong>
-            <small>{user.email}</small>
-          </span>
-          <ShieldCheck size={18} />
-        </div>
-      </section>
+          <div className="onboarding-content">
+            <p className="onboarding-step"><Sparkles size={14} /> Bước cuối trước khi bắt đầu</p>
+            <h1 id="onboarding-title">Tôi nên gọi bạn là <em>gì?</em></h1>
+            <p className="onboarding-intro">
+              Nhập tên hoặc biệt danh bạn thấy thoải mái. VLegal sẽ dùng tên này để
+              chào bạn trong những cuộc trò chuyện tiếp theo.
+            </p>
 
-      <aside className="onboarding-aside" aria-hidden="true">
-        <div className="onboarding-orbit one" />
-        <div className="onboarding-orbit two" />
-        <div className="onboarding-quote">
-          <span>VLegal ghi nhớ cách xưng hô,</span>
-          <strong>để mỗi cuộc trao đổi bắt đầu tự nhiên hơn.</strong>
-        </div>
-      </aside>
+            <form className="onboarding-form" onSubmit={submit}>
+              <label htmlFor="preferred-name">Tên hoặc biệt danh</label>
+              <div className="onboarding-input-row">
+                <div className="onboarding-input-control">
+                  <UserRound size={19} aria-hidden="true" />
+                  <input
+                    id="preferred-name"
+                    name="preferred-name"
+                    value={preferredName}
+                    maxLength={60}
+                    autoComplete="nickname"
+                    autoFocus
+                    placeholder="Ví dụ: Minh, An, Luật sư Mây…"
+                    onChange={(event) => setPreferredName(event.target.value)}
+                    aria-describedby={error ? "onboarding-error" : "onboarding-help"}
+                  />
+                  <span className="onboarding-count" aria-hidden="true">{preferredName.length}/60</span>
+                </div>
+                <button type="submit" disabled={saving || !preferredName.trim()}>
+                  {saving ? "Đang lưu…" : "Tiếp tục"}
+                  {!saving && <ArrowRight size={18} />}
+                </button>
+              </div>
+              {error ? (
+                <p className="onboarding-error" id="onboarding-error" role="alert">{error}</p>
+              ) : (
+                <p className="onboarding-help" id="onboarding-help">
+                  Đây là tên VLegal sẽ dùng để trò chuyện với bạn.
+                </p>
+              )}
+            </form>
+          </div>
+
+          <div className="onboarding-account">
+            <span className="onboarding-avatar">
+              {user.avatar_url
+                ? <img src={user.avatar_url} alt="" />
+                : user.display_name.charAt(0).toUpperCase()}
+            </span>
+            <span className="onboarding-account-copy">
+              <strong>{user.display_name}</strong>
+              <small>{user.email}</small>
+            </span>
+            <span className="onboarding-verified" title="Đã xác thực bằng Google">
+              <ShieldCheck size={18} />
+            </span>
+          </div>
+        </section>
+
+        <aside className="onboarding-aside" aria-hidden="true">
+          <div className="onboarding-orbit one" />
+          <div className="onboarding-orbit two" />
+          <div className="onboarding-aside-badge"><MessageSquareText size={17} /> Không gian của bạn</div>
+          <div className="onboarding-quote">
+            <span>CÁ NHÂN HÓA TRẢI NGHIỆM</span>
+            <strong>Một cách xưng hô phù hợp giúp cuộc trao đổi tự nhiên hơn.</strong>
+            <p>VLegal ghi nhớ tên bạn chọn và dùng tên đó khi bắt đầu cuộc trò chuyện mới.</p>
+          </div>
+          <div className="onboarding-benefits">
+            <div><CheckCircle2 size={17} /><span><strong>Xưng hô tự nhiên</strong><small>Thân thiện trong từng câu trả lời</small></span></div>
+            <div><ShieldCheck size={17} /><span><strong>Thông tin được bảo vệ</strong><small>Gắn với tài khoản Google của bạn</small></span></div>
+          </div>
+        </aside>
+      </div>
     </main>
   );
 }
