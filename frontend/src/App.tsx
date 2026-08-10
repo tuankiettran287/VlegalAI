@@ -340,6 +340,22 @@ function formatFileSize(value: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const COMPOSER_TEXTAREA_MIN_HEIGHT = 48;
+const COMPOSER_TEXTAREA_MAX_HEIGHT = 188;
+
+function resizeComposerTextarea(element: HTMLTextAreaElement | null) {
+  if (!element) return;
+  element.style.height = "auto";
+  const nextHeight = Math.min(
+    COMPOSER_TEXTAREA_MAX_HEIGHT,
+    Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, element.scrollHeight),
+  );
+  element.style.height = `${nextHeight}px`;
+  element.style.overflowY = element.scrollHeight > COMPOSER_TEXTAREA_MAX_HEIGHT
+    ? "auto"
+    : "hidden";
+}
+
 function usePath() {
   const [path, setPath] = useState(() => window.location.pathname.replace(/\/$/, "") || "/");
   useEffect(() => {
@@ -648,6 +664,7 @@ export function ChatPage({
   const [feedbackLoadingId, setFeedbackLoadingId] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const imageAttachmentInputRef = useRef<HTMLInputElement>(null);
   const documentAttachmentInputRef = useRef<HTMLInputElement>(null);
   const attachmentMenuRef = useRef<HTMLDivElement>(null);
@@ -669,6 +686,10 @@ export function ChatPage({
   useLayoutEffect(() => {
     scrollToLatest(false);
   }, [lastMessageId, messages.length, scrollToLatest]);
+
+  useLayoutEffect(() => {
+    resizeComposerTextarea(composerTextareaRef.current);
+  }, [attachments.length, hasMessages, input]);
 
   const reloadHistory = useCallback(() => {
     conversationApi.list().then(setConversations).catch((reason) => setError((reason as Error).message));
@@ -1058,12 +1079,16 @@ export function ChatPage({
           </div>
         )}
         <textarea
+          ref={composerTextareaRef}
           id="legal-question-input"
           value={input}
           maxLength={5000}
           rows={1}
           disabled={Boolean(loadingConversationId)}
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => {
+            setInput(event.target.value);
+            resizeComposerTextarea(event.currentTarget);
+          }}
           onPaste={handleComposerPaste}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {

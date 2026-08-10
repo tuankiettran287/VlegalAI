@@ -4033,13 +4033,52 @@ main:focus-visible {
 .composer textarea,
 .composer-home .input-wrap textarea {
   width: 100%;
-  min-height: 52px;
+  height: 48px;
+  min-height: 48px;
+  max-height: 188px;
   grid-column: auto;
-  padding: 7px 4px 11px;
+  padding: 7px 6px 10px;
+  overflow-y: hidden;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  box-shadow: none;
+  transition: height 170ms var(--ease-standard);
 }
 
 .composer-home .input-wrap textarea {
-  min-height: 63px;
+  min-height: 56px;
+}
+
+.composer textarea:focus,
+.composer textarea:focus-visible,
+.composer-home .input-wrap textarea:focus,
+.composer-home .input-wrap textarea:focus-visible {
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+}
+
+.composer-home .input-wrap,
+.composer:not(.composer-home) .input-wrap {
+  border-color: color-mix(in srgb, var(--ink) 14%, var(--line));
+  box-shadow:
+    0 1px 2px rgb(18 47 45 / 4%),
+    0 14px 38px rgb(18 47 45 / 9%);
+  transition:
+    border-color 170ms var(--ease-standard),
+    box-shadow 170ms var(--ease-standard),
+    border-radius 170ms var(--ease-standard);
+}
+
+.composer-home .input-wrap:focus-within,
+.composer:not(.composer-home) .input-wrap:focus-within {
+  border-color: color-mix(in srgb, var(--brand) 42%, var(--line));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--brand) 7%, transparent),
+    0 18px 46px rgb(18 47 45 / 11%);
 }
 
 .composer-toolbar,

@@ -79,6 +79,28 @@ describe("CitationMarkdown", () => {
 });
 
 describe("ChatPage", () => {
+  it("grows the question field with its content and caps its height", () => {
+    vi.mocked(conversationApi.list).mockResolvedValue([]);
+
+    render(
+      <ChatPage
+        onNavigate={vi.fn()}
+        userName="Nam"
+        initialConversationId={null}
+        onActiveConversationChange={vi.fn()}
+      />,
+    );
+
+    const textarea = screen.getByLabelText("Tình huống cần tư vấn");
+    Object.defineProperty(textarea, "scrollHeight", { configurable: true, value: 132 });
+    fireEvent.change(textarea, { target: { value: "Dòng một\nDòng hai\nDòng ba" } });
+    expect(textarea).toHaveStyle({ height: "132px", overflowY: "hidden" });
+
+    Object.defineProperty(textarea, "scrollHeight", { configurable: true, value: 260 });
+    fireEvent.change(textarea, { target: { value: "Một nội dung rất dài" } });
+    expect(textarea).toHaveStyle({ height: "188px", overflowY: "auto" });
+  });
+
   it("sends the typed question and renders the returned answer", async () => {
     vi.mocked(conversationApi.list).mockResolvedValue([]);
     vi.mocked(askLegalQuestion).mockResolvedValue({
