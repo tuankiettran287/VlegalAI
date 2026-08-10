@@ -1966,7 +1966,13 @@ def _citation_response_schema(
         statement_required.append("section")
         statement_properties["section"] = {
             "type": "integer",
-            "enum": list(range(1, section_count + 1)),
+            # Vertex's OpenAPI response schema only accepts string enum values.
+            # Sending an integer enum (for example [1, 2]) makes the whole
+            # generation request fail with HTTP 400. Numeric bounds express the
+            # same contract for section numbers and are supported by Vertex;
+            # _render_citation_statements still validates membership locally.
+            "minimum": 1,
+            "maximum": section_count,
         }
     return {
         "type": "object",

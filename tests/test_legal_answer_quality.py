@@ -13,7 +13,7 @@ from app.api import (
     _validate_answer_plan_coverage,
     _validate_answer_structure,
 )
-from app.services.ai import GeminiError, LEGAL_SYSTEM_PROMPT
+from app.services.ai import GeminiError, LEGAL_SYSTEM_PROMPT, _vertex_response_schema
 from app.services import retrieval as retrieval_module
 from app.services.retrieval import (
     RetrievalService,
@@ -210,9 +210,25 @@ def test_compound_answer_schema_requires_valid_section_number() -> None:
         answer_plan=answer_plan,
     )
     statement_schema = schema["properties"]["statements"]["items"]
+    section_schema = statement_schema["properties"]["section"]
 
     assert "section" in statement_schema["required"]
-    assert statement_schema["properties"]["section"]["enum"] == [1, 2]
+    assert section_schema == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2,
+    }
+    assert "enum" not in section_schema
+
+    vertex_schema = _vertex_response_schema(schema)
+    vertex_section = vertex_schema["properties"]["statements"]["items"][
+        "properties"
+    ]["section"]
+    assert vertex_section == {
+        "type": "INTEGER",
+        "minimum": 1,
+        "maximum": 2,
+    }
 
 
 def test_compound_answer_rejects_flat_or_mislabelled_sections() -> None:
