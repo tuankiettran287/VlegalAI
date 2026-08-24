@@ -1237,19 +1237,25 @@ export function ChatPage({
         aria-busy={Boolean(loadingConversationId)}
       >
         <header className="chat-topbar">
-          <button
-            className="icon-button compact"
-            type="button"
-            onClick={() => setHistoryOpen((value) => !value)}
-            aria-label={historyOpen ? "Ẩn lịch sử trò chuyện" : "Hiện lịch sử trò chuyện"}
-            aria-controls="chat-history-panel"
-            aria-expanded={historyOpen}
-          >
-            <History size={17} />
-          </button>
-          <div className="chat-title">
-            <strong>Trợ lý pháp lý</strong>
-            <span><i aria-hidden="true" /><ShieldCheck size={12} /> Tự động đối chiếu căn cứ liên quan</span>
+          <div className="chat-topbar-leading">
+            <button
+              className="icon-button compact chat-history-toggle"
+              type="button"
+              onClick={() => setHistoryOpen((value) => !value)}
+              aria-label={historyOpen ? "Ẩn lịch sử trò chuyện" : "Hiện lịch sử trò chuyện"}
+              aria-controls="chat-history-panel"
+              aria-expanded={historyOpen}
+            >
+              <History size={18} />
+            </button>
+            <div className="chat-title">
+              <strong>Trợ lý pháp lý</strong>
+              <span><i aria-hidden="true" /><ShieldCheck size={12} /> Tự động đối chiếu căn cứ liên quan</span>
+            </div>
+          </div>
+          <div className="chat-topbar-context" aria-label="Phạm vi hỗ trợ">
+            <BookOpen size={15} />
+            <span>Pháp luật lao động Việt Nam</span>
           </div>
           <div className="chat-topbar-actions">
             <button className="ghost-button" type="button" onClick={newConversation}>
@@ -1265,6 +1271,11 @@ export function ChatPage({
                 <span className="eyebrow"><i aria-hidden="true" /> Legal intelligence</span>
                 <h1>Xin chào {userName},<br /><span>bạn cần hỗ trợ điều gì?</span></h1>
                 <p>Mô tả câu hỏi hoặc tình huống pháp lý của bạn. VLegal sẽ phân tích, kiểm tra hiệu lực và dẫn nguồn để bạn dễ đối chiếu.</p>
+                <div className="empty-trust-row" aria-label="Tiêu chuẩn trả lời của VLegal">
+                  <span><ShieldCheck size={15} /> Căn cứ minh bạch</span>
+                  <span><BookOpen size={15} /> Nguồn luật chính thống</span>
+                  <span><CheckCircle2 size={15} /> Kiểm tra hiệu lực</span>
+                </div>
               </header>
 
               {!hasMessages && renderComposer(true)}
@@ -1275,14 +1286,23 @@ export function ChatPage({
                 <button type="button" onClick={() => onNavigate("/so-sanh-hop-dong")}><FileDiff size={16} /> So sánh văn bản</button>
               </div>
 
+              <div className="starter-section-head">
+                <span>Gợi ý để bắt đầu</span>
+                <small>Chọn một tình huống mẫu hoặc nhập câu hỏi của riêng bạn</small>
+              </div>
               <div className="starter-grid">
-                {sampleQuestions.map((question, index) => (
-                  <button key={question} type="button" onClick={() => submit(question)}>
-                    <span>{index === 0 ? "Lao động" : index === 1 ? "Tiền lương" : index === 2 ? "Hợp đồng" : "Tranh chấp"}</span>
-                    <strong>{question}</strong>
-                    <SendHorizontal size={15} />
-                  </button>
-                ))}
+                {sampleQuestions.map((question, index) => {
+                  const StarterIcon = [MessageSquareText, Scale, FileText, ShieldCheck][index] ?? Sparkles;
+                  const category = ["Lao động", "Tiền lương", "Hợp đồng", "Tranh chấp"][index] ?? "Pháp lý";
+                  return (
+                    <button key={question} type="button" onClick={() => submit(question)}>
+                      <span className="starter-icon"><StarterIcon size={17} /></span>
+                      <span className="starter-category">{category}</span>
+                      <strong>{question}</strong>
+                      <span className="starter-send" aria-hidden="true"><SendHorizontal size={15} /></span>
+                    </button>
+                  );
+                })}
               </div>
 
               <p className="chat-disclaimer">
