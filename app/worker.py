@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from app.core.celery import postgres_celery_urls
 from app.core.config import get_settings
+from app.core.schedules import ARTICLE_PUBLISH_HOURS, LEGAL_FRESHNESS_INTERVAL_SECONDS
 from app.db import SessionFactory
 from app.models import Article, LegalDocument
 from app.services.ai import GeminiService
@@ -31,10 +32,8 @@ from app.services.tavily import TavilyService
 logger = logging.getLogger(__name__)
 settings = get_settings()
 ARTICLE_TIMEZONE = ZoneInfo("Asia/Bangkok")
-ARTICLE_PUBLISH_HOURS = (7, 12, 15, 18, 22)
 ARTICLE_BATCH_SIZE = 10
 ARTICLE_BATCH_DELAY_SECONDS = 45.0
-LEGAL_FRESHNESS_INTERVAL_DAYS = 10
 
 
 def _fold_article_text(value: str) -> str:
@@ -118,7 +117,7 @@ celery_app.conf.update(
     beat_schedule={
         "verify-legal-corpus-every-10-days": {
             "task": "vlegal.verify_legal_corpus",
-            "schedule": LEGAL_FRESHNESS_INTERVAL_DAYS * 24 * 60 * 60,
+            "schedule": LEGAL_FRESHNESS_INTERVAL_SECONDS,
         },
         "publish-legal-articles-five-times-daily": {
             "task": "vlegal.publish_daily_legal_article",

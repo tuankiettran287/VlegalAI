@@ -1,0 +1,51 @@
+flowchart TB
+  classDef client fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef api fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef retrieval fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef ai fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef gate fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+
+  title["Legal chat request sequence and evidence gates"]:::api
+
+  subgraph request["1. Authorized request"]
+    direction LR
+    user["Authenticated user<br/>question + attachment token"]:::client
+    endpoint["POST /api/chat<br/>session, ownership, limits"]:::api
+    context["Load Cloud SQL context<br/>conversation + memory + HITL"]:::api
+    user --> endpoint --> context
+  end
+
+  subgraph planning["2. Question plan"]
+    direction LR
+    planner["Detect requested facets<br/>classify complexity"]:::retrieval
+    normalize{"Noisy input?"}:::gate
+    rewrite["Rewrite for retrieval only<br/>preserve every user intent"]:::ai
+    route["Choose cache / hybrid / graph route"]:::retrieval
+    planner --> normalize
+    normalize -->|"Yes"| rewrite --> route
+    normalize -->|"No"| route
+  end
+
+  subgraph grounded["3. Grounded answer construction"]
+    direction LR
+    cache{"Current grounded cache?"}:::gate
+    retrieve["Retrieve and rank<br/>evidence for every facet"]:::retrieval
+    generate["Vertex AI generation<br/>source-constrained sections"]:::ai
+    verify["Citation + source + facet gate<br/>bounded repair when required"]:::gate
+    cached["Reuse verified answer<br/>and source set"]:::api
+    cache -->|"Hit"| cached
+    cache -->|"Miss"| retrieve --> generate --> verify
+  end
+
+  subgraph commit["4. Atomic commit and UI delivery"]
+    direction LR
+    persist["Advisory lock<br/>append encrypted messages"]:::api
+    response["Return answer, sources,<br/>verification + Server-Timing"]:::api
+    ui["Render sections, citation popovers,<br/>source links, copy + feedback"]:::client
+    persist --> response --> ui
+  end
+
+  title --> request
+  request --> planning
+  planning --> grounded
+  grounded --> commit

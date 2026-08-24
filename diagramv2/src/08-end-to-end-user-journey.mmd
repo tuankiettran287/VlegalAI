@@ -1,0 +1,43 @@
+flowchart TB
+  classDef user fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef screen fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef action fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef decision fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef output fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+
+  title["Authenticated end-to-end user journey"]:::screen
+
+  subgraph access["1. Access and onboarding"]
+    direction LR
+    open["Landing page<br/>video + product overview"]:::user
+    session{"Valid session?"}:::decision
+    signin["Google OIDC<br/>secure session"]:::action
+    profile{"Preferred name?"}:::decision
+    onboard["Enter name / nickname"]:::screen
+    workspace["Authenticated workspace"]:::screen
+    open --> session
+    session -->|"No"| signin --> profile
+    session -->|"Yes"| profile
+    profile -->|"Missing"| onboard --> workspace
+    profile -->|"Available"| workspace
+  end
+
+  subgraph tasks["2. Complete one or more legal tasks"]
+    direction LR
+    chat["LEGAL Q&A<br/>text / image / document<br/>grounded answer + citations"]:::action
+    contract["LABOR CONTRACTS<br/>draft / review / compare<br/>encrypted artifact + DOCX"]:::action
+    article["LEGAL ARTICLES<br/>read / research topic<br/>current source + original link"]:::action
+    library["HISTORY & LIBRARY<br/>reopen prior work<br/>restore conversation / document"]:::action
+  end
+
+  subgraph completion["3. Persist and continue"]
+    direction LR
+    save["Authorize and persist result<br/>current conversation + library"]:::output
+    feedback["Inspect evidence<br/>copy - useful - not useful - regenerate"]:::output
+    next["Continue conversation<br/>or choose another workspace task"]:::screen
+    save --> feedback --> next
+  end
+
+  title --> access
+  access --> tasks
+  tasks --> completion

@@ -1,0 +1,37 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 74, "rankSpacing": 72}}}%%
+flowchart TB
+  classDef trigger fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef process fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef current fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef changed fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px
+  classDef store fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  subgraph inspect["1-3. Scheduled freshness inspection"]
+    direction LR
+    trigger["Schedule and lease<br/>10-day policy + retry metadata"]:::trigger
+    verify["Verify active document<br/>official source + bounded verdict"]:::process
+    verdict{"Freshness verdict"}:::trigger
+    trigger --> verify --> verdict
+  end
+  subgraph outcomes["Outcome-specific action"]
+    direction TB
+    branch((" ")):::junction
+    unavailable["Research unavailable<br/>typed failure; continue batch"]:::changed
+    current["Still current<br/>update verified_at; retain cache"]:::current
+    replacement["Replacement found<br/>identity + issuer + official URL"]:::process
+    branch --> unavailable
+    branch --> current
+    branch --> replacement
+  end
+  retained["4A. Persist verification evidence<br/>unchanged or failed outcome"]:::current
+  rebuild["4B. Selective pipeline<br/>parse -> chunk -> embed -> graph"]:::process
+  publish["5. Publish new version<br/>REPLACES edge + cache invalidation"]:::changed
+  summary["6. Cycle evidence<br/>checked + unchanged + updated + failed"]:::store
+
+  verdict --> branch
+  unavailable --> retained
+  current --> retained
+  replacement --> rebuild --> publish
+  retained --> summary
+  publish --> summary

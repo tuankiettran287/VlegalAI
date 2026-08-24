@@ -1,0 +1,40 @@
+block-beta
+  columns 5
+
+  title["Legal article publishing and on-demand research"]:5
+  space:5
+  scheduled["Scheduled lane\n07:00 | 12:00 | 15:00 | 18:00 | 22:00\nAsia/Bangkok"]:2 space manual["User research lane\nexplicit topic entered in the UI"]:2
+  space:5
+  slots["Create 10 deterministic slots\nand skip healthy existing items"]:2 space manualsearch["Run sourced web research\nfor the requested topic"]:2
+  space:5
+  search["Tavily + Google Search\nVietnam legal news"]:2 space manualgate["Require at least one\nusable source"]:2
+  space:5
+  validate["Canonical URL + publication date\ncurrent-day + relevance + deduplication"]:2 space result["Return sourced research result\nwith original links"]:2
+  space:5
+  publish["Grounded title, excerpt, body, category\nPUBLISHED article + original source URL"]:2 space draft["Optional encrypted DRAFT\nin the user's library"]:2
+  space:5
+  ui["Article cards and detail page\nonly validated current-day publications enter the scheduled feed"]:5
+
+  scheduled --> slots
+  slots --> search
+  search --> validate
+  validate --> publish
+  publish --> ui
+  manual --> manualsearch
+  manualsearch --> manualgate
+  manualgate --> result
+  result --> draft
+
+  classDef heading fill:#FFFFFF,stroke:#2563EB,color:#10213F,stroke-width:2px
+  classDef trigger fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef process fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef external fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef store fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef decision fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+
+  class title heading
+  class scheduled,manual trigger
+  class slots,validate,manualsearch process
+  class search external
+  class manualgate decision
+  class publish,result,draft,ui store

@@ -1,0 +1,53 @@
+flowchart TB
+  classDef actor fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef core fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:2px
+  classDef external fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef data fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef control fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+
+  title["VLegalAI system context and trust boundary"]:::core
+
+  subgraph people["Human and delivery actors"]
+    direction LR
+    user["Legal user<br/>Q&A, documents, contracts"]:::actor
+    reviewer["Reviewer / administrator<br/>articles and result curation"]:::actor
+    operator["Platform operator<br/>deployment and observation"]:::actor
+    cicd["GitHub Actions<br/>immutable release delivery"]:::control
+  end
+
+  subgraph boundary["VLegalAI application boundary"]
+    direction LR
+    web["React SPA<br/>authenticated workspace"]:::core
+    api["FastAPI service<br/>identity, chat, content APIs"]:::core
+    background["Workers and managed jobs<br/>reindex, freshness, publishing"]:::core
+    web -->|"typed HTTPS API"| api
+    api -->|"queued / scheduled work"| background
+  end
+
+  subgraph managed["Managed identity and intelligence"]
+    direction LR
+    oidc["Google OpenID Connect<br/>authorization code + PKCE"]:::external
+    vertex["Vertex AI<br/>Gemini 2.5 Flash + embeddings"]:::external
+    search["Tavily + Google Search<br/>current and official sources"]:::external
+  end
+
+  subgraph stores["Managed data stores"]
+    direction LR
+    postgres[("Cloud SQL PostgreSQL<br/>records, queue, pgvector")]:::data
+    neo4j[("Neo4j Aura<br/>legal knowledge graph")]:::data
+    storage[("Cloud Storage<br/>read-only legal corpus")]:::data
+  end
+
+  title --> people
+  user -->|"HTTPS"| web
+  reviewer -->|"content administration"| web
+  operator -.->|"operate and observe"| background
+  cicd -.->|"deploy one commit-SHA image"| boundary
+
+  api -->|"sign-in"| oidc
+  api -->|"generation and embeddings"| vertex
+  background -->|"current-source research"| search
+  api -->|"transactions and vectors"| postgres
+  background -->|"task state"| postgres
+  api -->|"multi-hop traversal"| neo4j
+  background -->|"corpus reads"| storage

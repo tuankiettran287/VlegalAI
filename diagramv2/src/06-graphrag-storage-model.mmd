@@ -1,0 +1,36 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 74, "rankSpacing": 76}}}%%
+flowchart TB
+  classDef source fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.6px
+  classDef build fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.6px
+  classDef pg fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.6px
+  classDef graphNode fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.6px
+  classDef decision fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.6px
+  classDef output fill:#ECFDF5,stroke:#059669,color:#064E3B,stroke-width:1.6px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  construct["OFFLINE GRAPHRAG CONSTRUCTION<br/>versioned corpus + hashes -> hierarchy parser -> stable chunks<br/>ontology lift + gemini-embedding-001 vectors (1,024D)"]:::build
+  postgres["CLOUD SQL / PGVECTOR<br/>exact IDs + BM25/FTS<br/>dense vectors + cited chunks"]:::pg
+  neo4j["NEO4J AURA<br/>legal hierarchy + semantics<br/>version + provenance paths"]:::graphNode
+
+  plan["QUERY AND FACET PLAN<br/>split every explicit question<br/>classify route complexity"]:::source
+  hybrid["HYBRID SEED RETRIEVAL<br/>rank exact + lexical + vector evidence"]:::pg
+  route{"ROUTE COMPLEXITY"}:::decision
+  direct["FOCUSED EVIDENCE PATH<br/>use ranked hybrid seeds"]:::build
+  expand["BOUNDED GRAPH EXPANSION<br/>typed relation allow-list<br/>depth and path limits"]:::graphNode
+  graphpath["GRAPH EVIDENCE PATH<br/>merge supported neighbors<br/>with seed chunks"]:::graphNode
+  join((" ")):::junction
+  gate["PATH-AWARE FUSION AND EVIDENCE GATE<br/>facet coverage + provenance + law version + citation identity"]:::decision
+  answer["GROUNDED LEGAL RESPONSE<br/>facet-complete claims with stable S1-to-Sn citations"]:::output
+
+  construct --> postgres
+  construct --> neo4j
+  plan --> hybrid
+  postgres --> hybrid
+  hybrid --> route
+  route -->|focused| direct
+  route -->|multi-hop / multi-abstract| expand
+  neo4j --> expand
+  expand --> graphpath
+  direct --> join
+  graphpath --> join
+  join --> gate --> answer

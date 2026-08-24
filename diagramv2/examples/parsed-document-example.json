@@ -1,0 +1,112 @@
+{
+  "schema_version": "1.0",
+  "description": "Example output produced after parsing a Vietnamese legal document.",
+  "source_file": "Data (1)\\Bộ-luật-45-2019-QH14.docx",
+  "document": {
+    "doc_id": "bo-luat-45-2019-qh14",
+    "filename": "Bộ-luật-45-2019-QH14.docx",
+    "path": "Data (1)\\Bộ-luật-45-2019-QH14.docx",
+    "title": "Bộ Luật Lao Động",
+    "code": "45/2019/QH14",
+    "doc_type": "Bộ luật",
+    "issuer": "Quốc hội",
+    "text": "QUỐC HỘI\nBỘ LUẬT LAO ĐỘNG\nCăn cứ Hiến pháp nước Cộng hòa xã hội chủ nghĩa Việt Nam; Quốc hội ban hành Bộ luật Lao động."
+  },
+  "nodes": [
+    {
+      "node_id": "chuong:bo-luat-45-2019-qh14:vi",
+      "doc_id": "bo-luat-45-2019-qh14",
+      "node_type": "Chương",
+      "label": "Chương VI. TIỀN LƯƠNG",
+      "number": "VI",
+      "title": "TIỀN LƯƠNG",
+      "parent_id": "document:bo-luat-45-2019-qh14",
+      "path_label": "Bộ Luật Lao Động (45/2019/QH14) > Chương VI. TIỀN LƯƠNG",
+      "text": "Chương VI\nTIỀN LƯƠNG",
+      "ordinal": 478,
+      "direct_child_count": 11,
+      "chapter_count": 0,
+      "section_count": 0,
+      "article_count": 11,
+      "clause_count": 0,
+      "point_count": 0,
+      "first_article_number": "90",
+      "last_article_number": "100"
+    },
+    {
+      "node_id": "dieu:bo-luat-45-2019-qh14:91",
+      "doc_id": "bo-luat-45-2019-qh14",
+      "node_type": "Điều",
+      "label": "Điều 91. Mức lương tối thiểu",
+      "number": "91",
+      "title": "Mức lương tối thiểu",
+      "parent_id": "chuong:bo-luat-45-2019-qh14:vi",
+      "path_label": "Bộ Luật Lao Động (45/2019/QH14) > Chương VI. TIỀN LƯƠNG > Điều 91. Mức lương tối thiểu",
+      "text": "Điều 91. Mức lương tối thiểu\n1. Mức lương tối thiểu là mức lương thấp nhất được trả cho người lao động làm công việc giản đơn nhất trong điều kiện lao động bình thường nhằm bảo đảm mức sống tối thiểu của người lao động và gia đình họ, phù hợp với điều kiện phát triển kinh tế - xã hội.\n2. Mức lương tối thiểu được xác lập theo vùng, ấn định theo tháng, giờ.",
+      "ordinal": 496,
+      "direct_child_count": 4,
+      "chapter_count": 0,
+      "section_count": 0,
+      "article_count": 0,
+      "clause_count": 4,
+      "point_count": 0,
+      "first_article_number": "",
+      "last_article_number": ""
+    },
+    {
+      "node_id": "khoan:bo-luat-45-2019-qh14:91:1",
+      "doc_id": "bo-luat-45-2019-qh14",
+      "node_type": "Khoản",
+      "label": "Khoản 1",
+      "number": "1",
+      "title": "",
+      "parent_id": "dieu:bo-luat-45-2019-qh14:91",
+      "path_label": "Bộ Luật Lao Động (45/2019/QH14) > Chương VI. TIỀN LƯƠNG > Điều 91. Mức lương tối thiểu > Khoản 1",
+      "text": "1. Mức lương tối thiểu là mức lương thấp nhất được trả cho người lao động làm công việc giản đơn nhất trong điều kiện lao động bình thường nhằm bảo đảm mức sống tối thiểu của người lao động và gia đình họ, phù hợp với điều kiện phát triển kinh tế - xã hội.",
+      "ordinal": 497,
+      "direct_child_count": 0,
+      "chapter_count": 0,
+      "section_count": 0,
+      "article_count": 0,
+      "clause_count": 0,
+      "point_count": 0,
+      "first_article_number": "",
+      "last_article_number": ""
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "edge:example-chapter-article-91",
+      "source_id": "chuong:bo-luat-45-2019-qh14:vi",
+      "target_id": "dieu:bo-luat-45-2019-qh14:91",
+      "relation": "CÓ_ĐIỀU",
+      "evidence": "Bộ Luật Lao Động (45/2019/QH14) > Chương VI. TIỀN LƯƠNG > Điều 91. Mức lương tối thiểu"
+    },
+    {
+      "edge_id": "edge:cef44c0b3c4b9c52e1a1",
+      "source_id": "dieu:bo-luat-45-2019-qh14:91",
+      "target_id": "khoan:bo-luat-45-2019-qh14:91:1",
+      "relation": "CÓ_KHOẢN",
+      "evidence": "Bộ Luật Lao Động (45/2019/QH14) > Chương VI. TIỀN LƯƠNG > Điều 91. Mức lương tối thiểu > Khoản 1"
+    }
+  ],
+  "chunks": [
+    {
+      "chunk_id": "chunk:bo-luat-45-2019-qh14:dieu-bo-luat-45-2019-qh14-91:article:2509",
+      "doc_id": "bo-luat-45-2019-qh14",
+      "node_id": "dieu:bo-luat-45-2019-qh14:91",
+      "chunk_type": "article",
+      "title": "Điều 91. Mức lương tối thiểu",
+      "path_label": "Bộ Luật Lao Động (45/2019/QH14) > Chương VI. TIỀN LƯƠNG > Điều 91. Mức lương tối thiểu",
+      "citation": "Bộ Luật Lao Động (45/2019/QH14) > Chương VI. TIỀN LƯƠNG > Điều 91. Mức lương tối thiểu",
+      "text": "Điều 91. Mức lương tối thiểu\n1. Mức lương tối thiểu là mức lương thấp nhất được trả cho người lao động làm công việc giản đơn nhất trong điều kiện lao động bình thường nhằm bảo đảm mức sống tối thiểu của người lao động và gia đình họ, phù hợp với điều kiện phát triển kinh tế - xã hội.\n2. Mức lương tối thiểu được xác lập theo vùng, ấn định theo tháng, giờ.",
+      "token_count": 174,
+      "ordinal": 2509,
+      "embedding": {
+        "storage": "SQLite BLOB / Cloud SQL vector(1024)",
+        "dimensions": 1024,
+        "included_in_jsonl": false
+      }
+    }
+  ]
+}

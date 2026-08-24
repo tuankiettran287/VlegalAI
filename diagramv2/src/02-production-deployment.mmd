@@ -1,0 +1,49 @@
+block-beta
+  columns 4
+
+  title["VLegalAI production deployment / Google Cloud Platform"]:4
+  space:4
+  browser["Authenticated browser\nHTTPS + Google account"]:2 actions["GitHub Actions\nquality gates + WIF deployment"]:2
+  space:4
+  platform["Managed platform services\nCloud Run HTTPS ingress + Artifact Registry + Secret Manager + Cloud Storage + Runtime Identity"]:4
+  space:4
+  service["Cloud Run service / vlegalai\nReact SPA + FastAPI\n8 vCPU / 16 GiB / concurrency 16"]:2 pools["Worker pools\nCelery worker + beat scheduler"] jobs["Cloud Run jobs\nAlembic migration + GraphRAG reindex\narticle publisher"]
+  space:4
+  runtimeHub["Runtime integration boundary\nHTTPS + queue + jobs + SQL + vector + graph + AI"]:4
+  space:4
+  dataHub["Managed data boundary\ntransactions + vectors + task state + graph"]:2 aiHub["Managed intelligence boundary\nidentity + inference + embedding + research"]:2
+  space:4
+  postgres[("Cloud SQL PostgreSQL / asia-east2\nsystem of record + pgvector + Celery state")] neo4j[("Neo4j Aura\ntyped legal knowledge graph")] vertex["Vertex AI\nGemini 2.5 Flash + gemini-embedding-001"] external["Google OpenID Connect\nTavily + Google Search"]
+
+  browser --> platform
+  actions -.-> platform
+  platform -.-> service
+  platform -.-> pools
+  platform -.-> jobs
+  service --> runtimeHub
+  pools --> runtimeHub
+  jobs --> runtimeHub
+  runtimeHub --> dataHub
+  runtimeHub --> aiHub
+  dataHub --> postgres
+  dataHub --> neo4j
+  aiHub --> vertex
+  aiHub --> external
+
+  classDef heading fill:#FFFFFF,stroke:#2563EB,color:#10213F,stroke-width:2px
+  classDef user fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef delivery fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef runtime fill:#ECFDF5,stroke:#059669,color:#064E3B,stroke-width:1.5px
+  classDef job fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px
+  classDef data fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef secure fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef interface fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:1.5px
+
+  class title heading
+  class browser user
+  class actions,vertex,external delivery
+  class platform secure
+  class service,pools runtime
+  class jobs job
+  class runtimeHub,dataHub,aiHub interface
+  class postgres,neo4j data

@@ -1,0 +1,40 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 74, "rankSpacing": 72}}}%%
+flowchart TB
+  classDef input fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef shared fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef draft fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef review fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef compare fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef store fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  subgraph entry["1-3. Authorized labor-document entry"]
+    direction LR
+    workspace["Authenticated workspace"]:::input
+    scope["Labor-document scope gate"]:::store
+    operation{"Choose operation"}:::shared
+    workspace --> scope --> operation
+  end
+  subgraph operations["Operation-specific processing"]
+    direction TB
+    draft["Draft / complete<br/>mandatory provisions<br/>formal structure"]:::draft
+    review["Review<br/>numbered clauses<br/>risks + recommendations"]:::review
+    compare["Compare<br/>structural diff<br/>changed clauses only"]:::compare
+    join((" ")):::junction
+    draft --> join
+    review --> join
+    compare --> join
+  end
+  subgraph controls["4-7. Shared evidence and output controls"]
+    direction LR
+    evidence["Legal evidence gate<br/>current rules + citations"]:::shared
+    format["Artifact formatter<br/>plain document + numbering"]:::shared
+    persist["Encrypted artifact<br/>Cloud SQL + history"]:::store
+    export["Observable result<br/>review / comparison / DOCX"]:::input
+    evidence --> format --> persist --> export
+  end
+
+  operation --> draft
+  operation --> review
+  operation --> compare
+  join --> evidence

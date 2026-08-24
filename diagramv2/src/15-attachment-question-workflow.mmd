@@ -1,0 +1,43 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 70, "rankSpacing": 72}}}%%
+flowchart TB
+  classDef input fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef process fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef secure fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef decision fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef output fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef reject fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  subgraph intakeRow["1-2. Intake and validation"]
+    direction LR
+    intake["Attachment intake<br/>plus + drag/drop + paste"]:::input
+    validate["Security validation<br/>owner + size + magic bytes"]:::secure
+    accepted{"Accepted?"}:::decision
+    reject["Reject 422<br/>no model + no persistence"]:::reject
+    intake --> validate --> accepted
+  end
+  subgraph privateContext["3-6. Controlled private context"]
+    direction LR
+    extract["Controlled extraction<br/>parser or OCR / vision"]:::process
+    token["Private context token<br/>signed + short-lived"]:::secure
+    submit["Question submission<br/>signature + expiry + ownership"]:::input
+    rank["Query-focused ranking<br/>relevant private segments only"]:::process
+    extract --> token --> submit --> rank
+  end
+  mode{"7. Grounding need"}:::decision
+  subgraph paths["Evidence path"]
+    direction TB
+    fact["Document fact path<br/>attachment evidence only"]:::process
+    legal["Legal analysis path<br/>attachment + current corpus"]:::process
+    join((" ")):::junction
+    fact --> join
+    legal --> join
+  end
+  answer["8. Grounded cited answer<br/>source-scoped claims + encrypted persistence + safe cleanup"]:::output
+
+  accepted -->|no| reject
+  accepted -->|yes| extract
+  rank --> mode
+  mode -->|document fact| fact
+  mode -->|legal analysis| legal
+  join --> answer

@@ -1,0 +1,38 @@
+flowchart TB
+  classDef identity fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef chat fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef derived fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef feedback fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef rule fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+
+  title["Identity, conversation, and HITL data model"]:::rule
+
+  subgraph identityDomain["1. Identity domain"]
+    direction LR
+    user["APP_USER<br/><b>PK</b> id<br/>email, preferred_name, role, is_active"]:::identity
+    sso["SSO_IDENTITY<br/><b>PK</b> id - <b>FK</b> user_id<br/><b>UK</b> issuer + subject<br/>provider, claims"]:::identity
+    productFeedback["USER_FEEDBACK<br/><b>PK</b> id - <b>FK</b> user_id<br/>encrypted message, page, created_at"]:::feedback
+    user -->|"1 : N identities"| sso
+    user -->|"0 : N submissions"| productFeedback
+  end
+
+  subgraph conversationDomain["2. Conversation domain"]
+    direction LR
+    conversation["CONVERSATION<br/><b>PK</b> id - <b>FK</b> user_id<br/>title, status, retrieval_mode"]:::chat
+    message["CHAT_MESSAGE<br/><b>PK</b> id - <b>FK</b> conversation_id<br/><b>UK</b> message_sequence<br/>ciphertext, sources, verification"]:::chat
+    summary["CONVERSATION_SUMMARY<br/><b>FK/UK</b> conversation_id<br/>ciphertext + source count<br/>embedding_model + vector(1024)"]:::derived
+    conversation -->|"1 : N ordered messages"| message
+    conversation -->|"1 : 0..1 summary"| summary
+  end
+
+  subgraph hitlDomain["3. Human-in-the-loop answer evaluation"]
+    direction LR
+    answerFeedback["CHAT_ANSWER_FEEDBACK<br/><b>FK</b> user, conversation, message<br/><b>UK</b> message_id<br/>rating, encrypted comment, regeneration link"]:::feedback
+    crossDomain["Cross-domain cardinalities<br/>APP_USER 1:N CONVERSATION<br/>APP_USER submits answer feedback<br/>CHAT_MESSAGE receives 0..1 rating"]:::rule
+    integrity["Integrity contract<br/>UUID ownership keys<br/>cascade / set-null policies<br/>encrypted sensitive free text"]:::rule
+    answerFeedback --> crossDomain --> integrity
+  end
+
+  title --> identityDomain
+  identityDomain --> conversationDomain
+  conversationDomain --> hitlDomain

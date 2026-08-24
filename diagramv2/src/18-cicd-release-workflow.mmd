@@ -1,0 +1,38 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "stepAfter", "nodeSpacing": 64, "rankSpacing": 66}}}%%
+flowchart TB
+  classDef git fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef test fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef security fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef deploy fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef job fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef fail fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px
+
+  subgraph gateRow["1-2. Release identity and reproducible gates"]
+    direction LR
+    trigger["Release identity<br/>branch + exact commit SHA"]:::git
+    gates["Quality gates<br/>backend + frontend + manifests"]:::test
+    decision{"All gates pass?"}:::test
+    stop["Stop release<br/>retain prior revision"]:::fail
+    trigger --> gates --> decision --> stop
+  end
+  subgraph artifactRow["3-6. Short-lived identity and immutable artifact"]
+    direction LR
+    auth["WIF authentication<br/>short-lived credentials"]:::security
+    image["Build unified image<br/>SPA + API + worker + jobs"]:::deploy
+    registry["Artifact Registry<br/>immutable commit-SHA tag"]:::deploy
+    config["Runtime contract<br/>defaults + Secret Manager"]:::security
+    auth --> image --> registry --> config
+  end
+  subgraph runtimeRow["7. Ordered promotion of the same image"]
+    direction LR
+    migrate["Migration job<br/>optional Alembic"]:::job
+    service["Cloud Run service<br/>vlegalai revision"]:::job
+    pools["Worker pools<br/>Celery worker + beat"]:::job
+    jobs["Cloud Run Jobs<br/>reindex + publisher"]:::job
+    migrate --> service --> pools --> jobs
+  end
+  verify["8. Release verification<br/>active revision + health + identity + representative flow + release SHA"]:::deploy
+
+  decision --> auth
+  config --> migrate
+  jobs --> verify

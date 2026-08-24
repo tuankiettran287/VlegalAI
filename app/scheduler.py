@@ -6,8 +6,7 @@ from celery import Celery
 from celery.schedules import crontab
 
 from app.core.celery import postgres_celery_urls
-
-ARTICLE_PUBLISH_HOURS = (7, 12, 15, 18, 22)
+from app.core.schedules import ARTICLE_PUBLISH_HOURS, LEGAL_FRESHNESS_INTERVAL_SECONDS
 
 database_url = os.getenv(
     "DATABASE_URL",
@@ -27,9 +26,9 @@ celery_app.conf.update(
     task_ignore_result=result_backend is None,
     timezone="Asia/Bangkok",
     beat_schedule={
-        "verify-legal-corpus-every-night": {
+        "verify-legal-corpus-every-10-days": {
             "task": "vlegal.verify_legal_corpus",
-            "schedule": 24 * 60 * 60,
+            "schedule": LEGAL_FRESHNESS_INTERVAL_SECONDS,
         },
         "publish-legal-articles-five-times-daily": {
             "task": "vlegal.publish_daily_legal_article",

@@ -1,0 +1,29 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 78, "rankSpacing": 82}}}%%
+flowchart TB
+  classDef root fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.6px
+  classDef structural fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.6px
+  classDef semantic fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.6px
+  classDef temporal fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.6px
+  classDef bridge fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.6px
+  classDef gate fill:#ECFDF5,stroke:#059669,color:#064E3B,stroke-width:1.6px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  version["LEGAL DOCUMENT VERSION<br/>law code + issuer + validity interval + official source"]:::root
+  split((" ")):::junction
+  hierarchy["STRUCTURAL HIERARCHY<br/>Document -> Chapter / Section<br/>-> Article -> Clause -> Point<br/>HAS_PART"]:::structural
+  ontology["SEMANTIC LEGAL ONTOLOGY<br/>actor + right + duty + condition<br/>procedure + amount + duration<br/>sanction + remedy"]:::semantic
+  lineage["CROSS-DOCUMENT LINEAGE<br/>CITES + GUIDES<br/>AMENDS + REPLACES<br/>EFFECTIVE_FROM + EXPIRES_ON"]:::temporal
+  join((" ")):::junction
+
+  evidence["LEGALCHUNK EVIDENCE BRIDGE<br/>verbatim text + provision identity + document version<br/>hierarchy path + official URL"]:::bridge
+  provenance["CITATION AND PROVENANCE GATE<br/>Expand through graph relations only when the path resolves<br/>to a current text-bearing LegalChunk"]:::gate
+
+  version --> split
+  split --> hierarchy
+  split --> ontology
+  split --> lineage
+  hierarchy --> join
+  ontology --> join
+  lineage --> join
+  join --> evidence
+  evidence --> provenance

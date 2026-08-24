@@ -1,0 +1,44 @@
+block-beta
+  columns 8
+
+  title["Immutable-image release and runtime process view"]:8
+  space:8
+  trigger["1. Release trigger\nGitHub push or workflow dispatch\ncommit SHA"]:2 space quality["2. Quality gates\nbackend + frontend + Compose\nvalidation"]:2 space identity["3. WIF identity\nGoogle OIDC to short-lived\ncredentials"]:2
+  space:8
+  registry["5. Artifact Registry\nvlegal-app:commit-SHA\nimmutable artifact"]:3 space build["4. Unified linux/amd64 image\nReact SPA + FastAPI + workers\n+ job entry points"]:4
+  space:8
+  deploy["6. Promote the same image with deploy.ps1\nruntime secrets + Cloud SQL connector"]:8
+  space:8
+  service["Cloud Run service / vlegalai\nHTTPS + React SPA + FastAPI\n8 vCPU / 16 GiB"]:2 space workers["Cloud Run worker pools\nCelery worker + beat\nbackground tasks"]:2 space jobs["Cloud Run jobs\nmigrate + publish +\noptional reindex"]:2
+  space:8
+  verify["7. Post-deployment evidence gate\nlive + ready health checks; record URL, image SHA, and status"]:8
+
+  trigger --> quality
+  quality --> identity
+  identity -.-> build
+  build --> registry
+  registry -.-> deploy
+  deploy -.-> service
+  deploy -.-> workers
+  deploy -.-> jobs
+  service --> verify
+  workers --> verify
+  jobs --> verify
+
+  classDef heading fill:#FFFFFF,stroke:#2563EB,color:#10213F,stroke-width:2px
+  classDef source fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef gate fill:#EFF6FF,stroke:#2563EB,color:#1E3A8A,stroke-width:1.5px
+  classDef identity fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef artifact fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef runtime fill:#ECFDF5,stroke:#059669,color:#064E3B,stroke-width:1.5px
+  classDef job fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px
+  classDef evidence fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+
+  class title heading
+  class trigger source
+  class quality,build gate
+  class identity identity
+  class registry,deploy artifact
+  class service,workers runtime
+  class jobs job
+  class verify evidence

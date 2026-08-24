@@ -1,0 +1,48 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 74, "rankSpacing": 76}}}%%
+flowchart TB
+  classDef source fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef process fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef postgres fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef neo4j fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef gate fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef active fill:#ECFDF5,stroke:#059669,color:#064E3B,stroke-width:1.5px
+  classDef invalid fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  subgraph preparation["1-3. Prepare an idempotent snapshot"]
+    direction LR
+    local["Canonical local snapshot<br/>SQLite + strict JSONL"]:::source
+    preflight["Preflight<br/>connectivity + model + 1,024D"]:::process
+    upsert["Idempotent upsert<br/>stable IDs + fingerprint"]:::process
+    local --> preflight --> upsert
+  end
+  subgraph projections["4. Synchronized projections"]
+    direction TB
+    fanout((" ")):::junction
+    postgres["Cloud SQL / pgvector<br/>chunks + vectors + checkpoints"]:::postgres
+    catalogue["Legal catalogue<br/>canonical current version"]:::process
+    neo4j["Neo4j Aura<br/>typed nodes + relationships"]:::neo4j
+    fanin((" ")):::junction
+    fanout --> postgres
+    fanout --> catalogue
+    fanout --> neo4j
+    postgres --> fanin
+    catalogue --> fanin
+    neo4j --> fanin
+  end
+  reconcile["5. Reconciliation gate<br/>counts + hashes + dimensions<br/>+ representative reads"]:::gate
+  compatible{"Fingerprint<br/>compatible?"}:::gate
+  subgraph cache["Cache decision"]
+    direction LR
+    retain["Compatible<br/>retain semantic cache"]:::active
+    invalidate["Changed<br/>invalidate semantic cache"]:::invalid
+  end
+  activate["6. Activate snapshot<br/>fingerprint + reconciled counts<br/>+ synchronized status"]:::active
+
+  upsert --> fanout
+  fanin --> reconcile
+  reconcile --> compatible
+  compatible --> retain
+  compatible --> invalidate
+  retain --> activate
+  invalidate --> activate

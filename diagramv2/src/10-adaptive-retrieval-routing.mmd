@@ -1,0 +1,36 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 72, "rankSpacing": 76}}}%%
+flowchart TB
+  classDef input fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.6px
+  classDef lexical fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.6px
+  classDef graphNode fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.6px
+  classDef process fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.6px
+  classDef decision fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.6px
+  classDef success fill:#ECFDF5,stroke:#059669,color:#064E3B,stroke-width:1.6px
+  classDef fail fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.6px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  question["QUESTION INTAKE<br/>rewrite only noisy text; preserve meaning;<br/>split every explicit facet"]:::input
+  split((" ")):::junction
+  exact["EXACT STRUCTURE PATH<br/>law -> article -> clause -> point"]:::lexical
+  focused["FOCUSED SINGLE-HOP PATH<br/>BM25/FTS + 1,024D vector<br/>weighted hybrid rank"]:::lexical
+  complex["COMPLEX PATH<br/>hybrid seeds + bounded<br/>Neo4j expansion"]:::graphNode
+  join((" ")):::junction
+  merge["COVERAGE-AWARE FUSION<br/>weighted RRF + concept filter + per-document cap + facet coverage"]:::process
+  gate{"DIRECT SUPPORT FOR<br/>EVERY ANSWER FACET?"}:::decision
+  widen["ONE BOUNDED WIDENING PASS<br/>retrieve -> rerank -> filter"]:::decision
+  recheck{"SUFFICIENT AFTER<br/>WIDENING?"}:::decision
+  answer["GROUNDED ANSWER<br/>one numbered section per facet<br/>with stable S1-to-Sn citations"]:::success
+  empty["CONTROLLED NO-EVIDENCE RESULT<br/>no unsupported claim"]:::fail
+
+  question --> split
+  split --> exact
+  split --> focused
+  split --> complex
+  exact --> join
+  focused --> join
+  complex --> join
+  join --> merge --> gate
+  gate -->|yes| answer
+  gate -->|no| widen --> recheck
+  recheck -->|yes| answer
+  recheck -->|no| empty

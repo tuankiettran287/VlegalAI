@@ -1,0 +1,46 @@
+{
+  "theme": "base",
+  "look": "classic",
+  "securityLevel": "strict",
+  "fontFamily": "Inter, Segoe UI, Arial, sans-serif",
+  "themeCSS": ".flowchart-link, .edge-thickness-normal, .edge-thickness-thick { stroke: #334155 !important; stroke-width: 2.25px !important; } marker path, .marker { fill: #334155 !important; stroke: #334155 !important; }",
+  "themeVariables": {
+    "background": "#ffffff",
+    "primaryColor": "#eff6ff",
+    "primaryTextColor": "#10213f",
+    "primaryBorderColor": "#2563eb",
+    "lineColor": "#64748b",
+    "secondaryColor": "#ecfdf5",
+    "tertiaryColor": "#faf5ff",
+    "clusterBkg": "#ffffff",
+    "clusterBorder": "#cbd5e1",
+    "edgeLabelBackground": "#ffffff",
+    "fontSize": "18px"
+  },
+  "flowchart": {
+    "defaultRenderer": "elk",
+    "curve": "stepAfter",
+    "htmlLabels": true,
+    "nodeSpacing": 56,
+    "rankSpacing": 76,
+    "padding": 22,
+    "useMaxWidth": false
+  },
+  "sequence": {
+    "useMaxWidth": false,
+    "wrap": true,
+    "diagramMarginX": 40,
+    "diagramMarginY": 32,
+    "actorMargin": 86,
+    "messageMargin": 46,
+    "boxMargin": 16
+  },
+  "er": {
+    "useMaxWidth": false,
+    "diagramPadding": 30,
+    "layoutDirection": "TB",
+    "minEntityWidth": 150,
+    "minEntityHeight": 100,
+    "entityPadding": 20
+  }
+}

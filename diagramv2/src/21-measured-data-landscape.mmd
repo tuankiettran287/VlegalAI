@@ -1,0 +1,27 @@
+flowchart LR
+  classDef pg fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef graphnode fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef local fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef note fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+
+  subgraph cloud["Cloud SQL measured 2026-08-19"]
+    direction TB
+    identity["Identity\n13 users · 13 SSO identities"]:::pg
+    chat["Conversation\n284 conversations · 749 messages · 54 summaries"]:::pg
+    feedback["HITL and cache\n2 answer ratings · 29 answer-cache entries"]:::pg
+    content["Content\n9 articles · 6 artifacts · 14 legal documents"]:::pg
+    index["Retrieval index\n32,334 chunks · 48,844 checkpoints · 74 law versions"]:::pg
+    runtime["Celery runtime\n92 broker messages · 6 task results"]:::pg
+  end
+
+  subgraph local["Local GraphRAG snapshot"]
+    direction TB
+    docs["74 documents"]:::local
+    chunks["32,334 chunks"]:::local
+    nodes["29,575 nodes"]:::graphnode
+    edges["108,368 edges"]:::graphnode
+    nodeTypes["Largest node types\n13,714 clauses · 9,820 points · 4,192 articles"]:::note
+    edgeTypes["Largest edge types\n28,727 BELONGS_TO · 19,249 REGULATED_AT · 9,904 CITES"]:::note
+  end
+
+  chunks <-.->|"exact chunk-count parity"| index

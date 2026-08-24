@@ -1,0 +1,39 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 70, "rankSpacing": 72}}}%%
+flowchart TB
+  classDef source fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef parse fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef embed fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef store fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef gate fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  subgraph transform["A-B. Deterministic acquisition and structuring"]
+    direction LR
+    acquire["A1. Acquire<br/>DOC / DOCX + URL + SHA-256"]:::source
+    normalize["A2. Normalize<br/>paragraphs + tables + Unicode"]:::source
+    hierarchy["B1. Parse hierarchy<br/>Chapter -> Article -> Clause -> Point"]:::parse
+    chunk["B2. Build evidence units<br/>boundaries + windows + stable IDs"]:::parse
+    acquire --> normalize --> hierarchy --> chunk
+  end
+  enrich["C. Embed and fingerprint<br/>content-hash checkpoint + gemini-embedding-001 + vector dimension 1,024<br/>bind corpus, chunking, graph, and model revision"]:::embed
+  subgraph stores["D1-D3. Materialize one versioned snapshot"]
+    direction TB
+    fanout((" ")):::junction
+    local["Local artifacts<br/>SQLite + strict JSONL"]:::store
+    sql["Cloud SQL<br/>BM25 / FTS + pgvector"]:::store
+    neo4jStore["Neo4j Aura<br/>typed legal graph"]:::store
+    fanin((" ")):::junction
+    fanout --> local
+    fanout --> sql
+    fanout --> neo4jStore
+    local --> fanin
+    sql --> fanin
+    neo4jStore --> fanin
+  end
+  reconcile["D4. Reconcile<br/>counts + hashes + dimensions + versions + representative reads"]:::gate
+  activate["D5. Activate<br/>publish only a consistent snapshot; invalidate incompatible cache"]:::source
+
+  chunk --> enrich
+  enrich --> fanout
+  fanin --> reconcile
+  reconcile --> activate

@@ -1,0 +1,28 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 52, "rankSpacing": 70}}}%%
+flowchart LR
+  classDef foundation fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.8px
+  classDef semantic fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.8px
+  classDef temporal fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.8px
+  classDef evidence fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.8px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  foundation["<b>FOUNDATION PLANE</b><br/>canonical instrument + temporal version + official source<br/><br/><b>L0 - Provenance and validity</b><br/>issuer + URL + effective interval + status + fingerprint + replacement<br/><br/><b>L1 - Document structure</b><br/>Document -> Chapter / Section -> Article -> Clause -> Point<br/>HAS_PART + provision path + stable citation identity"]:::foundation
+
+  semanticSplit((" ")):::junction
+  l23["<b>L2 - Terminology and topics</b><br/>definitions + aliases + topics + semantic mentions<br/><br/><b>L3 - Wages and rewards</b><br/>salary + allowance + benefit + rate + amount + formula"]:::semantic
+  l45["<b>L4 - Actors and labor relations</b><br/>employee + employer + authority + right + duty<br/><br/><b>L5 - Procedures</b><br/>notice + filing + consultation + approval + complaint + evidence"]:::semantic
+  l67["<b>L6 - Time and limitation</b><br/>deadline + duration + renewal + temporal condition<br/><br/><b>L7 - Sanctions and risks</b><br/>violation + prohibition + remedy + fine + liability"]:::semantic
+  semanticJoin((" ")):::junction
+
+  context["<b>CROSS-DOCUMENT CONTEXT</b><br/><br/><b>L8 - Legal lifecycle</b><br/>formation + performance + amendment + suspension<br/>termination + transition + supersession<br/><br/><b>L9 - Case law</b><br/>judgment + interpreted provision + holding<br/>precedent and cited-law relationships when available"]:::temporal
+
+  evidence["<b>EVIDENCE AND AUTHORIZATION PLANE</b><br/><br/><b>LegalChunk bridge</b><br/>verbatim text + hierarchy path + version + official URL<br/><br/><b>Synchronized projections</b><br/>Neo4j: typed bounded expansion | PostgreSQL: exact + BM25/FTS + 1,024D vectors<br/><br/><b>Fusion and citation gate</b><br/>facet coverage + current version + provenance + source resolution<br/>only supported LegalChunks enter the answer context"]:::evidence
+
+  foundation --> semanticSplit
+  semanticSplit --> l23
+  semanticSplit --> l45
+  semanticSplit --> l67
+  l23 --> semanticJoin
+  l45 --> semanticJoin
+  l67 --> semanticJoin
+  semanticJoin --> context --> evidence

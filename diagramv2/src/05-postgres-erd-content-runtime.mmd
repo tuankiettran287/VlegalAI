@@ -1,0 +1,49 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 42, "rankSpacing": 78}}}%%
+flowchart TB
+  classDef root fill:#ECFDF5,stroke:#059669,color:#064E3B,stroke-width:1.8px
+  classDef owned fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef legal fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef graphnode fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef runtime fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  subgraph ownership["1. User-owned content - declared SQL foreign keys"]
+    direction TB
+    user["<b>APP_USER</b><br/><b>PK</b> id UUID | <b>UK</b> email<br/>preferred_name, role, is_active"]:::root
+    ownhub((" ")):::junction
+    article["<b>ARTICLE</b><br/><b>PK</b> id UUID<br/><b>FK</b> author_id -> APP_USER.id<br/>0..1 user : 0..N | SET NULL"]:::owned
+    artifact["<b>ARTIFACT</b><br/><b>PK</b> id UUID<br/><b>FK</b> user_id -> APP_USER.id<br/>1 owner : 0..N | CASCADE"]:::owned
+    signature["<b>SIGNATURE_PACKET</b><br/><b>PK</b> id UUID<br/><b>FK</b> user_id -> APP_USER.id<br/>1 owner : 0..N | CASCADE"]:::owned
+    feedback["<b>USER_FEEDBACK</b><br/><b>PK</b> id UUID<br/><b>FK</b> user_id -> APP_USER.id<br/>0..1 user : 0..N | SET NULL"]:::owned
+    user --> ownhub
+    ownhub --> article
+    ownhub --> artifact
+    ownhub --> signature
+    ownhub --> feedback
+  end
+
+  subgraph relational["2. Legal catalogue and queue transport - declared SQL foreign keys"]
+    direction LR
+    document["<b>LEGAL_DOCUMENT</b><br/><b>PK</b> id UUID<br/><b>UK</b> external_doc_id, code<br/>status, current_version"]:::legal
+    chunk["<b>LEGAL_CHUNK</b><br/><b>PK</b> id UUID<br/><b>FK</b> document_id -> LEGAL_DOCUMENT.id<br/>external_chunk_id | vector(1024)"]:::legal
+    queue["<b>KOMBU_QUEUE</b><br/><b>PK</b> id INTEGER<br/><b>UK</b> name"]:::runtime
+    message["<b>KOMBU_MESSAGE</b><br/><b>PK</b> id INTEGER<br/><b>FK</b> queue_id -> KOMBU_QUEUE.id<br/>visible, payload, timestamp"]:::runtime
+    document -->|"1 document : 0..N chunks<br/>CASCADE"| chunk
+    queue -->|"1 queue : 0..N messages"| message
+  end
+
+  subgraph projection["3. GraphRAG projection and cache - application identity contracts"]
+    direction TB
+    metadata["<b>GRAPHRAG_INDEX_METADATA</b><br/><b>PK</b> index_name<br/>provider, model, revision<br/>dimensions, status, chunk_count"]:::graphnode
+    lawversion["<b>GRAPHRAG_LAW_VERSION</b><br/><b>PK</b> law_code_normalized<br/>latest_version, updated_at"]:::graphnode
+    graphchunk["<b>GRAPHRAG_CHUNK</b><br/><b>PK</b> chunk_id<br/>doc_id, node_id, law_code/version<br/>text + vector(1024)"]:::graphnode
+    checkpoint["<b>GRAPHRAG_EMBEDDING_CHECKPOINT</b><br/><b>PK</b> chunk_id<br/>content_sha256, model, revision<br/>dimensions, embedding bytes"]:::graphnode
+    cache["<b>LEGAL_ANSWER_CACHE</b><br/><b>PK</b> id UUID | <b>UK</b> query_hash<br/>query vector(1024), sources<br/>law_fingerprint, expires_at"]:::graphnode
+    metadata -.->|"embedding contract"| graphchunk
+    lawversion -.->|"law code + version"| graphchunk
+    graphchunk -.->|"chunk identity"| checkpoint
+    metadata -.->|"fingerprint compatibility"| cache
+  end
+
+  feedback ~~~ document
+  message ~~~ metadata

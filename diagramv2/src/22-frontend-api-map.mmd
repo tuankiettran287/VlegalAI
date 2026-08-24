@@ -1,0 +1,40 @@
+flowchart TB
+  subgraph primary["Primary user workspaces"]
+    direction LR
+    qa["<b>Q&amp;A and identity</b><br/><br/><b>UI routes</b><br/>/ &nbsp; /huong-dan<br/><br/><b>FastAPI families</b><br/>/api/auth/*<br/>/api/chat &nbsp; /api/conversations/*"]
+    contracts["<b>Labor-contract workspace</b><br/><br/><b>UI routes</b><br/>/tao-hop-dong &nbsp; /review-hop-dong<br/>/so-sanh-hop-dong<br/><br/><b>FastAPI family</b><br/>/api/contracts/*"]
+  end
+
+  subgraph secondary["Knowledge and operational surfaces"]
+    direction LR
+    knowledge["<b>Knowledge and saved work</b><br/><br/><b>UI routes</b><br/>/bai-viet &nbsp; /thu-vien &nbsp; /van-ban<br/><br/><b>FastAPI families</b><br/>/api/articles/* &nbsp; /api/artifacts/*<br/>/api/laws/*"]
+    operations["<b>Operations and future surface</b><br/><br/><b>Active APIs</b><br/>/api/health/* &nbsp; /api/stats<br/><br/><b>UI policy</b><br/>/ky-van-ban is coming soon<br/>signature actions remain disabled"]
+  end
+
+  subgraph contractLayer["Shared browser-to-backend contract"]
+    direction LR
+    client["<b>Shared TypeScript API client</b><br/>same-origin HTTPS &nbsp; - &nbsp; session cookie &nbsp; - &nbsp; typed DTOs<br/>request ID &nbsp; - &nbsp; timeout &nbsp; - &nbsp; error normalization"]
+    boundary["<b>Browser trust boundary</b><br/>The frontend communicates only with FastAPI.<br/>It never connects directly to Cloud SQL, Neo4j, Secret Manager, or Vertex AI."]
+    client -->|only permitted application path| boundary
+  end
+
+  primary -->|route requests| contractLayer
+  secondary -->|route requests| contractLayer
+
+  classDef qaCard fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef contractCard fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef knowledgeCard fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef operationsCard fill:#F8FAFC,stroke:#94A3B8,color:#475569,stroke-width:1.5px,stroke-dasharray:4 3
+  classDef clientCard fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef boundaryCard fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+
+  class qa qaCard
+  class contracts contractCard
+  class knowledge knowledgeCard
+  class operations operationsCard
+  class client clientCard
+  class boundary boundaryCard
+
+  style primary fill:#FFFFFF,stroke:#16A34A,stroke-width:1.5px,color:#14532D
+  style secondary fill:#FFFFFF,stroke:#D97706,stroke-width:1.5px,color:#78350F
+  style contractLayer fill:#F8FAFC,stroke:#2563EB,stroke-width:1.8px,color:#10213F

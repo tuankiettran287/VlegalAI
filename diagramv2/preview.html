@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VLegalAI diagram preview</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; background: #f8fafc; }
+    body { display: grid; place-items: center; overflow: hidden; }
+    img { display: block; max-width: calc(100vw - 48px); max-height: calc(100vh - 48px); object-fit: contain; }
+  </style>
+</head>
+<body>
+  <img id="diagram" alt="Rendered VLegalAI architecture diagram">
+  <script>
+    const source = new URLSearchParams(window.location.search).get("src");
+    document.getElementById("diagram").src = source || "svg/02-production-deployment.svg";
+  </script>
+</body>
+</html>

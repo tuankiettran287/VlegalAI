@@ -1,0 +1,38 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 54, "rankSpacing": 76}}}%%
+flowchart TB
+  classDef identity fill:#ECFDF5,stroke:#059669,color:#064E3B,stroke-width:1.5px
+  classDef chat fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef content fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef graphClass fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef runtime fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef control fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:1.5px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  identity["IDENTITY AND OWNERSHIP<br/><b>APP_USER</b> | <b>SSO_IDENTITY</b> | <b>USER_FEEDBACK</b>"]:::identity
+  ownerhub((" ")):::junction
+
+  subgraph userDomains["Declared user-owned SQL relationships"]
+    direction LR
+    chat["CONVERSATION AND HITL<br/><b>CONVERSATION</b> | <b>CHAT_MESSAGE</b><br/><b>CONVERSATION_SUMMARY</b> | <b>CHAT_ANSWER_FEEDBACK</b>"]:::chat
+    content["USER CONTENT<br/><b>ARTICLE</b> | <b>ARTIFACT</b> | <b>SIGNATURE_PACKET</b>"]:::content
+  end
+
+  subgraph legalDomains["Legal retrieval and GraphRAG projection"]
+    direction LR
+    legal["LEGAL CATALOGUE<br/><b>LEGAL_DOCUMENT</b> | <b>LEGAL_CHUNK</b> vector(1024)<br/><b>LEGAL_ANSWER_CACHE</b> | <b>LEGAL_CATALOG_CORPUS</b> view"]:::content
+    graphstore["GRAPHRAG PROJECTION<br/><b>GRAPHRAG_CHUNK</b> | <b>GRAPHRAG_EMBEDDING_CHECKPOINT</b><br/><b>GRAPHRAG_INDEX_METADATA</b> | <b>GRAPHRAG_LAW_VERSION</b>"]:::graphClass
+  end
+
+  subgraph operations["Runtime and migration control"]
+    direction LR
+    runtime["RUNTIME COORDINATION<br/><b>GUEST_RATE_LIMIT</b> | <b>KOMBU_QUEUE</b> -> <b>KOMBU_MESSAGE</b><br/><b>CELERY_TASKMETA</b> | <b>CELERY_TASKSETMETA</b>"]:::runtime
+    migration["MIGRATION CONTROL<br/><b>ALEMBIC_VERSION</b><br/>one release-controlled schema head"]:::control
+  end
+
+  identity --> ownerhub
+  ownerhub -->|"APP_USER.id : owner / submitter"| chat
+  ownerhub -->|"APP_USER.id : owner / author"| content
+  chat -.->|"sources JSON + cache identity"| legal
+  legal <-->|"LEGAL_DOCUMENT.id : 1 to many chunks<br/>chunk IDs + law fingerprint"| graphstore
+  graphstore ~~~ runtime
+  runtime -->|"queue_id : 1 to many messages"| migration

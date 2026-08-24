@@ -1,0 +1,46 @@
+flowchart TB
+  classDef user fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef state fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef good fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef warn fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef terminal fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px
+
+  access["Google sign-in and onboarding"]:::user
+  active["Active conversation"]:::state
+  answer["Completed answer committed"]:::state
+  action{"Next user action"}:::warn
+  access --> active --> answer
+  answer --> action
+
+  subgraph continuity["Conversation continuity"]
+    direction TB
+    summarize["Refresh encrypted summary and embedding"]:::good
+    next["Load summary for the next turn"]:::good
+    summarize --> next
+  end
+
+  subgraph positive["Positive HITL feedback"]
+    direction TB
+    useful["User marks answer useful"]:::good
+    approved["Retain approved example for future grounding"]:::good
+    useful --> approved
+  end
+
+  subgraph negative["Negative HITL feedback"]
+    direction TB
+    bad["User submits rating and comment"]:::warn
+    regenerate["Generate a replacement with feedback context"]:::warn
+    supersede["Commit replacement and supersede old answer"]:::warn
+    bad --> regenerate --> supersede
+  end
+
+  delete["Delete conversation and dependent state"]:::terminal
+  continued["Conversation remains active"]:::state
+
+  action -->|"Continue chat"| summarize
+  action -->|"Mark useful"| useful
+  action -->|"Mark not useful"| bad
+  action -->|"Delete"| delete
+  next --> continued
+  approved --> continued
+  supersede --> continued

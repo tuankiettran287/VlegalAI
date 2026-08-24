@@ -1,0 +1,44 @@
+%%{init: {"flowchart": {"defaultRenderer": "dagre", "curve": "basis", "nodeSpacing": 74, "rankSpacing": 72}}}%%
+flowchart TB
+  classDef request fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef observe fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef decision fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+  classDef recover fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef fail fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px
+  classDef junction fill:#334155,stroke:#334155,color:#334155,stroke-width:1px
+
+  subgraph execution["1-3. Instrumented request execution"]
+    direction LR
+    request["Incoming request<br/>safe request ID / UUID"]:::request
+    instrument["Instrument execution<br/>semaphore + stage timers"]:::observe
+    outcome{"Stage outcome"}:::decision
+    request --> instrument --> outcome
+  end
+  subgraph handling["4. Bounded outcome handling"]
+    direction TB
+    branch((" ")):::junction
+    success["Success<br/>preserve stage evidence"]:::request
+    retry["Retryable failure<br/>fallback or one bounded retry"]:::recover
+    unsafe["Unsafe / unverifiable<br/>reject unsupported result"]:::fail
+    join((" ")):::junction
+    branch --> success
+    branch --> retry
+    branch --> unsafe
+    success --> join
+    retry --> join
+    unsafe --> join
+  end
+  response["5. Controlled response<br/>answer or safe-unavailable result + Server-Timing + status"]:::request
+  subgraph telemetry["6. Operational and release evidence"]
+    direction LR
+    logs["Structured logs<br/>request + stage + duration + outcome"]:::observe
+    metrics["Cloud Run metrics<br/>health + readiness"]:::observe
+    bundle["Release evidence<br/>revision + image SHA + tests + latency"]:::observe
+    logs --> bundle
+    metrics --> bundle
+  end
+
+  outcome --> branch
+  join --> response
+  response -.-> logs
+  response -.-> metrics

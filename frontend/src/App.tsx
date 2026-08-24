@@ -684,8 +684,12 @@ export function ChatPage({
   }, []);
 
   useLayoutEffect(() => {
+    if (!hasMessages) {
+      if (chatScrollRef.current) chatScrollRef.current.scrollTop = 0;
+      return;
+    }
     scrollToLatest(false);
-  }, [lastMessageId, messages.length, scrollToLatest]);
+  }, [hasMessages, lastMessageId, messages.length, scrollToLatest]);
 
   useLayoutEffect(() => {
     resizeComposerTextarea(composerTextareaRef.current);

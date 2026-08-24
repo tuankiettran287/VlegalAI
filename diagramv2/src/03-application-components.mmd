@@ -1,0 +1,35 @@
+block-beta
+  columns 2
+
+  title["Application component architecture"]:2
+  space:2
+  client["Browser client\nReact SPA: landing, chat, contracts, articles, library\nHTTPS boundary: request ID, CORS, gzip, semaphore, security headers"]:2
+  space:2
+  routes["FastAPI route layer\nauth routes | chat routes | contract routes | content routes"]:2
+  space:2
+  services["Application and domain services\nidentity + session | chat orchestration | hybrid retrieval + grounding\ndocument intelligence | publishing"]:2
+  space:2
+  persistence["Persistence adapters\nAsync SQLAlchemy repositories | encryption | pgvector | Neo4j"] delivery["External and delivery adapters\nGoogle OIDC | Vertex AI | Tavily/Search | Celery worker + beat + jobs"]
+  space:2
+  controls["Cross-cutting controls\nauthorization, privacy, source provenance, typed failures, telemetry"]:2
+
+  client --> routes
+  routes --> services
+  services --> persistence
+  services --> delivery
+  persistence --> controls
+  delivery --> controls
+
+  classDef heading fill:#FFFFFF,stroke:#2563EB,color:#10213F,stroke-width:2px
+  classDef ui fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef api fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef domain fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef adapter fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef secure fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+
+  class title heading
+  class client ui
+  class routes api
+  class services domain
+  class persistence,delivery adapter
+  class controls secure

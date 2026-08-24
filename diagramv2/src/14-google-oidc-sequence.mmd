@@ -1,0 +1,47 @@
+flowchart TB
+  classDef browser fill:#F0FDF4,stroke:#16A34A,color:#14532D,stroke-width:1.5px
+  classDef api fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px
+  classDef provider fill:#FAF5FF,stroke:#7C3AED,color:#3B0764,stroke-width:1.5px
+  classDef data fill:#ECFEFF,stroke:#0891B2,color:#164E63,stroke-width:1.5px
+  classDef gate fill:#FFFBEB,stroke:#D97706,color:#78350F,stroke-width:1.5px
+
+  title["Google OIDC authorization-code flow with PKCE"]:::api
+
+  subgraph initiate["1. Initiate"]
+    direction LR
+    userClick["Browser<br/>Continue with Google"]:::browser
+    login["FastAPI login route<br/>validate return path"]:::api
+    txn["Signed short-lived state<br/>nonce + PKCE verifier<br/>SHA-256 challenge"]:::gate
+    userClick --> login --> txn
+  end
+
+  subgraph authorize["2. Authorize"]
+    direction LR
+    redirect["302 authorization request"]:::api
+    consent["Google authentication<br/>and consent"]:::provider
+    callback["Callback<br/>code + signed state"]:::provider
+    redirect --> consent --> callback
+  end
+
+  subgraph validate["3. Validate"]
+    direction LR
+    stateGate["Verify state, nonce,<br/>expiry and return path"]:::gate
+    exchange["Back-channel exchange<br/>with PKCE verifier"]:::api
+    claims["Validate token signature,<br/>issuer, audience and claims"]:::gate
+    stateGate --> exchange --> claims
+  end
+
+  subgraph establish["4. Establish application identity"]
+    direction LR
+    identity["Cloud SQL upsert<br/>issuer + subject uniqueness"]:::data
+    cookie["Secure HttpOnly<br/>VLegalAI session cookie"]:::api
+    profile["Resolve /api/auth/me<br/>and onboarding status"]:::browser
+    identity --> cookie --> profile
+  end
+
+  boundary["Browser receives no client secret, service-account credential, or model key"]:::gate
+  title --> initiate
+  initiate --> authorize
+  authorize --> validate
+  validate --> establish
+  establish --> boundary
