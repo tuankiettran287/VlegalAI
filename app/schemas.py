@@ -286,6 +286,25 @@ class ReviewContractRequest(BaseModel):
     text: str = Field(min_length=20, max_length=120000)
     user_role: str | None = Field(default=None, max_length=240)
 
+    @field_validator("title", "user_role", mode="before")
+    @classmethod
+    def normalize_review_labels(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(str(value).split()).strip()
+        return normalized or None
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def normalize_review_text(cls, value: Any) -> str:
+        return (
+            str(value or "")
+            .replace("\x00", "")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .strip()
+        )
+
 
 class CompareContractRequest(BaseModel):
     original_title: str | None = Field(default=None, max_length=160)

@@ -66,6 +66,7 @@ import {
   uploadChatAttachment,
   type CompareResponse,
   type DraftResponse,
+  type ExtractedContractDocument,
   type ReviewResponse,
 } from "./api";
 import { sampleQuestions, templateFallback } from "./data";
@@ -577,11 +578,13 @@ function DocumentInput({
   value,
   onChange,
   onError,
+  onExtracted,
 }: {
   title: string;
   value: string;
   onChange: (value: string) => void;
   onError?: (message: string) => void;
+  onExtracted?: (document: ExtractedContractDocument) => void;
 }) {
   const inputId = useId();
   const [uploading, setUploading] = useState(false);
@@ -616,6 +619,7 @@ function DocumentInput({
               try {
                 const extracted = await extractContractDocument(file);
                 onChange(extracted.text);
+                onExtracted?.(extracted);
                 setFileName(
                   `${extracted.filename}${extracted.truncated ? " · đã lấy 120.000 ký tự đầu" : ""}`,
                 );
@@ -1645,6 +1649,8 @@ function ReviewPage() {
   const [title, setTitle] = useState("");
   const [userRole, setUserRole] = useState("");
   const [text, setText] = useState("");
+  const [detectedParties, setDetectedParties] = useState<string[]>([]);
+  const [extractedFileName, setExtractedFileName] = useState("");
   const [result, setResult] = useState<ReviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1665,18 +1671,74 @@ function ReviewPage() {
           catch (reason) { setError((reason as Error).message); }
           finally { setLoading(false); }
         }}>
-          <label className="field"><span>Tên tài liệu</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Hợp đồng dịch vụ 2026" /></label>
           <label className="field">
-            <span>Bạn là bên nào trong hợp đồng?</span>
+            <span>Tên tài liệu</span>
+            <input
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              maxLength={160}
+              required
+              placeholder="Tên hợp đồng sẽ được tự động nhận diện sau khi tải file"
+            />
+          </label>
+          <label className="field">
+            <span>Bạn cần bảo vệ quyền lợi cho bên nào?</span>
             <input
               value={userRole}
               onChange={(event) => setUserRole(event.target.value)}
               maxLength={240}
-              placeholder="Ví dụ: bên thuê dịch vụ, người lao động, bên mua…"
+              required
+              placeholder="Chọn bên được nhận diện bên dưới hoặc nhập thủ công"
             />
           </label>
-          <DocumentInput title="Nội dung hợp đồng" value={text} onChange={setText} onError={setError} />
-          <button className="primary-button align-right" type="submit" disabled={loading || text.trim().length < 20}>
+          {extractedFileName && (
+            <div className={`contract-extraction-summary ${detectedParties.length ? "has-parties" : "needs-input"}`}>
+              <FileText size={17} />
+              <div>
+                <strong>Đã đọc {extractedFileName}</strong>
+                <span>{
+                  detectedParties.length
+                    ? `Đã nhận diện ${detectedParties.length} bên. Hãy chọn đúng bên cần bảo vệ quyền lợi.`
+                    : "Chưa nhận diện chắc chắn tên các bên; hãy nhập vai trò của bạn thủ công."
+                }</span>
+              </div>
+            </div>
+          )}
+          {detectedParties.length > 0 && (
+            <div className="detected-party-picker" role="group" aria-label="Các bên được nhận diện trong hợp đồng">
+              <small>Các bên được nhận diện</small>
+              <div>
+                {detectedParties.map((party) => (
+                  <button
+                    className={userRole === party ? "active" : ""}
+                    type="button"
+                    key={party}
+                    onClick={() => setUserRole(party)}
+                  >
+                    <CheckCircle2 size={15} />
+                    {party}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <DocumentInput
+            title="Nội dung hợp đồng"
+            value={text}
+            onChange={setText}
+            onError={setError}
+            onExtracted={(document) => {
+              setResult(null);
+              setExtractedFileName(document.filename);
+              setDetectedParties(document.party_options || []);
+              setTitle(document.suggested_title || document.filename.replace(/\.[^.]+$/, ""));
+              setUserRole((current) => {
+                if (document.party_options?.length === 1) return document.party_options[0];
+                return document.party_options?.includes(current) ? current : "";
+              });
+            }}
+          />
+          <button className="primary-button align-right" type="submit" disabled={loading || text.trim().length < 20 || title.trim().length < 2 || userRole.trim().length < 2}>
             {loading ? "Đang phân tích…" : "Phân tích hợp đồng"}
           </button>
         </form>

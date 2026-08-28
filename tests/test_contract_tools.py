@@ -10,10 +10,11 @@ import pytest
 from docx import Document
 from fastapi import HTTPException
 
-from app.api import compare_contracts, draft_contract
+from app.api import compare_contracts, draft_contract, review_contract
 from app.schemas import (
     CompareContractRequest,
     DraftContractRequest,
+    ReviewContractRequest,
     VerificationItem,
     VerificationReport,
 )
@@ -44,16 +45,26 @@ def test_extract_contract_document_supports_utf8_and_docx_tables() -> None:
 
     document = Document()
     document.add_heading("HỢP ĐỒNG DỊCH VỤ", level=1)
-    document.add_paragraph("Điều 1. Phạm vi công việc")
+    document.add_paragraph("BÊN A: CÔNG TY MINH AN")
     table = document.add_table(rows=1, cols=2)
     table.cell(0, 0).text = "Thời hạn"
     table.cell(0, 1).text = "12 tháng"
+    document.add_paragraph("BÊN B: ÔNG NGUYỄN VĂN B")
+    document.add_paragraph("Điều 1. Phạm vi công việc")
     output = io.BytesIO()
     document.save(output)
 
     extracted = extract_contract_document(output.getvalue(), "hop-dong.docx")
     assert "Điều 1. Phạm vi công việc" in extracted.text
-    assert "Thời hạn | 12 tháng" in extracted.text
+    assert "Thời hạn\t12 tháng" in extracted.text
+    assert extracted.text.index("BÊN A") < extracted.text.index("Thời hạn")
+    assert extracted.text.index("Thời hạn") < extracted.text.index("BÊN B")
+    assert extracted.text.index("BÊN B") < extracted.text.index("Điều 1")
+    assert extracted.suggested_title == "HỢP ĐỒNG DỊCH VỤ"
+    assert extracted.party_options == (
+        "BÊN A — CÔNG TY MINH AN",
+        "BÊN B — ÔNG NGUYỄN VĂN B",
+    )
 
 
 def test_extract_contract_document_rejects_unsupported_and_oversized_files() -> None:
@@ -185,6 +196,56 @@ class _Freshness:
                 )
             ],
         ), False
+
+
+def test_review_preserves_selected_party_and_accepts_contract_facts_without_statute_citation() -> None:
+    user_id = uuid.uuid4()
+    db = _ArtifactDb(user_id)
+    retrieval = _FastContractRetrieval()
+
+    class _Ai:
+        async def complete_json(self, *_: object, **__: object) -> dict[str, object]:
+            return {
+                "summary": "Hợp đồng ghi thời hạn làm việc là 12 tháng.",
+                "contract_type": "Hợp đồng lao động",
+                "party_perspective": "Đánh giá cân bằng",
+                "key_terms": [
+                    {
+                        "label": "Thời hạn",
+                        "value": "12 tháng",
+                        "assessment": "Được ghi trực tiếp trong hợp đồng.",
+                    }
+                ],
+                "clause_reviews": [],
+                "missing_clauses": [],
+                "risks": [],
+                "recommendations": ["Làm rõ ngày bắt đầu làm việc trong hợp đồng."],
+            }
+
+    result = asyncio.run(
+        review_contract(
+            ReviewContractRequest(
+                title="  Hợp đồng lao động 2026  ",
+                user_role="  NGƯỜI LAO ĐỘNG  ",
+                text="HỢP ĐỒNG LAO ĐỘNG\r\n\r\nĐiều 1. Thời hạn làm việc là 12 tháng.",
+            ),
+            db,
+            SimpleNamespace(id=user_id),
+            SimpleNamespace(
+                gemini_model="gemini-2.5-flash",
+                message_encryption_key="",
+                session_secret="test-session-secret-at-least-32-bytes",
+            ),
+            retrieval,
+            _Freshness(),
+            _Ai(),
+        )
+    )
+
+    assert result["party_perspective"] == "NGƯỜI LAO ĐỘNG"
+    assert result["contract_type"] == "Hợp đồng lao động"
+    assert result["summary"].startswith("Hợp đồng ghi")
+    assert db.added[0].title == "Hợp đồng lao động 2026"
 
 
 def test_draft_accepts_full_contract_without_graph_route_or_mandatory_inline_citations() -> None:

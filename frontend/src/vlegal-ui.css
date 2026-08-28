@@ -2319,6 +2319,113 @@ main:focus-visible {
   background: #182941;
 }
 
+/* Contract review: make upload parsing and review perspective explicit. */
+.contract-extraction-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 15px;
+  border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--line));
+  border-radius: 13px;
+  color: var(--brand-strong);
+  background: color-mix(in srgb, var(--brand-soft) 72%, var(--surface));
+}
+
+.contract-extraction-summary.needs-input {
+  border-color: color-mix(in srgb, #d99a18 34%, var(--line));
+  color: #8a5a00;
+  background: color-mix(in srgb, #fff4d8 72%, var(--surface));
+}
+
+.contract-extraction-summary svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.contract-extraction-summary div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.contract-extraction-summary strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contract-extraction-summary span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.detected-party-picker {
+  display: grid;
+  gap: 9px;
+  margin-top: -8px;
+}
+
+.detected-party-picker > small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.detected-party-picker > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.detected-party-picker button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 11px;
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--surface);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.detected-party-picker button:hover {
+  border-color: color-mix(in srgb, var(--brand) 42%, var(--line));
+  color: var(--ink);
+  background: var(--brand-soft);
+}
+
+.detected-party-picker button.active {
+  border-color: var(--brand);
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 9%, transparent);
+}
+
+:root[data-theme="dark"] .contract-extraction-summary,
+:root[data-theme="dark"] .contract-extraction-summary.needs-input,
+:root[data-theme="dark"] .detected-party-picker button {
+  border-color: #34465f;
+  color: #cbd5e5;
+  background: #15243a;
+}
+
+:root[data-theme="dark"] .detected-party-picker button.active {
+  border-color: #7d99d7;
+  color: #fff;
+  background: #1b3157;
+}
+
 @media (max-width: 1080px) {
   .chat-topbar-context {
     display: none;
@@ -2439,5 +2546,13 @@ main:focus-visible {
 
   .starter-section-head {
     margin-top: 24px;
+  }
+
+  .detected-party-picker > div {
+    display: grid;
+  }
+
+  .detected-party-picker button {
+    width: 100%;
   }
 }

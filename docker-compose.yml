@@ -33,7 +33,7 @@ x-app-environment: &app-environment
   GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp_credentials
   GEMINI_USE_ADC: "${GEMINI_USE_ADC:-true}"
   GEMINI_PROJECT_ID: "${GEMINI_PROJECT_ID:?Set GEMINI_PROJECT_ID in .env}"
-  GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
+  GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.7-flash}"
   GEMINI_LOCATION: "${GEMINI_LOCATION:-global}"
   GEMINI_THINKING_LEVEL: "${GEMINI_THINKING_LEVEL:-low}"
   GEMINI_DATA_POLICY: "${GEMINI_DATA_POLICY:-redact}"

@@ -426,6 +426,8 @@ async def extract_contract_file(
         "original_chars": extracted.original_chars,
         "truncated": extracted.truncated,
         "page_count": extracted.page_count,
+        "suggested_title": extracted.suggested_title,
+        "party_options": list(extracted.party_options),
     }
 
 
@@ -4163,6 +4165,8 @@ async def review_contract(
     log_progress(logger, "contract_review", "started", operation_started)
     user_id = user.id
     await db.rollback()
+    contract_title = (payload.title or "").strip()
+    user_perspective = (payload.user_role or "").strip()
     query = contract_retrieval_query(
         "Rà soát điều khoản và rủi ro hợp đồng",
         payload.text,
@@ -4187,19 +4191,31 @@ async def review_contract(
         "các điều khoản chính, điểm bất lợi theo góc nhìn của người dùng, điều khoản "
         "còn thiếu, mức độ rủi ro và câu chữ đề xuất sửa. Phân biệt rõ nhận xét về "
         "nội dung hợp đồng với kết luận dựa trên pháp luật.\n"
-        f"{untrusted_data_block('USER_PERSPECTIVE', payload.user_role or 'Chưa xác định; đánh giá cân bằng cho cả hai bên')}\n"
-        f"{untrusted_data_block('CONTRACT_TITLE', payload.title or '')}\n"
+        "USER_PERSPECTIVE là góc nhìn do người dùng chọn và phải được ưu tiên xuyên suốt. "
+        "Không tự đổi người dùng sang phía đối lập. Dữ kiện, số tiền, thời hạn và tên các bên "
+        "phải lấy nguyên văn từ CONTRACT_TEXT; không thay bằng quy định pháp luật chung. "
+        "Nhận xét thuần túy về nội dung hợp đồng không cần gắn nguồn luật; mọi kết luận pháp lý "
+        "phải dùng đúng [Sx] đã được cấp.\n"
+        f"{untrusted_data_block('USER_PERSPECTIVE', user_perspective or 'Chưa xác định; đánh giá cân bằng cho cả hai bên')}\n"
+        f"{untrusted_data_block('CONTRACT_TITLE', contract_title)}\n"
         f"{untrusted_data_block('CONTRACT_TEXT', payload.text)}",
         schema=REVIEW_SCHEMA,
         max_tokens=8192,
         thinking_budget=2048,
     )
     allowed_ids = [source["source_id"] for source in sources]
+    # The review JSON mixes contractual facts (which come from the uploaded
+    # document) with legal conclusions. Requiring a statute citation on every
+    # sentence rejects otherwise valid reviews, especially when retrieval has
+    # no legal source. Unknown citation IDs are still rejected here, while the
+    # prompt and per-clause citation fields keep legal claims source-bound.
     validate_citations(result, allowed_ids, require=False)
-    _validate_narrative_claims(result["summary"], allowed_ids)
-    _validate_narrative_claims(result["recommendations"], allowed_ids)
+    if user_perspective:
+        result["party_perspective"] = user_perspective
+    result["contract_type"] = str(result.get("contract_type") or contract_title or "Chưa xác định").strip()
+    artifact_title = contract_title or result["contract_type"] or "Kết quả review hợp đồng"
     artifact = await _save_artifact(
-        db, user_id, settings, kind="CONTRACT_REVIEW", title=payload.title or "Kết quả review hợp đồng",
+        db, user_id, settings, kind="CONTRACT_REVIEW", title=artifact_title,
         content=result["summary"], metadata={**result, "sources": sources, "verification": verification},
     )
     log_progress(

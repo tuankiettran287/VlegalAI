@@ -339,6 +339,8 @@ export type ExtractedContractDocument = {
   original_chars: number;
   truncated: boolean;
   page_count: number | null;
+  suggested_title: string | null;
+  party_options: string[];
 };
 
 export function extractContractDocument(file: File) {

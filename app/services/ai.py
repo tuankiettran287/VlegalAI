@@ -709,10 +709,16 @@ class GeminiService:
         }
         model = self.settings.gemini_model.strip().lower()
         if model.startswith("gemini-3"):
+            requested_level = (
+                thinking_level or self.settings.gemini_thinking_level
+            ).upper()
+            # Gemini 3.7 Flash supports LOW, MEDIUM, and HIGH only. Coerce a
+            # legacy MINIMAL setting so an old environment cannot make every
+            # generation request fail with an API validation error.
+            if model.startswith("gemini-3.7") and requested_level == "MINIMAL":
+                requested_level = "LOW"
             generation_config["thinkingConfig"] = {
-                "thinkingLevel": (
-                    thinking_level or self.settings.gemini_thinking_level
-                ).upper(),
+                "thinkingLevel": requested_level,
                 "includeThoughts": False,
             }
         else:
@@ -938,7 +944,7 @@ class GeminiService:
         }
         if self.settings.gemini_model.strip().lower().startswith("gemini-3"):
             payload["generationConfig"]["thinkingConfig"] = {
-                "thinkingLevel": "MINIMAL",
+                "thinkingLevel": "LOW",
                 "includeThoughts": False,
             }
         else:
@@ -1062,7 +1068,7 @@ class GeminiService:
         }
         if self.settings.gemini_model.strip().lower().startswith("gemini-3"):
             generation_config["thinkingConfig"] = {
-                "thinkingLevel": "MINIMAL",
+                "thinkingLevel": "LOW",
                 "includeThoughts": False,
             }
         else:

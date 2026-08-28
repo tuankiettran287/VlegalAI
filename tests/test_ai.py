@@ -525,6 +525,33 @@ def test_complete_calls_vertex_with_structured_output() -> None:
     }
 
 
+def test_gemini_37_payload_uses_supported_thinking_level() -> None:
+    service = GeminiService(
+        _settings(
+            gemini_model="gemini-3.7-flash",
+            gemini_thinking_level="minimal",
+        )
+    )
+    try:
+        payload = service._payload(
+            "System instruction",
+            "User question",
+            temperature=0.1,
+            max_tokens=1024,
+            json_schema=None,
+            thinking_level="minimal",
+        )
+    finally:
+        asyncio.run(service.close())
+
+    generation_config = payload["generationConfig"]
+    assert "temperature" not in generation_config
+    assert generation_config["thinkingConfig"] == {
+        "thinkingLevel": "LOW",
+        "includeThoughts": False,
+    }
+
+
 def test_extract_attachment_text_sends_inline_data_to_vertex() -> None:
     captured: dict[str, object] = {}
 
