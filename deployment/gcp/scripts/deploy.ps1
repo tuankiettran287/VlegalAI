@@ -280,7 +280,21 @@ function Deploy-ArticlePublisher {
     }
 }
 
+function Resolve-WebExternalUrl {
+    if (-not [string]::IsNullOrWhiteSpace($ExternalUrl)) {
+        return $ExternalUrl.TrimEnd("/")
+    }
+
+    $projectNumber = (& gcloud projects describe $ProjectId --format="value(projectNumber)").Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($projectNumber)) {
+        throw "Khong the xac dinh project number de tao Cloud Run URL."
+    }
+    return "https://$webService-$projectNumber.$Region.run.app"
+}
+
 function Deploy-Web {
+    param([Parameter(Mandatory)][string]$ResolvedExternalUrl)
+
     $envVars = @(
         "APP_ENV=production",
         "LOG_LEVEL=INFO",
@@ -322,7 +336,12 @@ function Deploy-Web {
         "NEO4J_URI=$Neo4jUri",
         "NEO4J_USER=$Neo4jUser",
         "NEO4J_DATABASE=$Neo4jDatabase",
-        "FRONTEND_DIST_DIR=/app/frontend-dist"
+        "FRONTEND_DIST_DIR=/app/frontend-dist",
+        "PUBLIC_URL=$ResolvedExternalUrl",
+        "FRONTEND_URL=$ResolvedExternalUrl",
+        "CORS_ORIGINS=$ResolvedExternalUrl",
+        "OIDC_REDIRECT_URI=$ResolvedExternalUrl/api/auth/google/callback",
+        "COOKIE_SECURE=true"
     ) -join ","
 
     $arguments = @(
@@ -340,16 +359,6 @@ function Deploy-Web {
         $arguments += "--set-cloudsql-instances=$CloudSqlInstance"
     }
     Invoke-Gcloud $arguments
-}
-
-function Set-WebExternalUrl {
-    param([Parameter(Mandatory)][string]$Url)
-    Invoke-Gcloud @(
-        "run", "services", "update", $webService,
-        "--project=$ProjectId", "--region=$Region",
-        "--update-env-vars=PUBLIC_URL=$Url,FRONTEND_URL=$Url,CORS_ORIGINS=$Url,OIDC_REDIRECT_URI=$Url/api/auth/google/callback,COOKIE_SECURE=true",
-        "--quiet"
-    )
 }
 
 function Deploy-Worker {
@@ -421,9 +430,8 @@ switch ($Component) {
     "reindex" { Deploy-Reindex }
     "article" { Deploy-ArticlePublisher }
     { $_ -in @("web", "api") } {
-        Deploy-Web
-        $resolvedExternalUrl = if ($ExternalUrl) { $ExternalUrl } else { Get-ServiceUrl $webService }
-        Set-WebExternalUrl $resolvedExternalUrl
+        $resolvedExternalUrl = Resolve-WebExternalUrl
+        Deploy-Web $resolvedExternalUrl
         Write-Host "Service URL: $(Get-ServiceUrl $webService)"
     }
     "worker" { Deploy-Worker }
@@ -432,9 +440,8 @@ switch ($Component) {
         Deploy-Migrate
         Deploy-Reindex
         Deploy-ArticlePublisher
-        Deploy-Web
-        $url = Get-ServiceUrl $webService
-        Set-WebExternalUrl $url
+        $url = Resolve-WebExternalUrl
+        Deploy-Web $url
         Deploy-Worker
         Deploy-Beat
         Write-Host "Service URL: $url"
