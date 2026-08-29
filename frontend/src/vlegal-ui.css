@@ -1866,6 +1866,13 @@ main:focus-visible {
 }
 
 .empty-chat .chat-scroll {
+  /*
+   * Keep an oversized empty state anchored to the top of the scrollport.
+   * `place-items: center` from the public landing stylesheet vertically
+   * centred the grid item, which pushed the greeting behind the top bar on
+   * common laptop viewports.
+   */
+  place-items: start center;
   background:
     radial-gradient(circle at 50% -10%, rgb(30 58 138 / 8%), transparent 38%),
     radial-gradient(circle at 88% 54%, rgb(8 127 114 / 5%), transparent 25%),
