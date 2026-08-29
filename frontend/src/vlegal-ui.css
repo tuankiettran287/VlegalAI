@@ -1968,58 +1968,91 @@ main:focus-visible {
 }
 
 .composer-home {
-  width: min(900px, 100%);
+  width: min(860px, 100%);
 }
 
 .composer-home .input-wrap {
   position: relative;
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 0;
   overflow: visible;
-  border: 1px solid #cdd8e8;
-  border-radius: 22px;
-  background: rgb(255 255 255 / 96%);
+  padding: 8px;
+  border: 1px solid #d2dbe9;
+  border-radius: 24px;
+  background: rgb(255 255 255 / 98%);
   box-shadow:
-    0 20px 46px rgb(15 23 42 / 10%),
+    0 18px 42px rgb(15 23 42 / 9%),
     0 1px 0 rgb(255 255 255 / 90%) inset;
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
 }
 
 .composer-home .input-wrap::before {
   position: absolute;
   top: -1px;
-  right: 42px;
-  left: 42px;
+  right: 56px;
+  left: 56px;
   height: 2px;
   border-radius: 999px;
   background: linear-gradient(90deg, transparent, #2749a1 26%, #0b8d7e 74%, transparent);
   content: "";
-  opacity: .62;
+  opacity: .52;
 }
 
 .composer-home .input-wrap:focus-within {
   border-color: #93a9cd;
   box-shadow:
     0 0 0 4px rgb(30 58 138 / 7%),
-    0 24px 54px rgb(15 23 42 / 13%);
+    0 22px 50px rgb(15 23 42 / 12%);
+  transform: translateY(-1px);
 }
 
 .composer-home .composer-meta {
-  padding: 15px 20px 0;
+  position: static;
+  display: flex;
+  width: auto;
+  height: auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 12px 1px;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
 }
 
 .composer-home .composer-meta label {
-  color: #34435a;
-  font-size: 10px;
-  letter-spacing: .11em;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #30415d;
+  font-size: 9px;
+  letter-spacing: .12em;
+  white-space: nowrap;
+}
+
+.composer-home .composer-meta label::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #0b8d7e;
+  box-shadow: 0 0 0 4px rgb(11 141 126 / 10%);
+  content: "";
 }
 
 .composer-home .composer-meta span {
-  color: #8a95a7;
-  font-size: 10px;
+  color: #8a96a8;
+  font-size: 9px;
+  white-space: nowrap;
 }
 
 .composer-home .input-wrap textarea {
-  min-height: 74px;
-  max-height: 220px;
-  padding: 14px 20px 16px;
+  width: 100%;
+  min-height: 56px;
+  max-height: 188px;
+  flex: 0 0 auto;
+  padding: 10px 12px 12px;
   color: #17233b;
   font-size: 16px;
   line-height: 1.55;
@@ -2031,34 +2064,77 @@ main:focus-visible {
 }
 
 .composer-home .composer-toolbar {
-  min-height: 58px;
-  margin: 0 14px;
-  padding: 8px 0;
-  border-top-color: #e4e9f1;
+  display: flex;
+  width: 100%;
+  min-height: 50px;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid #e7ecf3;
+  border-radius: 16px;
+  background: #f6f8fb;
 }
 
 .composer-home .attachment-plus,
 .composer-home .primary-icon {
-  width: 42px;
-  height: 42px;
-  border-radius: 13px;
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+  flex: 0 0 40px;
+  border-radius: 12px;
 }
 
 .composer-home .attachment-plus {
-  border-color: #d9e1ed;
+  border-color: #dbe3ef;
   color: #173d91;
-  background: #f5f8fd;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 5%);
+}
+
+.composer-home .attachment-plus:hover:not(:disabled),
+.composer-home .attachment-plus[aria-expanded="true"] {
+  border-color: #9eafd0;
+  background: #eef3fd;
+  color: #173d91;
+}
+
+.composer-home .policy-line {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  margin: 0 auto 0 2px;
+  overflow: hidden;
+  color: #65738a;
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-home .counter {
+  display: none;
+  color: #8b97a8;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.composer-home.has-content .counter {
+  display: inline-flex;
 }
 
 .composer-home .primary-icon {
-  margin-left: 2px;
+  margin-left: 0;
+  border: 1px solid transparent;
   background: linear-gradient(145deg, #244aa6, #17346f);
-  box-shadow: 0 8px 18px rgb(30 58 138 / 22%);
+  box-shadow: 0 7px 16px rgb(30 58 138 / 20%);
 }
 
 .composer-home .primary-icon:disabled {
   color: #98a4b5;
-  background: #e9eef5;
+  border-color: #e1e7ef;
+  background: #edf1f6;
   box-shadow: none;
 }
 
@@ -2293,7 +2369,18 @@ main:focus-visible {
 }
 
 :root[data-theme="dark"] .composer-home .composer-toolbar {
-  border-top-color: #2d3b52;
+  border-color: #2d3b52;
+  background: #152238;
+}
+
+:root[data-theme="dark"] .composer-home .composer-meta label {
+  color: #dbe6f8;
+}
+
+:root[data-theme="dark"] .composer-home .composer-meta span,
+:root[data-theme="dark"] .composer-home .policy-line,
+:root[data-theme="dark"] .composer-home .counter {
+  color: #91a0b8;
 }
 
 :root[data-theme="dark"] .composer-home .attachment-plus,
@@ -2512,6 +2599,7 @@ main:focus-visible {
 
   .composer-home .input-wrap {
     border-radius: 18px;
+    padding: 7px;
   }
 
   .composer-home .composer-meta span,
@@ -2521,8 +2609,18 @@ main:focus-visible {
   }
 
   .composer-home .input-wrap textarea {
-    min-height: 84px;
-    padding-inline: 16px;
+    min-height: 62px;
+    padding: 10px 10px 12px;
+  }
+
+  .composer-home .composer-meta {
+    padding: 8px 10px 0;
+  }
+
+  .composer-home .composer-toolbar {
+    min-height: 48px;
+    padding: 5px;
+    border-radius: 14px;
   }
 
   .starter-section-head small {

@@ -1054,7 +1054,7 @@ export function ChatPage({
 
   const renderComposer = (home = false) => (
     <form
-      className={home ? "composer composer-home" : "composer"}
+      className={`${home ? "composer composer-home" : "composer"}${input.trim() || attachments.length ? " has-content" : ""}`}
       aria-busy={Boolean(loadingConversationId)}
       onSubmit={(event) => {
         event.preventDefault();
